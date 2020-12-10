@@ -1,0 +1,158 @@
+---
+title: "P(initial conditions)"
+author: "Corinne"
+date: "3/23/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+root <- 'D:/Research'
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+# require(raster)
+# require(reshape2)
+# require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+# require(stringr)
+# require(ncdf4)
+require(lubridate)
+# require(velox)
+# require(units)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r}
+## drought data: https://droughtmonitor.unl.edu/
+d0 <- read.csv('C:/Users/cbowers/Downloads/dm_export_20000101_20200323.csv')
+d1 <- read.csv('C:/Users/cbowers/Downloads/dm_export_20000101_20200323(1).csv')
+d2 <- read.csv('C:/Users/cbowers/Downloads/dm_export_20000101_20200323(2).csv')
+d3 <- read.csv('C:/Users/cbowers/Downloads/dm_export_20000101_20200323(3).csv')
+d4 <- read.csv('C:/Users/cbowers/Downloads/dm_export_20000101_20200323(4).csv')
+
+d0 <- d0 %>% rename(D0 = AreaCurrentPercent)
+d1 <- d1 %>% rename(D1 = AreaCurrentPercent)
+d2 <- d2 %>% rename(D2 = AreaCurrentPercent)
+d3 <- d3 %>% rename(D3 = AreaCurrentPercent)
+d4 <- d4 %>% rename(D4 = AreaCurrentPercent)
+
+d0 %>% names
+
+drought <- data.frame(expand.grid(date = paste(seq(ymd('2000-01-04'), ymd('2020-03-23'), by = 'week')),
+                                  county = california$NAMELSAD))
+drought <- drought %>% 
+  left_join(d0 %>% select(D0, county = Name, date = MapDate), by = c('date', 'county')) %>%
+  left_join(d1 %>% select(D1, county = Name, date = MapDate), by = c('date', 'county')) %>%
+  left_join(d2 %>% select(D2, county = Name, date = MapDate), by = c('date', 'county')) %>%
+  left_join(d3 %>% select(D3, county = Name, date = MapDate), by = c('date', 'county')) %>%
+  left_join(d4 %>% select(D4, county = Name, date = MapDate), by = c('date', 'county'))
+drought[is.na(drought)] <- 0
+drought$None <- 100 - drought$D0
+drought$date <- ymd(drought$date)
+
+# ## plot drought for every county
+# require(RColorBrewer)
+# for (i in 1:nrow(california)) {
+#   g <- ggplot(data = drought %>% subset(county == california$NAMELSAD[i])) +
+#     geom_line(aes(x = date, y = D0, color = 'D0'), size = 1) +
+#     geom_line(aes(x = date, y = D1, color = 'D1')) +
+#     geom_line(aes(x = date, y = D2, color = 'D2')) +
+#     geom_line(aes(x = date, y = D3, color = 'D3')) +
+#     geom_line(aes(x = date, y = D4, color = 'D4')) +
+#     ggtitle(paste(california$NAMELSAD[i])) +
+#     scale_color_brewer(name = 'Drought Level', palette = 'YlOrRd')
+#   print(g)
+# }
+
+```
+
+```{r}
+## compare drought data to soil moisture
+
+## open soil moisture file
+soil_nc <- nc_open('./_data/soilmoisture/soilw.mon.mean.v2.nc')
+soil_lat <- ncvar_get(soil_nc, 'lat')
+soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+soil <- ncvar_get(soil_nc, 'soilw')
+nc_close(soil_nc)
+
+latlon <- st_centroid(california) %>% st_coordinates %>% as.data.frame
+latlon <- round((latlon + 0.25) * 2) / 2 - 0.25 
+latlon <- latlon %>% cbind(county = california$NAMELSAD)
+
+soil_bycounty <- expand.grid(month = 1:12, year = unique(soil_time$year), county = california$NAMELSAD) %>%
+  full_join(latlon, by = 'county') %>% rename(lon = X, lat = Y)
+soil_bycounty$sm <- NA
+
+## find soil moisture by county, by month
+pb <- txtProgressBar(min = 0, max = nrow(soil_bycounty), style = 3)
+for (i in 1:nrow(soil_bycounty)) {
+  soil_bycounty[i, 'sm'] <- soil[soil_bycounty$lon[i] == soil_lon, 
+                                 soil_bycounty$lat[i] == soil_lat, 
+                                 soil_bycounty$month[i] == soil_time$month & soil_bycounty$year[i] == soil_time$year]
+  setTxtProgressBar(pb, i)
+}
+
+```
+
+```{r}
+## join
+sm_drought <- drought %>%
+  group_by(month = month(date), year = year(date), county) %>%
+  summarize(None = mean(None), D0 = mean(D0), D1 = mean(D1), D2 = mean(D2), D3 = mean(D3), D4 = mean(D4)) %>%
+  inner_join(soil_bycounty %>% select(-lat, -lon), by = c('month', 'year', 'county'))
+
+sm_drought$severity <- apply(sm_drought[,c('D0', 'D1', 'D2', 'D3', 'D4')], 1, sum)
+
+sm_drought$class <- ifelse(sm_drought$D4 > 50, 'D4', 
+                           ifelse(sm_drought$D3 > 50, 'D3', 
+                                  ifelse(sm_drought$D2 > 50, 'D2', 
+                                         ifelse(sm_drought$D1 > 50, 'D1', 
+                                                ifelse(sm_drought$D0 > 50, 'D0', 'None')))))
+sm_drought$class <- forcats::fct_relevel(sm_drought$class, 'None', after = 0)
+
+ggplot(data = sm_drought) + 
+  geom_point(aes(x = sm, y = severity), alpha = 0.15)
+ggplot(data = sm_drought) + 
+  geom_boxplot(aes(x = class, y = sm, fill = class)) + 
+  scale_fill_brewer(name = '', palette = 'YlOrRd') + 
+  ggtitle('Soil Moisture vs. Drought Index') + 
+  labs(x = 'Drought Index', y = 'Soil Moisture') + 
+  # scale_y_log10(minor_breaks = log_breaks(0,3))
+  coord_cartesian(ylim = c(0, 100))
+
+```
+

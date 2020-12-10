@@ -1,0 +1,889 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "8/19/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(dataRetrieval)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) ifelse(is.nan(mean(x, na.rm = TRUE)), NA, mean(x, na.rm = TRUE))
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r import NFIP data}
+## NFIP data
+## redacted claims: https://www.fema.gov/media-library/assets/documents/180374
+## redacted policies: https://www.fema.gov/media-library/assets/documents/180376
+load('./_data/NFIP/NFIP.Rdata')
+# claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+# claims$dateofloss <- ymd(claims$dateofloss)
+claims$counter <- 1
+
+```
+
+```{r assign IVT to claims}
+claims$IVT <- NA
+load('./_data/MERRA/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8) #+ hours(rep(seq(0, 21, 3), length(datelist)))
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+pb <- txtProgressBar(min = 0, max = nrow(claims), style = 3)
+for (i in 1:nrow(claims)) {
+  loc <- toNumber(c(claims[i,'latitude'], claims[i,'longitude']))
+  loc[2] <- round(loc[2]/0.625)*0.625
+  loc[1] <- round(loc[1]/0.5)*0.5
+  
+  claim_period <- claims$dateofloss[i] - days(0)
+  index <- hourlist %in% claim_period
+
+  claims[i, 'IVT'] <- ifelse(sum(index) > 0, max(IVT[LAT == loc[1], LON == loc[2], index]), NA)
+
+  setTxtProgressBar(pb, i)
+}
+
+```
+
+```{r import geometry data}
+## useful geometries
+## data source: see documentation for tigris package
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class = 'sf')
+CT <- tracts(state = 'CA', class = 'sf')
+CT <- merge(CT, data.frame(COUNTYFP = california$COUNTYFP, COUNTYNAME = california$NAME),
+            by = 'COUNTYFP', all.x = TRUE)
+CT$COUNTYID <- toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP)
+CT$GEOID <- toNumber(CT$GEOID)
+
+## add county names to claims
+claims <- merge(claims, data.frame(countycode = 6000 + toNumber(california$COUNTYFP),
+                                   COUNTYNAME = california$NAME), 
+                by = 'countycode', all.x = TRUE)
+
+
+## census tracts for county/counties of interest 
+CT_sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf')
+CT_sonoma$GEOID <- toNumber(CT_sonoma$GEOID)
+CT_sonoma <- CT_sonoma[,c('GEOID', 'ALAND', 'AWATER', 'geometry')]
+claims_sonoma <- claims[claims$censustract %in% CT_sonoma$GEOID,]
+
+CT_aoi <- CT_sonoma
+claims_aoi <- claims_sonoma
+AOI <- 'Sonoma'
+
+# CT_AOI <- c(6097153704, 6097153705, 6097153706, 6097153703)
+# CT_aoi <- CT_sonoma %>% subset(GEOID %in% CT_AOI)
+# claims_aoi <- claims %>% subset(censustract %in% CT_AOI)
+
+```
+
+```{r create AR catalog}
+aoi <- CT_aoi %>% st_union %>% st_sf
+ar.threshold <- 0.5 
+
+## data needed:
+load('D:/Research/_data/grid_catalog.Rdata')  # list of ARs by cell (ar_grid) and a spatial tracker (tracker)
+
+## find which cells cross the area of interest
+tracker.raster <- tracker[,c(2,1,3,4)]
+tracker.raster <- rasterFromXYZ(tracker.raster, crs = st_crs(california)$proj4string) 
+tracker.id <- rasterize(aoi, tracker.raster, getCover = TRUE) %>% 
+  as.data.frame(xy = TRUE) %>% 
+  subset(layer > 0) %>% 
+  left_join(tracker, by = c('x'='lon', 'y'='lat')) %>% 
+  dplyr::select(step) %>% 
+  unlist %>% unname %>% sort
+tracker.id <- tracker.id[!(tracker.id %in% c(827,1185))]  ## these ones cause issues
+
+## identify all AR storms in the region of interest
+storm.df <- data.frame(date = seq(ymd('1980-01-01'), ymd('2019-12-31'), 'days'))
+storm.df[,paste(tracker.id)] <- 0
+hour.df <- storm.df
+for (id in 1:length(tracker.id)) {
+  ar_list <- ar_grid[[tracker.id[id]]]
+  ar_list$total_hours <- (ymd_h(paste(ar_list$end_date, ar_list$end_hour)) -
+                            ymd_h(paste(ar_list$start_date, ar_list$start_hour))) %>% as.numeric(units = 'hours')
+  for (i in 1:nrow(ar_list)) {
+    storm <- seq(ymd(ar_list[i, 'start_date']), ymd(ar_list[i, 'end_date']), 'days')
+    storm.df[storm.df$date %in% storm, id+1] <- ar_list[i, 'IVT_max']
+    hour.df[storm.df$date == storm[1], id+1] <- ar_list[i, 'total_hours']
+  }
+}
+
+## subset to rainy season
+storm.df <- storm.df %>% subset(month(date) %in% c(10:12, 1:3))
+hour.df <- hour.df %>% subset(month(date) %in% c(10:12, 1:3))
+storm.df$storm <- apply(storm.df[,2:(length(tracker.id)+1)], 1, function(x) sum(x > 0))
+# storm.df$storm <- storm.df$`1502`
+
+## number AR storms
+storm.df$ar <- 0
+ar <- 0
+for (i in 2:nrow(storm.df)) {
+  if (storm.df[i, 'storm'] >= length(tracker.id)*ar.threshold) {
+    if (storm.df[i-1, 'storm'] <= length(tracker.id)*ar.threshold) {
+      ar <- ar + 1
+    }
+    storm.df[i, 'ar'] <- ar
+  }
+}
+
+## make a catalog
+catalog <- data.frame(AR = 1:max(storm.df$ar))
+for (ar in 1:max(storm.df$ar)) {
+  catalog$start_day[ar] <- paste(min(ymd(storm.df[storm.df$ar == ar, 'date'])))
+  catalog$end_day[ar] <- paste(max(ymd(storm.df[storm.df$ar == ar, 'date'])))
+  catalog$IVT_max[ar] <- max(storm.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)])
+  catalog$duration[ar] <- max(apply(hour.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)], 2, sum))
+  # catalog$duration[ar] <- sum(hour.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)])
+}
+
+```
+
+```{r}
+## get daily precip by CT for the length of the record
+
+# datelist <- seq(ymd('1979-01-01'), ymd('2019-12-31'), 'days')
+# precip <- cbind(date = paste(datelist), matrix(nrow = length(datelist), ncol = nrow(CT_sonoma))) %>% as.data.frame
+# names(precip)[-1] <- CT_sonoma$GEOID
+# precip[,-1] <- apply(precip[,-1], 2, as.numeric)
+# 
+# pb <- txtProgressBar(min = 0, max = length(datelist), style = 3)
+# for (i in 1:length(datelist)) {
+#   d <- datelist[i]
+#   cpc_precip <- cpc_prcp(d)
+#   cpc_precip$lon <- cpc_precip$lon-360
+#   cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = st_crs(california)$proj4string))
+#   precip[i,-1] <- velox(cpc_precip)$extract(CT_sonoma, small = TRUE) %>% lapply(mean) %>% unlist
+#   setTxtProgressBar(pb, i)
+# }
+
+load('./_data/daily_precip_by_CT.Rdata')
+
+```
+
+```{r}
+## find the claims associated with each storm by CT
+df <- data.frame(FIPS = CT_aoi$GEOID)
+pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+for (i in 1:nrow(catalog)) {
+  ## find storm claims by CT
+  df_claims <- claims %>% 
+    subset(COUNTYNAME == 'Sonoma') %>% 
+    subset(ymd(dateofloss) >= ymd(catalog$start_day[i])-days(1) & 
+             ymd(dateofloss) <= ymd(catalog$end_day[i])+days(1)) %>%
+    group_by(censustract) %>%
+    summarize(num_claims = length(amountpaidonbuildingclaim))
+  names(df_claims) <- c('FIPS', paste('storm', i, sep = '.'))
+  df <- merge(df, df_claims, by = 'FIPS', all.x = TRUE)
+  
+  setTxtProgressBar(pb, i)
+}
+df[is.na(df)] <- 0
+df$storm.total <- rowSums(df[,-1])
+df$storm.count <- rowSums(df[,!(names(df) %in% c('FIPS','storm.total'))] != 0)
+
+```
+
+```{r}
+## filter out CTs with insufficient ARs
+threshold <- 2
+
+CT_plot <- merge(CT_aoi, df, by.x = 'GEOID', by.y = 'FIPS', all.x = TRUE)
+ggplot() + 
+  geom_sf(data = CT_plot %>% 
+            subset(toNumber(GEOID) != 6097990100) %>% 
+            subset(storm.count > 0), aes(fill = storm.count), color = NA) + 
+  geom_sf(data = CT_plot %>% subset(toNumber(GEOID) != 6097990100), fill = NA, color = 'gray35') +
+  # scale_fill_viridis_c(name = 'Number of \nDamaging ARs', na.value = NA, option = 'magma') +
+  scale_fill_distiller(name = 'Number of \nDamaging ARs', palette = 'OrRd', direction = 1) + 
+  ggtitle('Number of Storms Affecting Each CT (1979-2018)') + 
+  theme_void()
+ggsave('./_plots/quals/slide38_fig1.jpg', width = 5, height = 5)
+CT_subset <- CT_aoi %>% 
+  subset(GEOID %in% df[df$storm.count >= threshold, 'FIPS'])
+
+## filter out ARs with <2 claims
+AR_subset <- df %>% 
+  dplyr::select(-FIPS, -storm.total, -storm.count) %>% 
+  apply(2, function(x) sum(x) >= threshold) %>% 
+  subset(catalog, .)
+
+AR_subset$start_day <- ymd(AR_subset$start_day)
+AR_subset$end_day <- ymd(AR_subset$end_day)
+AR_subset$year <- year(AR_subset$start_day)
+AR_subset$wateryear <- AR_subset$year + ifelse(month(AR_subset$start_day) %in% 10:12, 1, 0)
+
+nrow(AR_subset) * nrow(CT_subset)
+
+```
+
+
+## TIME & LOCATION VARIABLES
+
+```{r get hazard array}
+variables <- c('FIPS', 'precip.total', 'precip.max', 'days.max', 'precip.prevweek', 'precip.prevmonth', 
+               'precip.season', 'soilmoisture', 'num_claims', 'value_claims', 'payout')
+
+## initialize matrices
+CT_centroid <- CT_subset %>%
+  st_transform(crs = albers) %>%
+  st_centroid() %>%
+  st_transform(crs = NAD) %>%
+  dplyr::select(GEOID, ALAND, AWATER, geometry)
+hazard <- array(data = 0, dim = c(nrow(CT_subset), length(variables), nrow(AR_subset)),
+                dimnames = list(paste('CT', 1:nrow(CT_subset), sep = '.'), variables,
+                                paste('AR', 1:nrow(AR_subset), sep = '.')))
+
+## open soil moisture file
+soil_nc <- nc_open('./_data/soilmoisture/NOAA/soilw.mon.mean.v2.nc')
+soil_lat <- ncvar_get(soil_nc, 'lat')
+soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+soil <- ncvar_get(soil_nc, 'soilw')
+nc_close(soil_nc)
+
+timer <- Sys.time()
+pb <- txtProgressBar(min = 0, max = nrow(AR_subset), style = 3)
+setTxtProgressBar(pb, 0)
+for (ar in 1:nrow(AR_subset)) {
+  ## define input variables
+  start <- AR_subset$start_day[ar] - days(1)
+  end <- AR_subset$end_day[ar] + days(1)
+  yr <- AR_subset$year[ar]
+  wy <- AR_subset$wateryear[ar]
+  
+  ## set up dataframe
+  df_aoi <- data.frame(GEOID = st_drop_geometry(CT_subset)$GEOID)
+  
+  ## storm total/max rainfall
+  storm <- seq(start, end, 'days')
+  precip.storm <- precip %>% 
+    subset(paste(date) %in% paste(storm)) %>% 
+    dplyr::select(-date) %>% 
+    dplyr::select(match(df_aoi$GEOID, names(.)))
+  df_aoi$precip.total <- apply(precip.storm, 2, sum)
+  df_aoi$precip.max <- apply(precip.storm, 2, max)
+
+  ## max storm length (consecutive days of rainfall)
+  df_aoi$days.max <- apply(precip.storm, 2, function(x) sum(x > 0))
+
+  ## cumulative rainfall at various points
+  prevweek <- seq(start - days(7), start - days(1), 'days')
+  df_aoi$precip.prevweek <- precip %>% 
+    subset(paste(date) %in% paste(prevweek)) %>% 
+    dplyr::select(-date) %>% 
+    dplyr::select(match(df_aoi$GEOID, names(.))) %>% 
+    apply(2, sum)
+  prevmonth <-  seq(start - days(31), start - days(1), 'days')
+  df_aoi$precip.prevmonth <- precip %>% 
+    subset(paste(date) %in% paste(prevmonth)) %>% 
+    dplyr::select(-date) %>% 
+    dplyr::select(match(df_aoi$GEOID, names(.))) %>% 
+    apply(2, sum)
+  season <- seq(ymd(paste(wy-1, 9, 30)), start, 'days')
+  df_aoi$precip.season <- precip %>% 
+    subset(paste(date) %in% paste(season)) %>% 
+    dplyr::select(-date) %>% 
+    dplyr::select(match(df_aoi$GEOID, names(.))) %>% 
+    apply(2, sum)
+  
+  ## soil moisture
+  SM_stack <- raster::stack()
+  monthrecord <- ifelse(month(start) <= month(end),
+                        length(month(start):month(end)),
+                        length((month(start)-12):month(end))) - 1
+  startmonth <- ymd(paste(year(start), month(start), '1', sep = '-'))
+
+  ## data source: https://www.esrl.noaa.gov/psd/data/gridded/data.cpcsoil.html (simulated product)
+  for (i in 0:monthrecord) {
+    mo <- month(startmonth + months(i))
+    yr <- year(startmonth + months(i))
+    index <- (1:nrow(soil_time))[soil_time$month == mo & soil_time$year == yr]
+    SM_raster <- raster(t(soil[,,index]), xmn = min(soil_lon), xmx = max(soil_lon), 
+                        ymn = min(soil_lat), ymx = max(soil_lat))
+    SM_stack <- raster::stack(SM_stack, SM_raster)
+  }
+  SM_avg <- mean(SM_stack)
+  crs(SM_avg) <- projection(california)
+  df_aoi$soilmoisture <- velox(SM_avg)$extract(CT_subset, small = TRUE) %>% lapply(mean) %>% unlist
+  
+  ## add damage data
+  df_aoi <- claims %>%
+    subset(COUNTYNAME == 'Sonoma') %>% 
+    subset(date(dateofloss) >= start & date(dateofloss) <= end) %>%
+    group_by(GEOID = censustract) %>%
+    summarize(num_claims = Sum(counter), 
+              value_claims = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim), 
+              payout = value_claims / (Sum(totalbuildinginsurancecoverage) + Sum(totalcontentsinsurancecoverage))) %>% 
+    left_join(df_aoi, ., by = 'GEOID')
+  for (column in c('num_claims', 'value_claims')) {
+    df_aoi[[column]][is.na(df_aoi[[column]])] <- 0
+  }
+  
+  ## write out to larger array
+  hazard[,,ar] <- data.matrix(df_aoi)
+  
+  ## update progress bar
+  setTxtProgressBar(pb, ar)
+}
+close(pb)
+Sys.time() - timer
+
+```
+
+
+## LOCATION VARIABLES
+
+```{r}
+#### land use/land cover
+## source: https://www.mrlc.gov/
+## import raster
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img')
+## export % of each land cover by CT
+lulc_att <- lulc@data@attributes[[1]]
+rbind.fill <- function(x) {
+  name <- sapply(x, names)
+  uname <- unique(unlist(name))
+  lulc_name <- lulc_att[toNumber(uname)+1, 'NLCD.Land.Cover.Class']
+  len <- sapply(x, length)
+  out <- vector("list", length(len))
+    for (i in seq_along(len)) {
+      out[[i]] <- unname(x[[i]])[match(uname, name[[i]])]
+    }
+  setNames(as.data.frame(do.call(rbind, out), stringsAsFactors=FALSE), make.names(lulc_name))
+}
+aoi_crop <- st_transform(st_transform(CT_aoi, albers), proj4string(lulc))
+temp <- extract(lulc, aoi_crop)
+temp <- lapply(temp, function(x) prop.table(table(x)))
+lulc_df <- rbind.fill(temp)
+## convert land covers to % developed
+temp <- data.frame(GEOID = CT_aoi$GEOID, developed = apply(lulc_df[,2:5], 1, Sum))
+CT_centroid <- merge(CT_centroid, temp, by = 'GEOID', all.x = TRUE)
+
+
+#### imperviousness
+## source: https://www.mrlc.gov/
+imperv <- raster('./_gis/USA/_landcover/NLCD_2016_Impervious_L48_20190405/NLCD_2016_Impervious_L48_20190405.img')
+temp <- data.frame(GEOID = CT_aoi$GEOID, impervious = extract(imperv, aoi_crop, mean)/100)
+CT_centroid <- merge(CT_centroid, temp, by = 'GEOID', all.x = TRUE)
+
+
+#### percent within floodplain
+## source: https://catalog.data.gov/dataset/national-flood-hazard-layer-nfhl
+NFHL <- st_read('./_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp')
+NFHL <- st_transform(NFHL, albers)
+## add a floodplain column to NFHL
+floodzone <- function(x) {
+  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO', 'V', 'VE')) {
+    return('YES')
+  } else if (x %in% c('D', 'X')) {
+    return('NO')
+  } else if (x == 'OPEN WATER') {
+    return('WATER')
+  } else {
+    return(NA)
+  }
+}
+NFHL$FLOODPLAIN <- factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))
+## divide area within floodplain by total area
+floodplain <- st_intersection(st_transform(CT_aoi, albers), st_buffer(NFHL, 0)) 
+floodplain <- floodplain %>%
+  mutate(part_area = st_area(floodplain)) %>%
+  group_by(FLOODPLAIN, GEOID) %>%
+  st_buffer(dist = 0) %>%
+  summarize(part_area = Sum(part_area))
+temp <- merge(data.frame(GEOID = CT_aoi$GEOID, total_area = st_area(CT_aoi)), 
+              st_drop_geometry(floodplain), by = 'GEOID', all.x = TRUE)
+temp <- temp %>%
+  filter(FLOODPLAIN == 'YES') %>%
+  mutate(pct_floodplain = toNumber(part_area/total_area))
+CT_centroid <- merge(CT_centroid, temp[,c('GEOID', 'pct_floodplain')], all.x = TRUE)
+CT_centroid$pct_floodplain[is.na(CT_centroid$pct_floodplain)] <- 0
+
+
+#### r distance from the river
+## river data: https://data.cnra.ca.gov/dataset/national-hydrography-dataset-nhd
+russian <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>%
+  subset(grepl('Russian', GNIS_Name)) %>%
+  st_zm %>%
+  # st_transform(st_crs(CT_sonoma)) %>%
+  # st_intersection(st_union(CT_sonoma)) %>%
+  st_transform(albers)
+
+## find the minimum distance to any major river for each CT
+CT_centroid$DIST <- apply(drop_units(st_distance(x = st_transform(CT_centroid, albers), y = russian)),
+                          1, min) / 1609.34  #converting meters to miles
+
+
+#### elevation
+## data source: see documentation for elevatr package
+CT_centroid <- get_elev_point(CT_centroid) #elevation data
+
+
+#### population
+## American Community Survey data: ACS Table ID DP05 (2018 estimates)
+population <- read.csv('./_data/ACS/ACS_population.csv', strip.white = TRUE)
+population <- population[-(1:2),]
+population_metadata <- read.csv('./_data/ACS/ACS_population_metadata.csv')
+CT_centroid <- merge(CT_centroid, 
+                     data.frame(GEOID = toNumber(population$GEO.id2), pop = toNumber(population$HC01_VC03)),
+                     by = 'GEOID', all.x = TRUE)
+
+
+#### SFH
+## American Community Survey data: ACS Table ID DP04 (2017 estimates)
+housing <- read.csv('./_data/ACS/ACS_housing.csv', strip.white = TRUE)
+housing_metadata <- read.csv('./_data/ACS/ACS_housing_metadata.csv')
+
+CT_centroid <- merge(CT_centroid, 
+                     data.frame(GEOID = housing$GEO.id2, HOUSES = housing$HC01_VC03, SFH = housing$HC01_VC14), 
+                     by = 'GEOID', all.x = TRUE)
+
+```
+
+
+## TIME VARIABLES
+
+```{r}
+#### set up dataframe
+df_time <- data.frame(DATE = seq(ymd('1975-01-01'), ymd('2019-12-31'), 'days'))
+df_time$YEAR <- year(df_time$DATE)
+df_time$MONTH <- month(df_time$DATE)
+
+
+####  PDO & ENSO
+load('./_data/PDO_ENSO.Rdata')
+df_time <- merge(df_time, PDO, by = c('YEAR', 'MONTH'), all.x = TRUE)
+df_time <- merge(df_time, ENSO, by = c('YEAR', 'MONTH'), all.x = TRUE)
+
+
+#### days since start of rainy season
+df_time$WATERYEAR <- ifelse(df_time$MONTH %in% 10:12, df_time$YEAR + 1, df_time$YEAR)
+df_time$rainyseason <- toNumber(df_time$DATE - ymd(paste(df_time$WATERYEAR-1, '-10-1', sep = '')) )
+
+
+#### runoff
+## decide which USGS gauges are most representative of flows in the study area
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv') %>%
+  subset(str_length(paste(site_no)) == 8) %>%
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california)) %>%
+  st_intersection(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))) %>%
+  subset(grepl('RUSSIAN', station_nm)) %>%
+  st_intersection(california %>% subset(NAME == 'Sonoma')) %>%  #subset to gauges below reservoirs
+  # subset(site_no != 11457002) %>%  #subset to gauges with cfs only
+  subset(!(site_no %in% c(11463980, 11465390)))  #keep gauges with long records only
+sites <- sites %>% subset(site_no %in% c(11464000, 11467000))
+site.runoff <- readNWISdv(sites$site_no, parameterCd = param, statCd = statcode, startDate = '1979-01-01') %>% 
+  renameNWISColumns() %>% 
+  full_join(readNWISsite(sites$site_no), by = 'site_no') %>% 
+  mutate(Runoff_mmday = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) %>% 
+  group_by(Date) %>% 
+  summarize(Runoff_mmday = Mean(Runoff_mmday))
+## merge with df_time
+df_time <- df_time %>% full_join(site.runoff, by = c('DATE' = 'Date'))
+
+
+#### CRS
+load('./_data/CRS FOIA/crs_merged.Rdata')
+## no values for Sonoma -> move on
+
+```
+
+```{r transfer time information to ARs}
+time_subset <- data.frame(number = paste('AR', 1:nrow(AR_subset), sep = '.'))
+
+for (ar in 1:nrow(AR_subset)) {
+  ## define input variables
+  start <- AR_subset$start[ar] - days(1)
+  end <- AR_subset$end[ar] + days(1)
+  yr <- AR_subset$wateryear[ar]
+  
+  ## record time indicators
+  time_subset$wateryear[ar] <- ifelse(month(start) %in% 10:12, year(start)+1, year(start))
+  
+  ## get variables within AR timespan
+  df_time_start <- df_time %>% subset(DATE == start)
+  df_time_subset <- df_time %>% subset(DATE >= start & DATE <= end)
+  
+  ## assign variables to ARs
+  time_subset$PDO[ar] <- Mean(toNumber(df_time_subset$PDO))
+  time_subset$ENSO[ar] <- Mean(toNumber(df_time_subset$ENSO))
+  time_subset$rainyseason[ar] <- df_time_start$rainyseason
+
+  ## assign runoff variables to ARs
+  time_subset$runoff.total[ar] <- Sum(df_time_subset$Runoff_mmday)
+  time_subset$runoff.max[ar] <- Max(df_time_subset$Runoff_mmday)
+}
+
+```
+
+
+## REGRESSION ANALYSIS
+
+```{r reshape into dataframe}
+hazard.df <- dcast(data = melt(hazard), Var1 + Var3 ~ Var2) 
+hazard.df <- merge(hazard.df, st_drop_geometry(CT_centroid),
+                   by.x = 'FIPS', by.y = 'GEOID', all.x = TRUE)
+hazard.df <- merge(hazard.df, time_subset,
+                   by.x = 'Var3', by.y = 'number', all.x = TRUE)
+
+## clean up dataframe
+hazard.df <- hazard.df %>%
+  rename(AR = Var3, GEOID = FIPS) %>%
+  dplyr::select(-Var1)
+
+save(hazard.df, file = './_data/hazard_df_0915.Rdata')
+
+```
+
+```{r}
+hazard.corr <- hazard.df %>% 
+  select(-AR, -GEOID, -elev_units, -num_claims, -value_claims, -payout)
+hazard.corr[is.na(hazard.corr$PDO), 'PDO'] <- 0
+
+names(hazard.corr)
+
+c('precip.max', 'precip.total', 'runoff.max', 'runoff.total', 'days.max', 'ENSO', 'PDO') %>% length
+c('DIST', 'impervious', 'developed', 'pct_floodplain', 'ALAND', 'AWATER', 'soilmoisture', 'SFH', 'HOUSES', 'pop', 'precip.prevweek', 'precip.prevmonth', 'precip.season', 'rainyseason', 'elevation') %>% length
+c('wateryear')
+
+## IVT
+## FEMA HMG
+## vulnerable: elderly, ESL, income
+
+claims_aoi %>% 
+  group_by(GEOID = toNumber(censustract)) %>% 
+  summarize(avg.claims = Sum(counter)/40) %>% View
+
+sum(is.na(claims$basefloodelevation))/nrow(claims)
+
+require(GGally)
+ggpairs(hazard.df[,-(1:2)], progress = FALSE)
+
+require(corrplot)
+jpeg('./test.jpg', width = 8, height = 8, units = 'in', res = 72)
+cor(hazard.corr) %>% corrplot(method = 'color', type = 'upper', 
+                              diag = TRUE, 
+                              order = 'FPC', 
+                              tl.col = 'grey30', addgrid.col = 'grey90')
+
+```
+
+
+## regressions
+```{r}
+hazard.df <- hazard.df %>% 
+  dplyr::select(-AR, -elev_units, -num_claims, -value_claims) %>% 
+  dplyr::select(-GEOID, -PDO)
+hazard.df$payout <- ifelse(is.na(hazard.df$payout), 0, hazard.df$payout)
+
+hazard.df <- hazard.df %>% 
+  select(wateryear, precip.max, AWATER, developed, pct_floodplain, 
+         elevation, pop, HOUSES, ENSO, runoff.total, payout) %>% 
+  mutate(payout = ifelse(payout > 0, 'Yes', 'No')) %>% 
+  mutate(payout = factor(ifelse(is.na(payout), 'No', payout))) 
+
+# hazard.df <- hazard.df %>% subset(payout > 0)
+hazard.df %>% 
+  group_by(wateryear) %>% 
+  summarize(x = length(wateryear)/nrow(.)) %>% 
+  mutate(x = cumsum(x)) %>% 
+  subset(x > 0.8)
+train <- which(hazard.df$wateryear <= 2008)
+hazard.df <- hazard.df %>% select(-wateryear)
+
+hazard.train <- hazard.df[train,]
+hazard.test <- hazard.df[-train,]
+
+sum(hazard.df$payout == 'No') / nrow(hazard.df)
+
+require(caret)
+ctrl <- trainControl(method = 'repeatedcv', number = 10, repeats = 5)
+
+```
+
+
+```{r}
+## register parallel backend
+require(parallel)
+require(foreach)
+require(doParallel)
+
+registerDoParallel(6)
+getDoParWorkers()
+
+
+## elastic net
+f.net <- train(payout ~ ., data = hazard.train, method = 'glmnet',
+               family = 'binomial',
+               tuneGrid = expand.grid(alpha = seq(0.8, 1, 0.02),
+                                      lambda = 10^seq(-5, -1, length.out = 100)),
+               trControl = ctrl)
+save(f.net, file = './models/f.net.Rdata')
+
+
+## MARS
+f.mars <- train(payout ~ ., data = hazard.train, method = 'earth',
+                tuneGrid = expand.grid(degree = 1:4, 
+                                       nprune = seq(2, 22, 2)), 
+                trControl = ctrl) 
+save(f.mars, file = './models/f.mars.Rdata')
+
+## random forest
+f.rf <- train(payout ~ ., data = hazard.train, method = 'parRF',
+              tuneGrid = expand.grid(mtry = seq(2, 22, 2)),
+              trControl = ctrl)
+save(f.rf, file = './models/f.rf.Rdata')
+
+
+## boosted trees
+f.boost <- train(payout ~ ., data = hazard.train, method = 'gbm', 
+                 # distribution = 'binomial', verbose = FALSE,
+                 tuneGrid = expand.grid(n.trees = c(100, 500, 1000),
+                                        interaction.depth = 1:3,
+                                        shrinkage = 10^seq(-5, -1, length.out = 50), 
+                                        n.minobsinnode = 10),
+                 trControl = ctrl)
+save(f.boost, file = './models/f.boost.Rdata')
+
+stopImplicitCluster()
+
+```
+
+```{r}
+# load('./models/sonoma/f.net.Rdata')
+# load('./models/sonoma/f.mars.Rdata')
+# load('./models/sonoma/f.rf.Rdata')
+# load('./models/sonoma/f.boost.Rdata')
+
+MSE <- function(y_pred, y_true) mean((y_pred - y_true)^2)
+
+predictions <- data.frame(net = predict(f.net, hazard.test), 
+                          mars = predict(f.mars, hazard.test) %>% unname, 
+                          rf = predict(f.rf, hazard.test), 
+                          boost = predict(f.boost, hazard.test))
+
+g1 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = net), color = ggcolor(4)[1]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(net))), linetype = 'dashed') + 
+  ggtitle('Elastic Net') +
+  theme_classic() + theme(axis.title = element_blank()) + 
+  lims(x = c(min(min(hazard.test$payout), min(predictions$net)), 
+             max(max(hazard.test$payout), max(predictions$net))), 
+       y = c(min(min(hazard.test$payout), min(predictions$net)), 
+             max(max(hazard.test$payout), max(predictions$net)))) +
+  coord_fixed(ratio = 1)
+g2 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = mars), color = ggcolor(4)[2]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(mars))), linetype = 'dashed') + 
+  ggtitle('MARS') + 
+  theme_classic() + theme(axis.title = element_blank()) +  
+  lims(x = c(min(min(hazard.test$payout), min(predictions$mars)), 
+             max(max(hazard.test$payout), max(predictions$mars))), 
+       y = c(min(min(hazard.test$payout), min(predictions$mars)), 
+             max(max(hazard.test$payout), max(predictions$mars)))) +
+  coord_fixed(ratio = 1)
+g3 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = rf), color = ggcolor(4)[3]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(rf))), linetype = 'dashed') + 
+  ggtitle('Random Forest') + 
+  theme_classic() + theme(axis.title = element_blank()) +  
+  lims(x = c(min(min(hazard.test$payout), min(predictions$rf)), 
+             max(max(hazard.test$payout), max(predictions$rf))), 
+       y = c(min(min(hazard.test$payout), min(predictions$rf)), 
+             max(max(hazard.test$payout), max(predictions$rf)))) +
+  coord_fixed(ratio = 1)
+g4 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = boost), color = ggcolor(4)[4]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(boost))), linetype = 'dashed') + 
+  ggtitle('Boosted Trees') +
+  theme_classic() + theme(axis.title = element_blank()) +  
+  lims(x = c(min(min(hazard.test$payout), min(predictions$boost)), 
+             max(max(hazard.test$payout), max(predictions$boost))), 
+       y = c(min(min(hazard.test$payout), min(predictions$boost)), 
+             max(max(hazard.test$payout), max(predictions$boost)))) +
+  coord_fixed(ratio = 1)
+gridExtra::grid.arrange(g1, g2, g3, g4, ncol = 2)
+
+ggplot(data = data.frame(model = c('Elastic Net', 'MARS', 'Random Forest', 'Boosted Trees'), 
+                         error = apply(predictions, 2, function(x) MSE(x, hazard.test$payout)))) + 
+  geom_col(aes(x = model, y = error), color = 'black', fill = 'grey90') + 
+  geom_hline(yintercept = MSE(0, hazard.test$payout), color = 'red') + 
+  scale_y_continuous(expand = c(0,0)) + 
+  ggtitle('Model RMSE Comparison') + 
+  theme_classic() + 
+  theme(axis.title = element_blank(),
+        panel.grid.major.y = element_line(color = 'grey75', linetype = 'dashed'))
+ggsave('./_plots/quals/slide33_fig1.jpg', width = 5, height = 5)
+
+ggplot(f.net$results) + 
+  geom_line(aes(x = lambda, y = RMSE, group = factor(alpha), color = factor(alpha))) + 
+  scale_x_log10()
+plot(f.mars)
+plot(f.rf)
+ggplot(f.boost$results) + 
+  geom_line(aes(x = shrinkage, y = RMSE, group = factor(n.trees), color = factor(n.trees))) + 
+  scale_x_log10() + 
+  # scale_y_continuous(limits = c(NA, .1)) + 
+  facet_wrap(~ interaction.depth)
+
+```
+
+```{r}
+## repeat the above, but for classification
+
+## calculate ROC curve
+index <- seq(0, 1, 0.01)
+ROC_sens <- data.frame(matrix(nrow = length(index), ncol = 0))
+ROC_spec <- data.frame(matrix(nrow = length(index), ncol = 0))
+y.true <- factor(as.numeric(hazard.test$payout)-1)
+
+predictions.prob <- data.frame(
+  net = predict(f.net, hazard.test, type = 'prob')$Yes, 
+  mars = predict(f.mars, hazard.test, type = 'prob')$Yes, 
+  rf = predict(f.rf, hazard.test, type = 'prob')$Yes, 
+  boost = predict(f.boost, hazard.test, type = 'prob')$Yes)
+for (id in 1:length(index)) {
+  i <- index[id]
+  ROC_sens$net[id] <- 
+    confusionMatrix(factor(ifelse(predictions.prob$net > i, 1, 0)), y.true)$byClass['Sensitivity']
+  ROC_spec$net[id] <- 
+    1 - confusionMatrix(factor(ifelse(predictions.prob$net > i, 1, 0)), y.true)$byClass['Specificity']
+ 
+  ROC_sens$mars[id] <- 
+    confusionMatrix(factor(ifelse(predictions.prob$mars > i, 1, 0)), y.true)$byClass['Sensitivity']
+  ROC_spec$mars[id] <- 
+    1 - confusionMatrix(factor(ifelse(predictions.prob$mars > i, 1, 0)), y.true)$byClass['Specificity']
+  
+  ROC_sens$rf[id] <- 
+    confusionMatrix(factor(ifelse(predictions.prob$rf > i, 1, 0)), y.true)$byClass['Sensitivity']
+  ROC_spec$rf[id] <- 
+    1 - confusionMatrix(factor(ifelse(predictions.prob$rf > i, 1, 0)), y.true)$byClass['Specificity']
+  
+  ROC_sens$boost[id] <- 
+    confusionMatrix(factor(ifelse(predictions.prob$boost > i, 1, 0)), y.true)$byClass['Sensitivity']
+  ROC_spec$boost[id] <- 
+    1 - confusionMatrix(factor(ifelse(predictions.prob$boost > i, 1, 0)), y.true)$byClass['Specificity']
+}
+
+ggplot() + 
+  geom_step(aes(x = ROC_spec$net, y = ROC_sens$net, color = 'net'), size = 1) +
+  geom_step(aes(x = ROC_spec$mars, y = ROC_sens$mars, color = 'mars'), size = 0.5) +
+  geom_step(aes(x = ROC_spec$rf, y = ROC_sens$rf, color = 'rf'), size = 0.5) +
+  geom_step(aes(x = ROC_spec$boost, y = ROC_sens$boost, color = 'boost'), size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  ggtitle('ROC Curve') + 
+  labs(x = '1 - Specificity (FN)', y = 'Sensitivity (FP)', color = 'Model') + 
+  scale_x_continuous(expand = c(0.001,0.001)) + scale_y_continuous(expand = c(0.001,0.001)) + 
+  scale_color_brewer(palette = 'Paired') + 
+  # scale_color_manual(values = RColorBrewer::brewer.pal(4, 'Paired')[c(1,2,7,8)]) + 
+  coord_fixed(ratio = 1) + 
+  theme(panel.border = element_blank(), 
+        axis.line = element_line(color = 'black'),
+        panel.grid.major.x = element_line(color = 'gray95'))
+  
+## calculate prediction accuracy
+predictions.class <- data.frame(
+  net = predict(f.net, hazard.test), 
+  mars = predict(f.mars, hazard.test), 
+  rf = predict(f.rf, hazard.test), 
+  boost = predict(f.boost, hazard.test))
+
+TP <- apply(predictions.class, 2, 
+            function(x) x == hazard.test$payout & hazard.test$payout == 'Yes') %>% apply(2, sum)
+FN <- apply(predictions.class, 2, 
+            function(x) x != hazard.test$payout & hazard.test$payout == 'Yes') %>% apply(2, sum)
+FP <- apply(predictions.class, 2, 
+            function(x) x != hazard.test$payout & hazard.test$payout == 'No') %>% apply(2, sum)
+TP / (TP + FP + FN)
+## of the times that damages occur, this is the percentage that we're getting right
+
+```
+
+```{r}
+## variable importance metrics
+jpeg('D:/Research/_plots/varimp.jpg', width = 4, height = 5, units = 'in', res = 144)
+plot(varImp(f.rf))
+
+partials <- list()
+for (i in 1:length(var.names)) {
+  partials[[i]] <- partialPlot(f.rf$finalModel, hazard.train, which.class = 'Yes', 
+                               x.var = var.names[i], n.pt = 100, plot = FALSE) %>%
+    do.call('cbind', .)
+}
+
+require(grid)
+require(gridExtra)
+for (i in 1:length(var.names)) {
+  g <- ggplot() + 
+    geom_smooth(data = data.frame(partials[[i]]), aes(x = x, y = y),
+                method = 'loess', span = 0.25, level = 0.95,
+                color = 'black', fill = 'grey80', size = 0.6) + 
+    geom_rug(data = data.frame(data = hazard.train[,var.names[i]]), aes(x = data)) +
+    labs(x = var.names[i]) +
+    scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0.1,0.1)) + 
+    theme_classic() + 
+    theme(plot.margin = ggplot2::margin(1, 10, 1, 10),
+          axis.title.y = element_blank(),
+          axis.line = element_line(color = 'grey50'),
+          axis.ticks = element_line(color = 'grey50'))
+  assign(paste0('g', i), g)
+}
+jpeg('D:/Research/_plots/partialdependence.jpg', width = 6, height = 5, units = 'in', res = 144)
+grid.arrange(g1, g2, g3, g4, g5, g6, g7, g8, g9, nrow = 3, 
+             top = textGrob(expression(bold('Partial Dependence Plots')), 
+                            vjust = 0.25, gp = gpar(cex = 1.1)))
+
+
+
+```
+

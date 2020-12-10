@@ -1,0 +1,313 @@
+---
+title: "correlations within hazard.df"
+author: "Corinne"
+date: "2/13/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages}
+require(caret)
+require(leaps)
+require(MASS)
+
+```
+
+load in hazard.df
+```{r}
+load('./_scripts/hazard_wbd_sonoma.Rdata')
+hazard.df <- hazard.df.save
+
+```
+
+
+look at correlations
+```{r}
+## look at histograms
+for (col in names(hazard.df)[-(1:2)]) {
+  g <- ggplot(data = hazard.df) + 
+    geom_density(aes(x = get(col))) + 
+    labs(x = col)
+  print(g)
+}
+
+## look at scatterplots
+for (col in names(hazard.df)[-(1:2)]) {
+  g <- ggplot(data = hazard.df) + 
+    geom_point(aes(x = get(col), y = damage_cap), size = 2) + 
+    scale_y_log10(minor_breaks = log_breaks(0,5)) +
+    labs(x = col)
+  print(g)
+}
+
+```
+
+```{r get R squared}
+hazard.df <- hazard.df.save
+
+hazard.df$logdamage <- log(hazard.df$damage)
+hazard.df$logdamage[!is.finite(hazard.df$logdamage)] <- 0
+hazard.df <- hazard.df %>% 
+  select(AR, HUC10, rain_storm, rain_prevweek, rain_prevmonth, rain_season, #rain_max, 
+         days_max, soilmoisture, developed, impervious, pct_floodplain, DIST, elevation,
+         PDO, ENSO, rainyseason, landfall, logdamage) %>%
+  subset(complete.cases(rain_storm))
+
+## look at individual predictors
+R2 <- c()
+for (col in names(hazard.df)[-c(1:2,ncol(hazard.df))]) {
+  f <- lm(logdamage ~ get(col), data = hazard.df)
+  R2[which(names(hazard.df) %in% col)-2] <- summary(f)['r.squared'] %>% unlist
+}
+names(R2) <- names(hazard.df)[-c(1:2,ncol(hazard.df))]
+
+ggplot(data = data.frame(x = names(R2), y = R2)) + 
+  geom_col(aes(x=x, y=y), color = 'black', fill = 'gray78') + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  ggtitle('Univariate Regression Results') + 
+  labs(x = 'Regression Variable', y = latex2exp::TeX('Univariate R^2'))
+
+```
+
+```{r}
+x.glm <- hazard.df %>% select(-AR, -HUC6, -HUC8, -HUC10, -logdamage) %>% as.matrix
+y.glm <- hazard.df %>% select(logdamage) %>% unlist 
+
+require(glmnet)
+fit.lasso <- glmnet(x.glm, y.glm, family = 'gaussian', alpha = 1)
+# fit.lasso$beta
+
+fit.lasso.cv <- cv.glmnet(x.glm, y.glm, type.measure = 'mse', alpha = 1, family = 'gaussian')
+fit.lasso.cv$lambda
+fit.lasso.cv$cvm
+
+
+plot(fit.lasso.cv$cvm)
+```
+
+```{r run regression eqs}
+
+require(lfe)
+
+hazard.df$HUC8 <- floor(hazard.df$HUC10 / 100)
+hazard.df$HUC6 <- floor(hazard.df$HUC8 / 100)
+
+table(hazard.df$HUC8)
+table(hazard.df$HUC6)
+
+f <- felm(logdamage ~ rain_storm + rain_prevweek + days_max + developed + impervious + pct_floodplain + factor(HUC8), data = hazard.df)
+summary(f)
+
+
+
+# pca <- princomp(hazard.df %>% dplyr::select(rain_storm, rain_prevweek, rain_prevmonth, rain_season, rain_max))
+summary(pca)
+pca$loadings
+pca$sdev
+pca$center
+
+
+f <- lm(logdamage ~ rain_storm, data = hazard.df)
+summary(f)
+
+## MASS library
+full.model <- lm(logdamage ~ . - AR - HUC10, data = hazard.df)
+step.model <- stepAIC(full.model, direction = 'forward')
+summary(step.model)
+
+## leaps library
+models <- regsubsets(logdamage ~ . - AR - HUC10, data = hazard.df, nvmax = 10, method = 'forward')
+summary(models)
+
+## train library
+train.control <- trainControl(method = "cv", number = 10)
+step.model <- train(logdamage ~ . - AR - HUC10, data = hazard.df,
+                    method = "leapForward", 
+                    tuneGrid = data.frame(nvmax = 1:14),
+                    trControl = train.control)
+summary(step.model)
+step.model$results
+plot(step.model$results$nvmax, step.model$results$Rsquared) 
+
+```
+
+
+```{r scatterplots}
+
+## discharge vs. damage, log-log scale
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = discharge_storm_avg, y = damage, color = factor(GEOID)), size = 2) + 
+  scale_x_log10(minor_breaks = log_breaks(0,4)) + 
+  scale_y_log10(minor_breaks = log_breaks(3,9))
+
+
+## discharge storm max / overall max vs. damage, lognormal scale
+ggplot(data = hazard.df) + 
+  scale_y_log10(minor_breaks = log_breaks(3,9)) +
+  geom_point(aes(x = discharge_storm_max / discharge_max, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+## why are some of the values over 100%? 
+hazard.df %>% subset(discharge_storm_max / discharge_max >= 1) %>% View
+
+
+## 
+
+ggplot(data = hazard.df) + 
+  # scale_y_log10(minor_breaks = log_breaks(3,9)) +
+  geom_point(aes(x = discharge_storm_total / discharge_mean, y = damage, 
+                 color = factor(hazard.df$GEOID)), size = 2)
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = discharge_storm_total, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+
+# ggplot(data = hazard.df) + 
+#   geom_point(aes(x = discharge_prevweek_avg / discharge_mean, y = damage, color = factor(hazard.df$GEOID)))
+# ggplot(data = hazard.df) + 
+#   geom_point(aes(x = discharge_prevweek_avg, y = damage, color = factor(hazard.df$GEOID)))
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_storm * ALAND, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_storm, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_max * ALAND, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_max, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_season * ALAND, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_season, y = damage, color = factor(hazard.df$GEOID)), size = 2)
+
+# ggplot(data = hazard.df) + 
+#   geom_point(aes(x = rain_prevweek * ALAND, y = damage, color = factor(hazard.df$GEOID)))
+# ggplot(data = hazard.df) + 
+#   geom_point(aes(x = rain_prevweek, y = damage, color = factor(hazard.df$GEOID)))
+
+
+## plot soil moisture
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = soilmoisture, y = damage, color = factor(hazard.df$GEOID)), size = 2) + 
+    scale_y_log10(minor_breaks = log_breaks(3,9))
+
+```
+
+```{r}
+## plot damage vs. intensity vs. duration
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = IVT, y = damage, color = days_max), size = 2) + 
+  scale_color_gradient(low = 'green', high = 'black') + 
+  scale_y_log10(minor_breaks = log_breaks(3,9)) + 
+  labs(x = 'AR Intensity (IVT)', y = 'Damage', color = 'AR Duration (days)') + 
+  ggtitle('AR Intensity-Duration') 
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = days_max, y = damage, color = IVT), size = 2) + 
+  scale_color_gradientn(colors = c('#ffc032', '#9f44fa', '#2926ff'), 
+                        values = c(0, 0.71, 1)) + 
+  scale_x_continuous(minor_breaks = 1:15) + 
+  scale_y_log10(minor_breaks = log_breaks(3,9)) + 
+  labs(x = 'AR Duration (days)', y = 'Damage', color = 'AR Intensity (IVT)') + 
+  ggtitle('AR Intensity-Duration') 
+
+ggplot(data = hazard.df) +
+  geom_point(aes(x = days_max, y = IVT), size = 2)
+
+```
+
+```{r}
+## plot damage vs. rain vs. discharge
+
+hazard.df[hazard.df$discharge_storm_avg %>% is.na,] %>% View
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = rain_storm, y = damage, color = discharge_storm_avg), size = 2) + 
+  scale_color_gradient(low = 'green', high = 'black') + 
+  scale_y_log10(minor_breaks = log_breaks(3,9)) + 
+  ggtitle('AR Rain-River Discharge') + 
+  labs(x = 'Total Storm Precipitation (inches)', y = 'Damage', color = 'Discharge')
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = discharge_storm_avg, y = damage, color = rain_storm), size = 2) + 
+  scale_color_gradient(low = 'green', high = 'black') + 
+  scale_y_log10(minor_breaks = log_breaks(3,9)) + 
+  ggtitle('AR Rain-River Discharge') + 
+  labs(x = 'Average Discharge (cfs)', y = 'Damage', color = 'Precipitation')
+
+ggplot(data = hazard.df) + 
+  geom_point(aes(x = discharge_storm_avg, y = rain_storm, color = factor(HUC10)), size = 2) + 
+  ggtitle('AR Rain-River Discharge') + 
+  labs(x = 'Average Discharge (cfs)', y = 'Total Storm Precipitation (inches)', color = 'CT')
+ 
+
+```
+
+
+```{r}
+# ## principle components
+# pca <- princomp(hazard.df_subset %>% subset(complete.cases(hazard.df_subset)))
+# summary(pca)
+# loadings(pca)
+
+
+## look at cross-correlations
+temp <- cor(hazard.df_subset); temp[abs(temp) < 0.25] <- NA
+ggpairs(hazard.df_subset)
+
+names(hazard.df)
+f <- lm(log(damage) ~ IVT + days_max + rain_storm + discharge_mean + factor(GEOID), data = hazard.df)
+summary(f)
+
+factor(hazard.df$GEOID)
+
+
+```
+
+
+
+## January 20th
+
+```{r}
+## run k-means clustering on claims
+names(claims)
+
+claims.k <- claims %>%
+  filter(countycode == 6097) %>%  #Sonoma only
+  select(latitude, longitude, dateofloss) %>%
+  filter(longitude < -100)
+claims.k$dateofloss <- toNumber(ymd(claims.k$dateofloss) - ymd('1970-01-01'))
+claims.k <- claims.k[complete.cases(claims.k),]
+
+ktest <- kmeans(claims.k, centers = 5)
+claims.k$k <- ktest$cluster
+claims.k.sf <- st_as_sf(claims.k, coords = c('longitude', 'latitude'), crs = NAD)
+
+# ggplot(data = claims.k) +
+#   geom_density(aes(x = ymd('1970-01-01') + days(dateofloss), fill = factor(k)), alpha = 0.5)
+
+clusters <- claims.k %>%
+  group_by(k) %>%
+  summarize(lat = mean(latitude), 
+            lon = mean(longitude), 
+            size = length(k)) %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = NAD)
+
+ggplot() + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = NA) +
+  # geom_sf(data = st_jitter(claims.k.sf, factor = 0.05), aes(color = factor(k))) #+ 
+  geom_sf(data = clusters, aes(color = factor(k), size = size)) #+
+  # scale_color_gradientn(colours = c('#f64949', '#ffcb52', '#f7ff6e', '#48fa53', '#28f0ff', 
+  #                                   '#4467ff', '#960dff', '#f81bff', '#ff2669'), 
+                        # values = c(0, 0.12, 0.23, 0.34, 0.45, 0.60, 0.74, 0.86, 1))
+
+
+```

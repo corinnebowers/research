@@ -1,0 +1,251 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "4/8/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'D:/Research'
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r import NFIP data}
+## NFIP data
+## redacted claims: https://www.fema.gov/media-library/assets/documents/180374
+## redacted policies: https://www.fema.gov/media-library/assets/documents/180376
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+```
+
+```{r import geometry data}
+## useful geometries
+## data source: see documentation for tigris package
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class = 'sf')
+CT <- tracts(state = 'CA', class = 'sf')
+CT <- merge(CT, data.frame(COUNTYFP = california$COUNTYFP, COUNTYNAME = california$NAME),
+            by = 'COUNTYFP', all.x = TRUE)
+CT$COUNTYID <- toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP)
+CT$GEOID <- toNumber(CT$GEOID)
+
+## add county names to claims
+claims <- merge(claims, data.frame(countycode = 6000 + toNumber(california$COUNTYFP), COUNTYNAME = california$NAME), 
+                by = 'countycode', all.x = TRUE)
+
+```
+
+
+goal: compare distribution of precip, discharge, & IVT by watershed on days with claims vs. without claims
+```{r}
+## step 1: choose a watershed level
+
+## import watersheds
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp')  #sub-region
+wbd6 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU6.shp')  #basin
+wbd8 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU8.shp')  #sub-basin
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp')  #watershed
+wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp')  #sub-watershed
+
+## plot watersheds
+ggplot() + 
+  geom_sf(data = california) + 
+  geom_sf(data = wbd6, fill = NA, color = 'blue')
+
+```
+
+```{r}
+## step 2: get precip, discharge, & IVT at the basin level for the length of the record
+timeline <- seq(ymd('1979-01-01'), ymd('2020-01-01'), 'days')
+df <- expand.grid(date = timeline, id = wbd6$HUC6)
+df[,c('precip', 'discharge', 'IVT')] <- NA
+
+require(rnoaa)
+require(velox)
+load('./_data/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8) #+ hours(rep(seq(0, 21, 3), length(datelist)))
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+pb <- txtProgressBar(min = 0, max = length(timeline), style = 3)
+for (i in 1:length(timeline)) {
+  d <- timeline[i]
+  
+  ## precipitation
+  precip <- cpc_prcp(d, us = TRUE)
+  precip$lon <- precip$lon-360
+  precip$precip <- ifelse(precip$precip >= 0, precip$precip, NA)
+  precip <- rasterFromXYZ(precip, crs = st_crs(california))
+  # df[df$date == d, 'precip'] <- raster::extract(precip, wbd6) %>% lapply(Mean) %>% unlist
+  df[df$date == d, 'precip'] <- velox(precip)$extract(wbd6) %>% lapply(Mean) %>% unlist
+  
+  # ## discharge
+  # filename <- paste0('./_data/streamflow/CEMS_ECMWF_dis24_', gsub('-', '', d+days(1)), '_glofas_v2.1.nc')
+  # ncfile <- nc_open(filename)
+  # dis24 <- t(ncvar_get(ncfile, 'dis24'))
+  # if (i == 1) {
+  #   lat <- ncvar_get(ncfile, 'lat')
+  #   lon <- ncvar_get(ncfile, 'lon')
+  # }
+  # nc_close(ncfile)
+  # discharge <- raster(dis24, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+  # # df[df$date == d, 'discharge'] <- raster::extract(discharge, wbd6) %>% lapply(Mean) %>% unlist
+  # df[df$date == d, 'discharge'] <- velox(discharge)$extract(wbd6) %>% lapply(Mean) %>% unlist
+
+  ## IVT
+  if (d >= ymd('1980-01-01')) {
+    IVT_raster <- apply(IVT[,,hourlist %in% d], c(1,2), Max)
+    IVT_raster <- raster(IVT_raster, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), 
+                         crs = st_crs(california))
+    # df[df$date == d, 'IVT'] <- raster::extract(IVT_raster, wbd6) %>% lapply(Mean) %>% unlist
+    df[df$date == d, 'IVT'] <- velox(IVT_raster)$extract(wbd6) %>% lapply(Mean) %>% unlist
+  }
+  setTxtProgressBar(pb, i)
+}
+
+# df_save <- df
+df <- df_save
+df <- df[complete.cases(df[,-4]),]
+
+```
+
+```{r}
+## step 3: get claims by date & watershed
+
+## import claims
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+## intersect census tracts & latlong grid
+latlon <- st_sf(st_make_grid(california, cellsize = 0.1, what = 'polygons', offset = c(-125.05, 32.05)))
+latlon[,c('lon', 'lat')] <- round(st_coordinates(st_centroid(latlon)), 1)
+latlon <- st_transform(latlon, st_crs(CT))
+polys <- st_intersection(CT, latlon)
+
+## assign claims to intersection polygons
+polys <- polys[,c('GEOID', 'lat', 'lon')]
+names(polys) <- c('censustract', 'latitude', 'longitude', 'geometry')
+polys$polygon_id <- 1:nrow(polys)
+
+claims_poly <- inner_join(claims, st_drop_geometry(polys), by = c('censustract', 'latitude', 'longitude'))
+
+## distribute claims randomly within polygons
+claims_poly[,c('lat_jitter', 'lon_jitter')] <- NA
+pb <- txtProgressBar(min = 0, max = length(unique(claims_poly$polygon_id)), style = 3)
+for (i in 1:length(unique(claims_poly$polygon_id))) {
+  index <- unique(claims_poly$polygon_id)[i]
+  claims_index <- (claims_poly$polygon_id == index)
+  n <- sum(claims_index)
+  samp <- st_sample(st_transform(polys[polys$polygon_id == index,], albers), size = n, type = 'random')
+  claims_poly[claims_index, c('lon_jitter', 'lat_jitter')] <- st_coordinates(st_transform(samp, st_crs(CT)))
+  setTxtProgressBar(pb, i)
+}
+
+claims_poly <- st_as_sf(claims_poly, coords = c('lon_jitter', 'lat_jitter'), crs = NAD)
+ggplot() + 
+  geom_sf(data = california) + 
+  geom_sf(data = claims_poly) + 
+  lims(x = c(124, 120), y = c(37, 39))
+
+## assign claims to watersheds
+claims_poly <- st_join(claims_poly, st_transform(wbd6, st_crs(claims_poly)))
+# claims <- claims_poly
+
+df_claims <- claims_poly %>%
+  st_drop_geometry %>%
+  group_by(date = ymd(dateofloss), id = HUC6) %>%
+  summarize(num_claims = Sum(counter),
+            value_claims = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim)) %>% 
+  right_join(df, by = c('date', 'id'))
+
+```
+
+```{r}
+## step 4: find distribution of hazard on days with and without claims
+
+for (i in 1:length(unique(df_claims$id))) {
+  g1 <- ggplot() + 
+    geom_density(data = df_claims %>% subset(id == unique(df_claims$id)[i]), 
+                 aes(x = precip, color = 'All Days', fill = 'All Days'), alpha = 0.5, show.legend = FALSE) + 
+    geom_density(data = df_claims %>% subset(id == unique(df_claims$id)[1] & !is.na(df_claims$num_claims)), 
+                 aes(x = precip, color = 'Claim Days', fill = 'Claim Days'), alpha = 0.5, show.legend = FALSE) + 
+    ggtitle('Precipitation') + 
+    labs(x = 'Precipitation (mm)', y = 'Proportion of Observations', color = 'Legend', fill = 'Legend') + 
+    scale_x_log10()
+  
+  g2 <- ggplot() + 
+    geom_density(data = df_claims %>% subset(id == unique(df_claims$id)[i]), 
+                 aes(x = discharge, color = 'All Days', fill = 'All Days'), alpha = 0.5, show.legend = FALSE) + 
+    geom_density(data = df_claims %>% subset(id == unique(df_claims$id)[1] & !is.na(df_claims$num_claims)), 
+                 aes(x = discharge, color = 'Claim Days', fill = 'Claim Days'), alpha = 0.5, show.legend = FALSE) + 
+    ggtitle('River Discharge') + 
+    labs(x = 'Discharge (cfs?)', y = '', color = 'Legend', fill = 'Legend') + 
+    scale_x_log10()
+  
+  g3 <- ggplot() + 
+    geom_density(data = df_claims %>% subset(id == unique(df_claims$id)[i]), 
+                 aes(x = IVT, color = 'All Days', fill = 'All Days'), alpha = 0.5) + 
+    geom_density(data = df_claims %>% subset(id == unique(df_claims$id)[1] & !is.na(df_claims$num_claims)), 
+                 aes(x = IVT, color = 'Claim Days', fill = 'Claim Days'), alpha = 0.5) + 
+    ggtitle('IVT') + 
+    labs(x = 'IVT (kg/m/s)', y = '', color = 'Legend', fill = 'Legend')
+  
+  print(gridExtra::grid.arrange(g1, g2, g3, ncol = 3, widths = c(5,5.5,7)))
+}
+
+for (i in 1:nrow(wbd6)) {
+  g <- ggplot() + 
+    geom_sf(data = california, color = 'grey80') + 
+    geom_sf(data = wbd6, fill = NA) + 
+    geom_sf(data = wbd6[i,], fill = ggcolor(2)[1]) + 
+    theme_void()
+  print(g)
+}
+```
+

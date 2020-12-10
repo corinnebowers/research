@@ -1,0 +1,779 @@
+---
+title: "Summer Work: NFIP Claims & Policies"
+author: "Corinne"
+start_date: "06/23/2019"
+end_date: "07/29/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+root <- 'C:/Users/cbowers/Desktop/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+## packages
+require(data.table)
+require(ggplot2); theme_set(theme_bw())
+require(lubridate)
+require(reshape2)
+require(rgdal)
+require(foreign)
+
+```
+
+## Claims Exploration 
+
+### June 25th
+```{r}
+## today's goal: look through the NFIP data, also relearn how to use R
+
+## load all NFIP data
+# policy0 <- fread('./openfema_policies20190331_00.csv', header = TRUE)
+# policy_names <- names(policy0)
+# policy1 <- fread('./openfema_policies20190331_01.csv', header = FALSE, col.names = policy_names)
+# policy2 <- read.csv('./openfema_policies20190331_02.csv')
+# policy3 <- read.csv('./openfema_policies20190331_03.csv')
+# policy4 <- read.csv('./openfema_policies20190331_04.csv')
+# policy5 <- read.csv('./openfema_policies20190331_05.csv')
+# policy6 <- read.csv('./openfema_policies20190331_06.csv')
+# policy7 <- read.csv('./openfema_policies20190331_07.csv')
+# policy8 <- read.csv('./openfema_policies20190331_08.csv')
+# policy9 <- read.csv('./openfema_policies20190331_09.csv')
+
+claims <- fread('./_data/NFIP/openFEMA_claims20190331.csv')
+claim_names <- names(claims)
+
+```
+
+```{r}
+#### find census tract with highest claims per person ####
+
+## load population by county
+pop <- read.csv('./_scripts/_working/county-pop-est2018-alldata.csv')
+pop <- pop[pop$COUNTY != 0,]
+pop$CountyCode <- pop$STATE*1000 + pop$COUNTY
+
+statecodes <- read.csv('./_scripts/_working/statecodes.csv', fileEncoding="UTF-8-BOM")
+pop <- merge(pop, statecodes, by.x = 'STNAME', by.y = 'StateName', all.x = TRUE)
+
+pop_bycounty = pop[,c('StateCode', 'CountyCode', 'CTYNAME', 'POPESTIMATE2018')]
+names(pop_bycounty) = c('statecode', 'countycode', 'countyname', 'pop')
+
+## find number & dollar value of claims by county
+number_claims <- data.frame(table(claims$countycode)); names(number_claims) <- c('countycode', 'numclaims')
+value_claims <- aggregate(cbind(amountpaidonbuildingclaim, amountpaidoncontentsclaim) ~ countycode, 
+                          data = claims, sum)
+claims_bycounty = merge(number_claims, value_claims, by = 'countycode', all = TRUE)
+
+## combine into one file for joining in ArcGIS
+countyinfo <- merge(pop_bycounty, claims_bycounty, by = 'countycode', all = TRUE)
+countyinfo[is.na(countyinfo$pop), 'pop'] <- 0
+countyinfo[is.na(countyinfo$numclaims), 'numclaims'] <- 0
+countyinfo[is.na(countyinfo$amountpaidonbuildingclaim), 'amountpaidonbuildingclaim'] <- 0
+countyinfo[is.na(countyinfo$amountpaidoncontentsclaim), 'amountpaidoncontentsclaim'] <- 0
+
+## export
+# write.csv(countyinfo, './countyinfo_0628.csv')
+
+```
+
+```{r}
+# #### find out which events are drivers and exclude them #### 
+# 
+# require(lubridate)
+# 
+# datetable <- data.frame(table(ymd(claims$dateofloss))); names(datetable) = c('date', 'lossval')
+# datetable_save <- datetable;  # datetable <- datetable_save
+# datetable <- datetable[order(datetable$lossval, decreasing = TRUE),]
+# datetable$count <- 1:nrow(datetable)
+# 
+# plot((datetable$lossval), (datetable$count), log = 'xy', type = 'l'); grid()
+# 
+# cutoff <- 10000  #can change this later
+# 
+# exclude_events <- datetable[datetable$lossval > cutoff,'date']
+# claims_filtered <- claims[!(claims$dateofloss %in% exclude_events),]
+# nrow(claims_filtered)/nrow(claims)
+# 
+# number_claims_filtered <- data.frame(table(claims_filtered$countycode)); names(number_claims_filtered) <- c('countycode', 'numclaims')
+# value_claims_filtered <- aggregate(cbind(amountpaidonbuildingclaim, amountpaidoncontentsclaim) ~ countycode, data = claims_filtered, sum)
+# claims_bycounty_filtered = merge(number_claims_filtered, value_claims_filtered, by = 'countycode', all = TRUE)
+# 
+# ## combine into one file for joining in ArcGIS
+# countyinfo_filtered <- merge(pop_bycounty, claims_bycounty_filtered, by = 'countycode', all = TRUE)
+# countyinfo_filtered[is.na(countyinfo_filtered$pop), 'pop'] <- 0
+# countyinfo_filtered[is.na(countyinfo_filtered$numclaims), 'numclaims'] <- 0
+# countyinfo_filtered[is.na(countyinfo_filtered$amountpaidonbuildingclaim), 'amountpaidonbuildingclaim'] <- 0
+# countyinfo_filtered[is.na(countyinfo_filtered$amountpaidoncontentsclaim), 'amountpaidoncontentsclaim'] <- 0
+# 
+# ## export
+# write.csv(countyinfo_filtered, './countyinfo_filtered_0628.csv')
+
+```
+
+```{r}
+## find the counties with the most loss events
+claims$counter <- 1
+date_claims <- aggregate(counter ~ (countycode + dateofloss), data = claims, sum)
+date_claims$counter <- 1
+date_claims <- aggregate(counter ~ countycode, data = date_claims, sum)
+names(date_claims) <- c('countycode', 'numevents')
+
+## combine into one file for joining in ArcGIS
+countyinfo <- merge(pop_bycounty, claims_bycounty, by = 'countycode', all = TRUE)
+countyinfo <- merge(pop_bycounty, claims_bycounty, by = 'countycode', all = TRUE)
+countyinfo <- merge(countyinfo, date_claims, by = 'countycode', all = TRUE)
+countyinfo[is.na(countyinfo$pop), 'pop'] <- 0
+countyinfo[is.na(countyinfo$numclaims), 'numclaims'] <- 0
+countyinfo[is.na(countyinfo$amountpaidonbuildingclaim), 'amountpaidonbuildingclaim'] <- 0
+countyinfo[is.na(countyinfo$amountpaidoncontentsclaim), 'amountpaidoncontentsclaim'] <- 0
+countyinfo[is.na(countyinfo$numevents), 'numevents'] <- 0
+
+countyinfo <- countyinfo[!is.na(countyinfo$statecode),]
+
+check <- function(x) sum(is.na(x))
+apply(countyinfo,2,check)
+
+## export
+# write.csv(countyinfo, './countyinfo_0628_events.csv')
+
+```
+
+
+### July 2nd
+```{r}
+#### focus: counties with largest number of loss events ####
+ggplot(countyinfo, aes(x = numevents)) + geom_histogram(bins = round(sqrt(nrow(countyinfo))))
+ggplot(countyinfo[countyinfo$numevents > 0,], aes(x = numevents)) + geom_histogram(bins = round(sqrt(nrow(countyinfo)))) +
+  scale_x_log10(minor_breaks = c(seq(1, 1e1, by = 1), seq(1e1, 1e2, by = 1e1), seq(1e2, 1e3, by = 1e2), seq(1e3, 1e4, by = 1e3)))
+
+bigloss_counties <- countyinfo[countyinfo$numevents > 1000,]
+nrow(bigloss_counties)/nrow(countyinfo)*100  # 0.8% of counties
+sum(bigloss_counties$pop)/sum(countyinfo$pop)  # 12% of population 
+#why is the population of the US only 26 million? 
+
+bigloss_claims <- claims[claims$countycode %in% bigloss_counties$countycode,]
+nrow(bigloss_claims)/nrow(claims)*100  # 40% of claims
+sum(!is.na(bigloss_claims$amountpaidonbuildingclaim)) / sum(!is.na(claims$amountpaidonbuildingclaim))*100  # 40% of total building loss
+
+# View(bigloss_claims)
+# View(aggregate(reportedcity ~ countycode, bigloss_claims, unique)) #city names are a hot mess
+
+```
+
+```{r}
+#### focus: counties with largest number of loss events per capita ####
+countyinfo$eventspercapita <- countyinfo$numevents / countyinfo$pop
+
+ggplot(countyinfo, aes(x = eventspercapita)) + geom_histogram(bins = round(sqrt(nrow(countyinfo)))) + 
+  ggtitle('Distribution of Loss Events per Capita, by County') + xlab('Events per Capita') + ylab('Number of US Counties')
+ggplot(countyinfo[countyinfo$eventspercapita > 0,], aes(x = eventspercapita)) + geom_histogram(bins = round(sqrt(nrow(countyinfo)))) + 
+  scale_x_log10(minor_breaks = c(seq(1e-5, 1e-4, by = 1e-5), seq(1e-4, 1e-3, by = 1e-4), seq(1e-2, 1e-1, by = 1e-2), seq(1e-1, 1, by = 1e-1))) + 
+  ggtitle('Distribution of Loss Events per Capita, by County') + xlab('Events per Capita') + ylab('Number of US Counties')
+
+```
+
+```{r}
+#### focus: northern California ####
+northernCA <- read.csv('./_scripts/_working/northernCA.csv', fileEncoding="UTF-8-BOM")
+claims_northernCA <- claims[claims$countycode %in% northernCA$countycode,]
+claims_northernCA[is.na(claims_northernCA$amountpaidonbuildingclaim), 'amountpaidonbuildingclaim'] <- 0
+claims_northernCA[is.na(claims_northernCA$amountpaidoncontentsclaim), 'amountpaidoncontentsclaim'] <- 0
+
+# CAlossyears <- data.frame(table(year(claims_northernCA$dateofloss))); names(CAlossyears) <- c('year', 'numevents')
+# plot(CAlossyears)
+
+## cluster "loss events" spread out over multiple dates
+
+date_claims_CA <- aggregate(cbind(counter, amountpaidonbuildingclaim, amountpaidoncontentsclaim) ~ dateofloss, data = claims_northernCA, sum)
+date_claims_CA <- date_claims_CA[order(date_claims_CA$dateofloss),]
+names(date_claims_CA) <- c('dateofloss', 'numclaims', 'buildingloss', 'contentsloss')
+
+# set threshold (number of days to be lumped into one "event")
+threshold <- 1
+
+# initialize variables
+counter <- 1
+realevents <- data.frame(event_count = integer())
+
+# fill in first row
+realevents[counter, 'event_count'] <- 1
+realevents[counter, 'claim_count'] <- date_claims_CA[1, 'numclaims']
+realevents[counter, 'buildingloss'] <- date_claims_CA[1, 'buildingloss']
+realevents[counter, 'contentsloss'] <- date_claims_CA[1, 'contentsloss']
+realevents[counter, 'event_startdate'] <- date_claims_CA[1, 'dateofloss']
+
+# loop over the rest of the matrix
+for (i in 2:nrow(date_claims_CA)) {
+  if (ymd(date_claims_CA[i-1, 'dateofloss']) + threshold >= ymd(date_claims_CA[i, 'dateofloss'])) {
+    realevents[counter, 'event_count'] <- realevents[counter, 'event_count'] + 1
+    realevents[counter, 'claim_count'] <- realevents[counter, 'claim_count'] + date_claims_CA[i, 'numclaims']
+    realevents[counter, 'buildingloss'] <- realevents[counter, 'buildingloss'] + date_claims_CA[i, 'buildingloss']
+    realevents[counter, 'contentsloss'] <- realevents[counter, 'contentsloss'] + date_claims_CA[i, 'contentsloss']
+    realevents[counter, 'event_enddate'] <- date_claims_CA[i, 'dateofloss']
+  } else {
+    counter <- counter + 1
+    realevents[counter, 'event_count'] <- 1
+    realevents[counter, 'claim_count'] <- date_claims_CA[i, 'numclaims']
+    realevents[counter, 'buildingloss'] <- date_claims_CA[i, 'buildingloss']
+    realevents[counter, 'contentsloss'] <- date_claims_CA[i, 'contentsloss']
+    realevents[counter, 'event_startdate'] <- date_claims_CA[i, 'dateofloss']
+  }
+}
+```
+
+
+```{r}
+#### look at the distribution of claims by month ####
+claim_months <- data.frame(table(month(claims_northernCA$dateofloss))); names(claim_months) <- c('Month','NumClaims')
+
+event_months <- data.frame(table(month(date_claims_CA$dateofloss))); names(event_months) <- c('Month', 'NumEvents')
+
+ggplot(claims_northernCA, aes(x = month(dateofloss))) + geom_bar() + scale_x_continuous(breaks = 1:12, minor_breaks = NULL) +
+  ggtitle('Northern CA Claims by Month, 1970-2018') + xlab('Month') + ylab('Number of Claims')
+  
+ggplot(date_claims_CA, aes(x = month(dateofloss))) + geom_bar() + scale_x_continuous(breaks = 1:12, minor_breaks = NULL) + 
+  ggtitle('Northern CA Loss Events by Month, 1970-2018') + xlab('Month') + ylab('Number of Loss Events')
+
+ggplot(claims_CA, aes(x = month(dateofloss))) + geom_bar() + scale_x_continuous(breaks = 1:12, minor_breaks = NULL) +
+  ggtitle('CA: Number of Claims by Month, 1975-2018') + xlab('Month') + ylab('Number of Claims')
+
+ggplot(date_claims_CA, aes(x = month(dateofloss))) + geom_bar() + scale_x_continuous(breaks = 1:12, minor_breaks = NULL) + 
+  ggtitle('CA: Loss Days by Month, 1975-2018') + xlab('Month') + ylab('Number of Loss Days')
+
+ggplot(claims_CA, aes(x = month(dateofloss), weight = amountpaidonbuildingclaim)) + 
+  geom_bar(color = 'black', fill = c(rep('grey', 3), rep('white', 6), rep('grey', 3))) + 
+  scale_x_continuous(breaks = 1:12, minor_breaks = NULL) +
+  ggtitle('CA: Value of Claims by Month ($), 1975-2018') + xlab('Month') + ylab('Value of Claims') +
+  theme_bw()
+
+ggplot(claims_CA, aes(x = month(dateofloss), weight = amountpaidonbuildingclaim/44)) + 
+  geom_bar(color = 'black', fill = c(rep('grey', 3), rep('white', 6), rep('grey', 3))) + 
+  scale_x_continuous(breaks = 1:12, minor_breaks = NULL) +
+  ggtitle('CA: Average Claims by Month ($), 1975-2018') + xlab('Month') + ylab('Annual Claims Average') +
+  theme_bw()
+
+```
+
+
+```{r}
+#### look at distribution of number of floors ####
+ggplot(claims_northernCA, aes(x = numberoffloorsintheinsuredbuilding)) + geom_bar() + scale_x_continuous(breaks = 1:6, minor_breaks = NULL) + 
+  ggtitle('Floor Distribution: Northern California') + xlab('Number of Floors') + ylab('Frequency of Occurrence')
+
+ggplot(claims, aes(x = numberoffloorsintheinsuredbuilding)) + geom_bar() + scale_x_continuous(breaks = 1:6, minor_breaks = NULL) + 
+  ggtitle('Floor Distribution: USA') + xlab('Month') + xlab('Number of Floors') + ylab('Frequency of Occurrence')
+```
+
+
+```{r}
+#### look at distribution of year built ####
+ggplot(claims, aes(x = year(ymd(originalconstructiondate)))) + geom_histogram(bins = 100) + xlim(1850, 2050)
+
+
+```
+
+## Policies Exploration
+### July 9th
+#### Create CA Policies Dataset
+```{r, eval = FALSE}
+# policy_test <- fread('./openfema_policies20190331_00.csv', header = TRUE, nrows = 10000)
+# policynames_full <- names(policy_test)
+# # keep <- c(4:5, 7:12, 15:17, 19, 21, 25, 27:40, 43, 44:45)
+# keep <- c(5, 16, 19, 21, 25, 27:29, 32:33, 37, 43:44)
+#  
+# policy0 <- fread('./openfema_policies20190331_00.csv', header = TRUE, select = keep)
+# policy_names <- names(policy0)
+# CA_policies <- policy0[policy0$propertystate == 'CA',]
+# rm(policy0)
+# 
+# policy1 <- fread('./openfema_policies20190331_01.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy1[policy1$propertystate == 'CA',])
+# rm(policy1)
+# 
+# policy2 <- fread('./openfema_policies20190331_02.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy2[policy2$propertystate == 'CA',])
+# rm(policy2)
+# 
+# policy3 <- fread('./openfema_policies20190331_03.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy3[policy3$propertystate == 'CA',])
+# rm(policy3)
+# 
+# policy4 <- fread('./openfema_policies20190331_04.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy4[policy4$propertystate == 'CA',])
+# rm(policy4)
+# 
+# policy5 <- fread('./openfema_policies20190331_05.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy5[policy5$propertystate == 'CA',])
+# rm(policy5)
+# 
+# policy6 <- fread('./openfema_policies20190331_06.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy6[policy6$propertystate == 'CA',])
+# rm(policy6)
+# 
+# policy7 <- fread('./openfema_policies20190331_07.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy7[policy7$propertystate == 'CA',])
+# rm(policy7)
+# 
+# policy8 <- fread('./openfema_policies20190331_08.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy8[policy8$propertystate == 'CA',])
+# rm(policy8)
+# 
+# policy9 <- fread('./openfema_policies20190331_09.csv', header = FALSE, select = keep, col.names = policy_names)
+# CA_policies <- rbind(CA_policies, policy9[policy9$propertystate == 'CA',])
+# rm(policy9)
+# 
+# write.csv(CA_policies, './CA_policies_1017.csv', row.names = FALSE)
+
+```
+
+```{r}
+#### goal for today: make the policies-in-effect graph #### 
+CA_policies <- read.csv('./_scripts/_working/CA_policies_0709.csv')
+CA_policies$counter <- 1
+
+policies_written <- data.frame(table(year(ymd(CA_policies$policyeffectivedate))))
+policies_terminated <- data.frame(table(year(ymd(CA_policies$policyteminationdate))))
+policies_terminated$Freq <- -policies_terminated$Freq
+
+bargraph <- ggplot() + 
+  geom_bar(data = policies_written, aes(x = Var1, y = Freq, fill = 'Policies Written'), stat = 'identity') + 
+  geom_bar(data = policies_terminated, aes(x = Var1, y = Freq, fill = 'Policies Terminated'), stat = 'identity')
+bargraph + ggtitle('CA Policies in Force') + 
+  xlab('Year') + ylab('Number of Policies')
+
+```
+
+```{r}
+## compare policies-in-effect (data) to policies-in-effect (internet)
+policies_inforce <- data.frame(matrix(unique(CA_policies$censustract), ncol = 1))
+names(policies_inforce) <- 'censustract'
+
+for (year in 2010:2018) {
+  end = ymd(paste(year, '10', '01', sep = '-'))
+  start = end - years(1)
+  
+  policies_subset <- CA_policies[(ymd(CA_policies$policyeffectivedate) >= start) & 
+                                 (ymd(CA_policies$policyeffectivedate) < end),]
+  
+  policies_summary <- data.frame(table(policies_subset$censustract))
+  policies_inforce <- merge(policies_inforce, policies_summary,
+                            by.x = 'censustract', by.y = 'Var1', all.x = TRUE) 
+  names(policies_inforce)[ncol(policies_inforce)] <- paste('year', year, sep = '_')
+}
+policies_inforce[is.na(policies_inforce)] <- 0
+                    
+policies_inforce_data <- apply(policies_inforce, 2, sum)
+policies_inforce_internet = c(271331, 276915, 268756, 259010, 252865, 237444, 231979, 295922, 239905, 229239)
+# policies_inforce = data.frame(cbind(2009:2018, policies_inforce_internet))
+(policies_inforce_data[-1] - policies_inforce_internet[-1]) / policies_inforce_data[-1] * 100
+## answer: it's all about 2% different
+
+```
+
+## Claims by Event
+### July 15th
+```{r}
+#### goal: create "storm event maps" ####
+## we're gonna figure out what this means as we go. let's hit it
+
+## load claims data
+claims <- fread('./_data/NFIP/openFEMA_claims20190331.csv')
+claims$counter <- 1
+claim_names <- names(claims)
+
+## subset claims to CA
+claims_CA <- claims[claims$state == 'CA',]
+# write.csv(claims_CA, './NFIP/CA_claims_0716.csv')
+
+## cluster "loss events" spread out over multiple dates
+claimdates <- aggregate(cbind(counter, amountpaidonbuildingclaim, amountpaidoncontentsclaim) ~ dateofloss, 
+                        data = claims_CA, sum)
+claimdates <- claimdates[order(claimdates$dateofloss),]
+names(claimdates) <- c('dateofloss', 'numclaims', 'buildingloss', 'contentsloss')
+
+# set threshold (number of days to be lumped into one "event")
+threshold <- 1
+
+# initialize variables
+claimevents <- data.frame(numdays = integer())
+counter <- 1
+
+# fill in first row
+claimevents[counter, 'numdays'] <- 1
+claimevents[counter, 'numclaims'] <- claimdates[1, 'numclaims']
+claimevents[counter, 'buildingloss'] <- claimdates[1, 'buildingloss']
+claimevents[counter, 'contentsloss'] <- claimdates[1, 'contentsloss']
+claimevents[counter, 'event_startdate'] <- claimdates[1, 'dateofloss']
+
+# loop over the rest of the matrix
+for (i in 2:nrow(claimdates)) {
+  if (ymd(claimdates[i-1, 'dateofloss']) + threshold >= ymd(claimdates[i, 'dateofloss'])) {
+    claimevents[counter, 'numdays'] <- claimevents[counter, 'numdays'] + 1
+    claimevents[counter, 'numclaims'] <- claimevents[counter, 'numclaims'] + claimdates[i, 'numclaims']
+    claimevents[counter, 'buildingloss'] <- 
+      claimevents[counter, 'buildingloss'] + claimdates[i, 'buildingloss']
+    claimevents[counter, 'contentsloss'] <- 
+      claimevents[counter, 'contentsloss'] + claimdates[i, 'contentsloss']
+    claimevents[counter, 'event_enddate'] <- claimdates[i, 'dateofloss']
+  } else {
+    counter <- counter + 1
+    claimevents[counter, 'numdays'] <- 1
+    claimevents[counter, 'numclaims'] <- claimdates[i, 'numclaims']
+    claimevents[counter, 'buildingloss'] <- claimdates[i, 'buildingloss']
+    claimevents[counter, 'contentsloss'] <- claimdates[i, 'contentsloss']
+    claimevents[counter, 'event_startdate'] <- claimdates[i, 'dateofloss']
+  }
+}
+```
+
+```{r}
+#### first test: January-March 2017
+
+## figure out what data I actually need from the claims dataset
+claims_test <- claims_CA
+claims_test <- claims_test[ymd(claims_test$dateofloss) <= ymd('2017-01-31'),]
+claims_test <- claims_test[ymd(claims_test$dateofloss) >= ymd('2017-01-01'),]
+
+temp <- aggregate(counter ~ dateofloss + countycode, data = claims_test, sum)
+lossdates_bycounty <- dcast(temp, countycode ~ dateofloss, value.var = "counter")
+lossdates_bycounty[is.na(lossdates_bycounty)] <- 0
+names(lossdates_bycounty) <- make.names(names(lossdates_bycounty))
+
+## read in a shapefile of CA counties
+counties <- readOGR('./_gis/California/_geography/CA_Counties_TIGER2016.shp')
+counties_fortify <- fortify(counties, region = 'FIPS')
+counties <- merge(counties_fortify, counties, by.x = 'id', by.y = 'FIPS', all.x = TRUE)
+counties <- counties[order(counties$order),]
+counties <- merge(counties, lossdates_bycounty, by.x = 'id', by.y = 'countycode', all.x = TRUE)
+counties <- counties[order(counties$order),]
+
+countylines <- geom_path(data = counties, aes(x=long, y=lat, group=group), color = 'black')
+
+eventdate <- 'X2017.01.07'
+
+for (i in 2:length(names(lossdates_bycounty))) {
+  eventdate = names(lossdates_bycounty)[i]
+  eventcounties <- counties[counties[,eventdate] > 0,]
+  map <- ggplot() + geom_polygon(aes(x = eventcounties$long, y = eventcounties$lat,
+                                     group = eventcounties$group, fill = eventcounties[,eventdate])) +
+    scale_fill_gradient(low = '#4292c6', high = '#08306b') + countylines +
+    guides(fill = guide_legend(title = eventdate))
+  print(map)
+  # Sys.sleep(0.5)
+}
+
+```
+
+### July 17th
+```{r}
+## today's goal: how to determine policy tenure
+# require(tictoc)
+# CA_policies <- read.csv('./_scripts/_working/CA_policies_0709.csv')
+# CA_policies$counter <- 1
+# 
+# 
+# CA_policies$renewaldate <- month(CA_policies$policyeffectivedate)*100 + day(CA_policies$policyeffectivedate)
+# 
+# policytenure <- aggregate(counter ~ countycode + originalconstructiondate +
+#                     latitude + longitude + numberoffloorsininsuredbuilding + occupancytype + 
+#                     primaryresidenceindicator + originalnbdate + renewaldate, 
+#                   data = CA_policies, sum)
+# policytenure_save <- policytenure  # policytenure <- policytenure_save
+# policytenure <- policytenure[order(policytenure$originalnbdate),]
+# policytenure$uniqueid <- 1:nrow(policytenure)
+# 
+# identifiers <- c('countycode', 'originalnbdate', 'originalconstructiondate', 'latitude', 'longitude',
+#                  'numberoffloorsininsuredbuilding', 'occupancytype', 'primaryresidenceindicator', 'renewaldate')
+# CA_policies_merge <- merge(CA_policies, policytenure, by = identifiers)
+# 
+# tenure_summary <- data.frame(uniqueid = integer(), num_properties = integer(), num_years = integer())
+# row <- 0
+# for (id in 1:nrow(policytenure)) {
+#   tic()
+#   CA_policies_subset <- subset(CA_policies_merge, CA_policies_merge$uniqueid == id)
+#   dates <- data.frame(table(CA_policies_subset$policyeffectivedate))
+#   originaldate <- month(CA_policies_subset[1,'originalnbdate'])*100 + day(CA_policies_subset[1,'originalnbdate'])
+#   
+#   while (sum(dates$Freq) > 0) {
+#     row <- row + 1
+#     tenure_summary[row, 'uniqueid'] <- id
+#     
+#     properties <- min(dates[dates$Freq > 0, 'Freq'])
+#     # tenure_summary[row, 'num_properties'] <- properties
+#     multiplier <- CA_policies_subset[1, 'counter.y']
+#     tenure_summary[row, 'num_properties'] <- properties * multiplier
+#     
+#     yearval <- max(year(dates[dates$Freq == properties, 'Var1']))
+#     missed_years <- setdiff(2009:yearval, year(dates[dates$Freq > 0, 'Var1']))
+#   
+#     if (length(missed_years) == 0) {
+#       # the policy has not lapsed within the dataset timeframe
+#       if (CA_policies_subset[1,'renewaldate'] == originaldate) {
+#         # assume the policy has never lapsed
+#         numyears <- yearval - year(CA_policies_subset[1,'originalnbdate']) + 1
+#       } else {
+#         # assume the policy lapsed sometime before the dataset timeframe
+#         # (note: how long ago is unknown)
+#         numyears <- yearval - min(year(dates[dates$Freq > 0, 'Var1'])) + 1
+#       }
+#       dates$Freq <- apply(cbind(0, dates$Freq - properties), 1, max)
+#     } else {
+#       # the policy has lapsed within the dataset timeframe
+#       missed_years <- c(missed_years, 2021)
+#       yearval <- min(year(dates[dates$Freq == properties, 'Var1']))
+#       termdate <- ymd(CA_policies_subset[year(CA_policies_subset$policyeffectivedate) == yearval, 
+#                                          'policyteminationdate'][1])
+#       term_expected <- ymd(dates[dates$Freq == properties, 'Var1'])[1] + years(1)
+#       if (is.na(term_expected)) {
+#         term_expected <- ymd(dates[dates$Freq == properties, 'Var1'])[1] - days(1) + years(1)
+#       }
+#       if (termdate == term_expected) {
+#         year_range <- yearval:min(c(missed_years[missed_years > yearval] - 1, 
+#                                     max(year(dates[dates$Freq > 0, 'Var1']))))
+#         numyears <- length(year_range)
+#         dates[year(dates$Var1) %in% year_range, 'Freq'] <- 
+#           apply(cbind(0, dates[year(dates$Var1) %in% year_range, 'Freq'] - properties), 1, max)
+#       } else {
+#         numyears <- 1
+#         dates[dates$Freq == properties, 'Freq'][1] <- 0
+#       }
+#     }
+#     tenure_summary[row, 'num_years'] <- numyears
+#   }
+#   print(id)
+#   toc()
+# }
+# 
+# # KNOWN BUG:
+#   # if a 11-1-2014 policy gets canceled on 11-30-2015 (early termination occurs on the second year)
+# 
+# 
+# #### code for displaying tables showing why this failed ####
+# 
+# # id = 272405
+# # id = 291696
+# # id = 294103
+# id = 503107
+# 
+# id = 924
+# CA_policies_subset <- subset(CA_policies_merge, CA_policies_merge$uniqueid == id)
+# dates <- data.frame(table(CA_policies_subset$policyeffectivedate))
+# temp <- (dates[dates$Freq > 0,])
+# names(temp) <- c('policyeffectivedate', 'numpolicies')
+# 
+# 
+# View(CA_policies_merge[CA_policies_merge$uniqueid == 4,
+#                        c('originalnbdate', 'policyeffectivedate', 'policyteminationdate', 'uniqueid')])
+# 
+# View(CA_policies[(month(CA_policies_merge$originalnbdate) != month(CA_policies_merge$policyeffectivedate)) | 
+#                    (day(CA_policies_merge$originalnbdate) != day(CA_policies_merge$policyeffectivedate)),])
+# 
+# View(CA_policies_merge[CA_policies_merge$uniqueid == 924,])
+
+## note: this loop was gonna take weeks -> policy tenure was a bust
+
+```
+
+### July 26th
+```{r}
+#### goal for 07/26: define a water year ####
+
+## load in claims
+claims <- read.csv('./_data/NFIP/openFEMA_claims20190331.csv')
+claims$counter <- 1
+keep_names <- c(2:3, 5, 7:10, 14:15, 17, 19, 22, 25:32, 34:40)
+claims <- claims[,keep_names]
+claim_names <- names(claims)
+
+## filter claims to target region
+regionid <- read.dbf('./_gis/_working/CA_targetcounties.dbf')
+claims_region <- claims[claims$countycode %in% regionid$FIPS,]
+
+## create water year
+claims_region$wateryear <- claims_region$yearofloss
+claims_region[month(claims_region$dateofloss) %in% c(10, 11, 12), 'wateryear'] <- 
+  claims_region[month(claims_region$dateofloss) %in% c(10, 11, 12), 'wateryear'] + 1
+
+claimsbyyear <- data.frame(table(claims_region$wateryear))
+
+elnino_weak <- c(1970, 1977, 1978, 1980, 2005, 2007, 2015, 2019)
+elnino_mod <- c(1987, 1995, 2003, 2010)
+elnino_strong <- c(1973, 1988, 1992)
+elnino_vstrong <- c(1983, 1998, 2016)
+elnino <- c(elnino_weak, elnino_mod, elnino_strong, elnino_vstrong)
+
+lanina_weak <- c(1972, 1975, 1984, 1985, 2001, 2006, 2009, 2017, 2018)
+lanina_mod <- c(1971, 1996, 2012)
+lanina_strong <- c(1974, 1976, 1989, 1999, 2000, 2008, 2011)
+lanina <- c(lanina_weak, lanina_mod, lanina_strong)
+
+neutral <- setdiff(claims_region$wateryear, c(elnino, lanina))
+
+claims_region$southernosc <- ""
+claims_region[claims_region$wateryear %in% elnino_weak, 'southernosc'] <- 'El Nino - Weak'
+claims_region[claims_region$wateryear %in% elnino_mod, 'southernosc'] <- 'El Nino - Moderate'
+claims_region[claims_region$wateryear %in% c(elnino_strong, elnino_vstrong), 'southernosc'] <- 'El Nino - Strong'
+claims_region[claims_region$wateryear %in% lanina_weak, 'southernosc'] <- 'La Nina - Weak'
+claims_region[claims_region$wateryear %in% lanina_mod, 'southernosc'] <- 'La Nina - Moderate'
+claims_region[claims_region$wateryear %in% lanina_strong, 'southernosc'] <- 'La Nina - Strong'
+claims_region[claims_region$wateryear %in% neutral, 'southernosc'] <- 'Neutral'
+
+ggplot() +
+  geom_histogram(data = claims_region, aes(x = wateryear, fill = southernosc), 
+                 color = 'darkgray', binwidth = 1) + 
+  scale_fill_manual(breaks = c('El Nino - Strong', 'El Nino - Moderate', 'El Nino - Weak', 'Neutral', 
+                               'La Nina - Weak', 'La Nina - Moderate', 'La Nina - Strong'), 
+                    values = c('#ef8a62', '#b2182b', '#fddbc7', '#67a9cf', '#2166ac', '#d1e5f0', '#f7f7f7')) + 
+  ggtitle('Number of Claims by Year')
+
+ggplot() +
+  geom_histogram(data = claims_region, aes(x = wateryear, weight = amountpaidonbuildingclaim, fill = southernosc), 
+                 color = 'darkgray', binwidth = 1) + 
+  scale_fill_manual(breaks = c('El Nino - Strong', 'El Nino - Moderate', 'El Nino - Weak', 'Neutral', 
+                               'La Nina - Weak', 'La Nina - Moderate', 'La Nina - Strong'), 
+                    values = c('#ef8a62', '#b2182b', '#fddbc7', '#67a9cf', '#2166ac', '#d1e5f0', '#f7f7f7')) + 
+  ggtitle('Total Amount Paid on Claims by Year ($)')
+```
+
+
+### July 29th
+```{r}
+#### goal for 07/29: pick 2-3 target locations for further analysis ####
+
+## look at 2006
+year <- 2006
+
+claims_region_table1 <- aggregate(cbind(counter, amountpaidonbuildingclaim, amountpaidoncontentsclaim, 
+                                   totalbuildinginsurancecoverage, 
+                                   totalcontentsinsurancecoverage) ~ censustract, 
+                                data = claims_region[claims_region$wateryear == year,], sum)
+names(claims_region_table1) <- c('censustract', 'numclaims', 'buildingclaim_total', 'contentsclaim_total', 
+                                 'buildingcoverage_total', 'contentscoverage_total')
+claims_region_table2 <- aggregate(cbind(crsdiscount, originalconstructiondate, amountpaidonbuildingclaim, 
+                                   amountpaidoncontentsclaim, totalbuildinginsurancecoverage, 
+                                   totalcontentsinsurancecoverage) ~ censustract,
+                                data = claims_region[claims_region$wateryear == year,], mean) 
+names(claims_region_table2) <- c('censustract', 'avgCRSdiscount', 'avgyearbuilt', 'buildingclaim_avg', 
+                                 'contentsclaim_avg', 'buildingcoverage_avg', 'contentscoverage_avg')
+claims_region_summary <- merge(claims_region_table1, claims_region_table2, by = 'censustract', all = TRUE)
+
+# write.csv(claims_region_summary, './NFIP/claims_northernCA_1995_0729.csv')
+
+
+claims_subset = claims_region[claims_region$wateryear == 2006 & claims_region$countycode == 6097,] #Sonoma
+# View(claims_subset)
+# View(aggregate(amountpaidonbuildingclaim ~ dateofloss, data = claims_subset, sum))
+```
+
+
+```{r}
+#### goal: determine insurance penetration ####
+policies <- read.csv('./_scripts/_working/CA_policies_0709.csv')
+
+policies_inforce <- data.frame(matrix(unique(policies$censustract), ncol = 1))
+names(policies_inforce) <- 'censustract'
+
+for (year in 2010:2018) {
+  end = ymd(paste(year, '10', '01', sep = '-'))
+  start = end - years(1)
+  
+  policies_subset <- policies[(ymd(policies$policyeffectivedate) >= start) & 
+                  (ymd(policies$policyeffectivedate) < end),]
+  
+  policies_summary <- data.frame(table(policies_subset$censustract))
+  policies_inforce <- merge(policies_inforce, policies_summary, by.x = 'censustract', by.y = 'Var1', all.x = TRUE) 
+  names(policies_inforce)[ncol(policies_inforce)] <- paste('year', year, sep = '_')
+}
+policies_inforce[is.na(policies_inforce)] <- 0
+
+# write.csv(policies_inforce, './NFIP/policies_inforce_0806.csv')
+
+```
+
+### August 2nd
+```{r}
+### goal: get familiar with FEMA's Natural Hazard Mitigation Assistance products ####
+
+#### load in FEMA disaster declarations ####
+
+# # FEMA Disaster Declarations Summary is a summarized dataset describing all federally declared disasters. This
+# # dataset lists all official FEMA Disaster Declarations, beginning with the first disaster declaration in 1953
+# # and features all three disaster declaration types: major disaster, emergency, and fire management assistance.
+# # The dataset includes declared recovery programs and geographic areas.
+disasters1 <- read.csv('./_data/FEMA/DisasterDeclarationsSummaries.csv')
+disasters1 <- disasters1[disasters1$state == 'CA',]
+
+# # This data set contains a list of FEMA recognized areas affected by a disaster, and the type of disaster 
+# # assistance the area is eligible for.
+disasters2 <- read.csv('./_data/FEMA/FemaWebDisasterDeclarations.csv')
+disasters2 <- disasters2[disasters2$stateCode == 'CA',]
+
+# # This data set contains financial assistance values, including the number of approved applications, 
+# # as well as individual and public assistance grant amounts.
+disasters3 <- read.csv('./_data/FEMA/FemaWebDisasterSummaries.csv')
+
+# # This data set contains general information on declared disasters, including the disaster number, declaration 
+# # type, state, description, incident start and end dates, and incident type.
+disasters4 <- read.csv('./_data/FEMA/FemaWebDeclarationAreas.csv')
+disasters4 <- disasters4[disasters4$stateCode == 'CA',]
+
+disasters <- merge(disasters2, disasters3, by = 'disasterNumber', all.x = TRUE)
+keep <- c(1, 7:8, 6, 9, 3, 4:5, 2, 12, 15:21)
+disasters <- disasters[,keep]
+disasters <- disasters[,1:10]
+
+disasters$declarationDate <- date(disasters$declarationDate)
+disasters$incidentBeginDate <- date(disasters$incidentBeginDate)
+bool = disasters$incidentEndDate != ""
+temp = rep(NA, nrow(disasters)); temp[bool] <- date(disasters[bool, 'incidentEndDate'])
+disasters$incidentEndDate <- date(temp + ymd(origin))
+bool = disasters$closeoutDate != ""
+temp = rep(NA, nrow(disasters)); temp[bool] <- date(disasters[bool, 'closeoutDate'])
+disasters$closeoutDate <- date(temp + ymd(origin))
+```
+
+
+```{r}
+#### tie HMAs to disasters ####
+
+## hazard mitigation assistance projects (HMA_P) 
+HMA_P <- read.csv('./_data/FEMA/HazardMitigationAssistanceProjects.csv')
+HMA_P <- HMA_P[HMA_P$state == 'California',]
+
+bool = HMA_P$dateInitiallyApproved != ""
+temp = rep(NA, nrow(HMA_P)); temp[bool] <- date(HMA_P[bool, 'dateInitiallyApproved'])
+HMA_P$dateInitiallyApproved <- date(temp + ymd(origin))
+bool = HMA_P$dateApproved != ""
+temp = rep(NA, nrow(HMA_P)); temp[bool] <- date(HMA_P[bool, 'dateApproved'])
+HMA_P$dateApproved <- date(temp + ymd(origin))
+bool = HMA_P$dateClosed != ""
+temp = rep(NA, nrow(HMA_P)); temp[bool] <- date(HMA_P[bool, 'dateClosed'])
+HMA_P$dateClosed <- date(temp + ymd(origin))
+
+HMA_P <- merge(disasters, HMA_P, by = 'disasterNumber', all.y = TRUE)
+HMA_P <- HMA_P[HMA_P$incidentType %in% c(NA, 'Flood', 'Severe Storm(s)', 'Dam/Levee Break'),]
+HMA_P <- HMA_P[HMA_P$county == 'Sonoma',]
+
+## hazard mitigation assistance mitigated properties (HMA_MP)
+HMA_MP <- read.csv('./_data/FEMA/HazardMitigationAssistanceMitigatedProperties.csv')
+HMA_MP <- HMA_MP[HMA_MP$state == 'California',]
+
+bool = HMA_MP$dateInitiallyApproved != ""
+temp = rep(NA, nrow(HMA_MP)); temp[bool] <- date(HMA_MP[bool, 'dateInitiallyApproved'])
+HMA_MP$dateInitiallyApproved <- date(temp + ymd(origin))
+bool = HMA_MP$dateApproved != ""
+temp = rep(NA, nrow(HMA_MP)); temp[bool] <- date(HMA_MP[bool, 'dateApproved'])
+HMA_MP$dateApproved <- date(temp + ymd(origin))
+bool = HMA_MP$dateClosed != ""
+temp = rep(NA, nrow(HMA_MP)); temp[bool] <- date(HMA_MP[bool, 'dateClosed'])
+HMA_MP$dateClosed <- date(temp + ymd(origin))
+
+HMA_MP <- merge(disasters, HMA_MP, by = 'disasterNumber', all.y = TRUE)
+HMA_MP <- HMA_MP[HMA_MP$incidentType %in% c(NA, 'Flood', 'Severe Storm(s)', 'Dam/Levee Break'),]
+HMA_MP <- HMA_MP[HMA_MP$propertyAction %in% c('Elevation', 'Acquisition', 'Relocation', 'Floodproofed', 'Other'),]
+HMA_MP <- HMA_MP[HMA_MP$county == 'Sonoma',]
+
+```
+

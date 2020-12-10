@@ -1,0 +1,362 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "7/21/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+require(rnoaa)
+require(quantreg)
+require(dataRetrieval)
+
+```
+
+```{r}
+## https://catalog.data.gov/dataset/usgs-national-structures-dataset-nsd-for-california-20180110-state-or-territory-filegdb-10-1
+# test1 <- st_read('./_gis/California/_structures/STRUCT_California_State_GDB/STRUCT_California_State_GDB.gdb',
+#                 layer = 'Struct_Point', quiet = TRUE)
+
+## http://sonomavegmap.org/data-downloads/
+struct <- st_read('./_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
+                 layer = 'CartographicBuildingFootprints', quiet = TRUE)
+
+## get spatial density of buildings
+# st_kde <- function(points,cellsize, bandwith, extent = NULL){
+#   if(is.null(extent)){
+#     extent_vec <- st_bbox(points)[c(1,3,2,4)]
+#   } else{
+#     extent_vec <- st_bbox(extent)[c(1,3,2,4)]
+#   }
+#   
+#   n_y <- ceiling((extent_vec[4]-extent_vec[3])/cellsize)
+#   n_x <- ceiling((extent_vec[2]-extent_vec[1])/cellsize)
+#   
+#   extent_vec[2] <- extent_vec[1]+(n_x*cellsize)-cellsize
+#   extent_vec[4] <- extent_vec[3]+(n_y*cellsize)-cellsize
+#   
+#   coords <- st_coordinates(points)
+#   matrix <- kde2d(coords[,1],coords[,2],h = bandwith,n = c(n_x,n_y),lims = extent_vec)
+#   raster(matrix)
+# }
+# 
+# points_sf <- st_as_sf(data.frame(x = rnorm(100), y = rnorm(100)), coords = c("x","y"))
+# struct_sonoma <- struct %>% st_centroid 
+# points_kde <- st_kde(struct_sonoma, 0.002, 0.01)
+# 
+# ggplot() + 
+#   geom_sf(data = sonoma %>% st_union %>% st_transform(proj4string(points_kde))) + 
+#   geom_raster(data = points_kde %>% 
+#                 mask(st_transform(sonoma, proj4string(.))) %>% 
+#                 as.data.frame(xy = TRUE) %>% 
+#                 subset(layer>0), 
+#               aes(x=x, y=y, fill=layer)) + 
+#   scale_fill_viridis_c() + 
+#   theme_void()
+
+```
+
+```{r assign claims to watersheds}
+## import claims
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+## import census tracts
+california <- counties(state = 'CA', class = 'sf')
+california$GEOID <- toNumber(california$GEOID)
+CT <- tracts(state = 'CA', county = 'sonoma', class = 'sf')
+CT <- merge(CT, data.frame(COUNTYFP = california$COUNTYFP, COUNTYNAME = california$NAME),
+            by = 'COUNTYFP', all.x = TRUE)
+CT$COUNTYID <- toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP)
+CT$GEOID <- toNumber(CT$GEOID)
+
+## intersect census tracts & latlong grid
+latlon <- st_sf(st_make_grid(CT, cellsize = 0.1, what = 'polygons', offset = c(-123.65, 38.05)))
+latlon[,c('lon', 'lat')] <- round(st_coordinates(st_centroid(latlon)), 1)
+latlon <- st_transform(latlon, st_crs(CT))
+polys <- st_intersection(CT, latlon)
+
+## assign claims to intersection polygons
+polys <- polys[,c('GEOID', 'lat', 'lon')]
+names(polys) <- c('censustract', 'latitude', 'longitude', 'geometry')
+polys$polygon_id <- 1:nrow(polys)
+
+```
+
+
+```{r assign claims to watersheds}
+## distribute claims based on building density 
+struct <- struct %>% st_transform(st_crs(CT)) %>% st_centroid
+claims_poly <- claims %>% 
+  subset(ymd(dateofloss) >= '2005-12-30' & ymd(dateofloss) <= '2006-01-05') %>%
+  # subset(ymd(dateofloss) >= '2019-02-24' & ymd(dateofloss) <= '2019-03-04') %>%
+  inner_join(st_drop_geometry(polys), by = c('censustract', 'latitude', 'longitude'))
+claims_poly[,c('lat_jitter', 'lon_jitter')] <- NA
+rr_buffer <- hydropoly_rr %>% 
+  st_transform(albers) %>% 
+  st_union %>% 
+  st_buffer(50) %>% 
+  st_transform(st_crs(polys))
+
+## limits claims to only fall in the NFHL
+NFHL <- st_read('./_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp') %>% 
+  st_transform(albers)
+floodzone <- function(x) {
+  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO', 'V', 'VE')) {
+    return('YES') 
+  } else if (x %in% c('D', 'X')) {
+    return('NO')
+  } else if (x == 'OPEN WATER') {
+    return('WATER')
+  } else {
+    return(NA)
+  }
+}
+NFHL <- NFHL %>% 
+  mutate(FLOODPLAIN = factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))) %>%
+  select(FLOODPLAIN, geometry) %>% subset(FLOODPLAIN == 'YES') %>% 
+  st_transform(st_crs(polys))
+
+NFHL <- st_buffer(NFHL, 0)
+nsplit <- function(x, n) {
+ p <- x/sum(x)
+ diff(round(n*cumsum(c(0,p))))
+}
+
+pb <- txtProgressBar(min = 0, max = length(unique(claims_poly$polygon_id)), style = 3)
+for (i in 1:length(unique(claims_poly$polygon_id))) {
+  ## identify a polygon
+  index <- unique(claims_poly$polygon_id)[i]
+  claims_index <- (claims_poly$polygon_id == index)
+  n <- sum(claims_index)
+  
+  ## split that polygon into little pieces
+  pieces <- suppressWarnings(suppressMessages(polys %>% 
+    subset(polygon_id == index) %>% 
+    st_make_grid(offset = round(st_bbox(polys[polys$polygon_id == index,])[c('xmin','ymin')]/2, 3)*2 - 0.001,
+                 cellsize = 0.002, what = 'polygons') %>% st_sf %>% 
+    mutate(pieces_id = 1:nrow(.)) %>% 
+    st_difference(rr_buffer))) #%>% st_intersection(NFHL)))
+
+  ## find the distribution of buildings within the polygon
+  buildings <- suppressWarnings(suppressMessages(struct %>% 
+    st_intersection(polys[polys$polygon_id == index,]) %>% 
+    st_intersection(pieces) %>% 
+    st_drop_geometry %>% 
+    group_by(pieces_id) %>% 
+    summarize(num_struct = length(pieces_id)) %>% 
+    mutate(num_claims = nsplit(num_struct, n)) %>% 
+    subset(num_claims > 0)))
+  
+  ggplot() + 
+    geom_sf(data = struct) + 
+    geom_sf(data = pieces)
+  
+  ggplot() + 
+    geom_sf(data = sonoma %>% st_transform(st_crs(pieces))) + 
+    geom_sf(data = pieces, fill = 'red')
+  
+  ggplot() + geom_sf(data = pieces)
+  
+  ## assign latlongs to claims
+  coords <- data.frame(X = NA, Y = NA)[-1,]
+  # if (nrow(buildings) > 0) {
+    for (j in 1:nrow(buildings)) {
+      coords <- rbind(coords, st_sample(st_transform(pieces[pieces$pieces_id == buildings$pieces_id[j],], albers), 
+                                        size = buildings$num_claims[j], type = 'random') %>% 
+                        st_transform(st_crs(CT)) %>% st_coordinates)
+    }
+    claims_poly[claims_index, c('lon_jitter', 'lat_jitter')] <- coords[sample(x = 1:nrow(coords), size = nrow(coords)),]
+  # }
+  setTxtProgressBar(pb, i)
+}
+claims_poly <- st_as_sf(claims_poly, coords = c('lon_jitter', 'lat_jitter'), crs = st_crs(CT))
+# claims_poly <- st_as_sf(claims_poly %>% subset(!is.na(lon_jitter)),
+#                         coords = c('lon_jitter', 'lat_jitter'), crs = st_crs(CT))
+
+mapview::mapview(claims_poly, zcol = 'flood_cutoff')
+# mapview::mapview(polys)
+
+```
+
+```{r}
+## get flood elevations at each claim
+flood <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma/flood2006/results/flood2006.max')
+crs(flood) <- crs(dem)
+
+claims_poly$flood_depth <- extract(flood, claims_poly) 
+claims_poly$flood_depth[is.na(claims_poly$flood_depth)] <- 0
+claims_poly$flood_cutoff <- cut(claims_poly$flood_depth, breaks = 4)
+
+ggplot() + 
+  geom_sf(data = sonoma %>% st_intersection(st_transform(ext_project, st_crs(.))), 
+          color = 'grey70') +
+  geom_sf(data = russian %>% st_intersection(st_transform(ext_project, st_crs(.))), 
+          color = 'black', size = 1) + 
+  geom_sf(data = claims_poly[order(claims_poly$flood_depth),] %>% 
+            st_intersection(st_transform(ext_project, st_crs(.))), color = 'grey60') + 
+  geom_sf(data = claims_poly[order(claims_poly$flood_depth),] %>%
+            subset(flood_depth > 0) %>% 
+            st_intersection(st_transform(ext_project, st_crs(.))), 
+          aes(color = flood_depth), size = 2) + 
+  scale_color_viridis_c(name = 'Depth (m)', direction = -1) +
+  # scale_color_distiller(palette = 'YlGnBu', direction = 1, name = 'Depth (m)') + 
+  theme_void()
+# mapview::mapview(claims_poly, zcol = 'flood_cutoff')
+
+ggplot(claims_poly %>% subset(flood_depth > 0)) + 
+  geom_point(aes(x = flood_depth, y = (amountpaidonbuildingclaim + amountpaidoncontentsclaim)/
+                   (totalbuildinginsurancecoverage + totalcontentsinsurancecoverage))) + 
+  scale_y_continuous(limits = c(0,1)) + 
+  coord_fixed(ratio = max(claims_poly$flood_depth)) + 
+  labs(x = 'Flood Depth (m)', y = 'Damage Ratio')
+
+```
+
+```{r}
+## compare FloodScan to claims
+flood2006 <- raster('./_data/FloodScan/Russian_River/storm2006/aer_sfed_max_3s_20051231-20060102_v04r00.tif')
+ggplot() + 
+  geom_sf(data = sonoma %>% st_intersection(st_transform(ext_project, st_crs(.))), color = 'grey70') +
+  geom_sf(data = russian %>% st_intersection(st_transform(ext_project, st_crs(.))), color = 'blue', size = 1) + 
+  geom_raster(data = flood2006 %>% 
+                crop(st_transform(ext_project, proj4string(.))) %>% 
+                as.data.frame(xy = TRUE) %>% 
+                setNames(c('x', 'y', 'layer')) %>% 
+                subset(layer > 0), 
+              aes(x = x, y = y), fill = 'blue', alpha = 0.5) + 
+  geom_sf(data = claims_poly %>% st_intersection(st_transform(ext_project, st_crs(.)))) + 
+  theme_void()
+
+
+flood2019 <- raster('./_data/FloodScan/Russian_River/storm2019/aer_sfed_max_3s_20190226-20190301_v04r00.tif')
+ggplot() + 
+  geom_sf(data = sonoma %>% st_intersection(st_transform(ext_project, st_crs(.))), color = 'grey70') +
+  geom_sf(data = russian %>% st_intersection(st_transform(ext_project, st_crs(.))), color = 'blue', size = 1) + 
+  geom_raster(data = flood2019 %>% 
+                crop(st_transform(ext_project, proj4string(.))) %>% 
+                as.data.frame(xy = TRUE) %>% 
+                setNames(c('x', 'y', 'layer')) %>% 
+                subset(layer > 0), 
+              aes(x = x, y = y), fill = 'blue', alpha = 0.5) + 
+  geom_sf(data = claims_poly %>% st_intersection(st_transform(ext_project, st_crs(.)))) + 
+  theme_void()
+
+```
+
+
+```{r}
+## add HAZUS-MH depth-damage curves
+hazus <- read.csv('./HAZUS.csv')
+hazus <- hazus %>% 
+  subset(Curve != 'San Francisco' & Type == 'Struct') %>% 
+  mutate(FIA = toNumber(gsub('FIA ', '', Curve))) %>% 
+  subset(FIA > 1970) %>% 
+  t %>% data.frame %>% 
+  select(-X8) %>% 
+  setNames(c('x1','x2','x3','x4','x5','x6')) %>% 
+  subset(!((1:nrow(.)) %in% 1:5)) %>% 
+  subset(1:nrow(.) != 20) %>% 
+  apply(2, toNumber) %>% data.frame %>% 
+  mutate(ft = -8:10) 
+hazus_names <- c('One Story - No Basement', 'One Story - Basement', 
+                 'Split Story - No Basement', 'Split Story - Basement', 
+                 '2+ Stories - No Basement', '2+ Stories - Basement')
+  
+ggplot(hazus) + 
+  geom_line(aes(x = ft, y = x2, color = 'One Story - Basement', linetype = 'One Story - Basement')) + 
+  geom_line(aes(x = ft, y = x1, color = 'One Story - No Basement', linetype = 'One Story - No Basement')) + 
+  geom_line(aes(x = ft, y = x4, color = 'Split Story - Basement', linetype = 'Split Story - Basement')) + 
+  geom_line(aes(x = ft, y = x3, color = 'Split Story - No Basement', linetype = 'Split Story - No Basement')) + 
+  geom_line(aes(x = ft, y = x6, color = '2+ Stories - Basement', linetype = '2+ Stories - Basement')) + 
+  geom_line(aes(x = ft, y = x5, color = '2+ Stories - No Basement', linetype = '2+ Stories - No Basement')) + 
+  scale_color_brewer(name = '', palette = 'Paired') + 
+  scale_linetype_manual(name = '', values = c(2,1,2,1,2,1)) + 
+  labs(x = 'Water Depth (ft)', y = '% Damage - Structure') + 
+  theme_classic() #+ theme(legend.position = c(0.32, 0.8), legend.background = element_blank())
+ggsave('./_plots/prob_damage.jpg', width = 3.35, height = 3.35)
+
+
+```
+
+```{r}
+## get FLEMO damage curves
+flemo <- read.csv('./flemo.csv')
+
+ggplot(flemo) + 
+  geom_line(aes(x = ft, y = HQ_SFH, color = 'SFH - Good', linetype = 'SFH - Good')) + 
+  geom_line(aes(x = ft, y = PQ_SFH, color = 'SFH - Poor', linetype = 'SFH - Poor')) + 
+  geom_line(aes(x = ft, y = HQ_Detached, color = 'Detached - Good', linetype = 'Detached - Good')) + 
+  geom_line(aes(x = ft, y = PQ_Detached, color = 'Detached - Poor', linetype = 'Detached - Poor')) + 
+  geom_line(aes(x = ft, y = HQ_MFH, color = 'MFH - Good', linetype = 'MFH - Good')) + 
+  geom_line(aes(x = ft, y = PQ_MFH, color = 'MFH - Poor', linetype = 'MFH - Poor')) + 
+  scale_color_brewer(name = '', palette = 'Paired') + 
+  scale_linetype_manual(name = '', values = c(2,1,2,1,2,1)) + 
+  labs(x = 'Water Depth (ft)', y = '% Damage - Structure') + 
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_classic()
+
+```
+
+
+```{r}
+## get beta distribution parameters
+wing2020 <- data.frame(water_ft = c(1:5,7), 
+                       alpha = c(0.42, 0.48, 0.49, 0.53, 0.68, 0.80),
+                       beta = c(0.80, 0.65, 0.52, 0.41, 0.42, 0.38))
+
+beta.dist <- data.frame(x = seq(0.01, 0.99, 0.01))
+for (i in 1:6) {
+  beta.dist[,i+1] <- dbeta(beta.dist$x, wing2020$alpha[i], wing2020$beta[i])
+}
+names(beta.dist) <- c('x', paste0(wing2020$water_ft, 'ft'))
+beta.dist <- melt(beta.dist, id.vars = 'x', variable.name = 'water_ft', value.name = 'DM')
+ggplot(beta.dist) + 
+  geom_line(aes(x = x, y = toNumber(DM), color = water_ft, group = water_ft), size = 1) + 
+  labs(x = 'Relative Damage (%)', y = 'Probability Density') + 
+  scale_color_brewer(palette = 'Spectral')
+  # scale_color_viridis_d()
+
+RColorBrewer::display.brewer.all()
+
+
+```
+
+```{r}
+## DV|DM: get SFH valuations for Sonoma
+medval <- 657244 #median home value from Zillow
+housing <- st_read('./_gis/California/_structures/SimplyAnalytics_SonomaHousing/SimplyAnalytics_Shapefiles_2020-08-05_17_52_48_84f11ceb99dafe222dde3767eb4fe663.shp', quiet = TRUE)
+names(housing)[3:4] <- c('Households', 'HousingUnits')
+
+housing$value <- housing$HousingUnits * medval
+ggplot(housing) + 
+  geom_sf(aes(fill = value/1e6), color = 'grey20') + 
+  scale_fill_viridis_c(name = 'Housing Value ($M)') + 
+  theme_void()
+
+```
+

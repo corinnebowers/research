@@ -1,0 +1,1097 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "8/24/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+require(rnoaa)
+require(quantreg)
+
+```
+
+```{r}
+## slide 18
+size <- 6
+
+##
+dem <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy.tif')
+topobathy <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy_save.tif')
+dem <- crop(dem, topobathy)
+aoi <- extent(dem) %>% 
+  as('SpatialPolygons') %>% 
+  as('sf') %>% 
+  st_set_crs(proj4string(dem)) %>% 
+  st_transform(st_crs(sonoma))  #the area under consideration, in sf format
+catalog <- generate_AR_catalog(aoi)
+
+load('./_data/grid_catalog.Rdata')
+tracker.raster <- tracker[,c(2,1,3,4)]
+tracker.raster <- rasterFromXYZ(tracker.raster, crs = st_crs(california)$proj4string) 
+tracker.id <- rasterize(california, tracker.raster, getCover = TRUE) %>% 
+  as.data.frame(xy = TRUE) %>% 
+  subset(layer > 0) %>% 
+  left_join(tracker, by = c('x'='lon', 'y'='lat')) %>% 
+  select(step) %>% 
+  unlist %>% unname %>% sort
+tracker.id <- tracker.id[!(tracker.id %in% c(827,1185))]  ## these ones cause issues
+ggplot() + 
+  geom_raster(data = tracker[tracker$step %in% tracker.id,], aes(x = lon, y = lat, fill = AR/40)) +
+  geom_sf(data = california, fill = NA, color = 'grey20') + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = NA, color = 'white') + 
+  # scale_fill_viridis_c(na.value = NA) + 
+  scale_fill_distiller(palette = 'Blues', direction = 1, na.value = NA) + 
+  ggtitle('AR Frequency in California') + 
+  labs(x = '', y = '', fill = 'ARs/year') + 
+  lims(x = c(-125,-113), y = c(31,43)) + 
+  theme_void()
+ggsave('./_plots/quals/slide18_fig1.jpg', width = size, height = size)
+
+##
+IVT_seq <- seq(0, max(catalog$IVT_max)+50, 10)
+dur_seq <- seq(0, max(catalog$duration)+5, 1)
+exceed <- matrix(nrow = length(IVT_seq), ncol = length(dur_seq))
+for (i in 1:length(IVT_seq)) {
+  for (j in 1:length(dur_seq)) {
+    exceed[i,j] <- ar_list[ar_list$IVT_max >= IVT_seq[i] & 
+                             ar_list$duration >= dur_seq[j],] %>% nrow
+  }
+}
+exceed <- data.frame(exceed)
+names(exceed) <- dur_seq
+exceed <- cbind(IVT = IVT_seq, exceed)
+exceed <- melt(exceed, id.vars = 'IVT', variable.name = 'duration', 
+               value.name = 'freq')
+exceed$duration <- toNumber(exceed$duration)
+
+g <- ggplot() + 
+  geom_raster(data = exceed, aes(x = IVT, y = duration, fill = freq/40)) +
+  ggtitle('AR Exceedance Rate') +
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)', 
+       fill = 'ARs/year') +
+  coord_fixed(ratio = 7) +
+  scale_x_continuous(limits = c(250, NA), breaks = seq(250, 1500, 250), minor_breaks = seq(250, 1500, 250)) + 
+  scale_y_continuous(breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24)) + 
+  scale_fill_viridis_c(option = 'magma', direction = -1)
+  # scale_fill_distiller(palette = 'OrRd', direction = 1)
+
+temp <- catalog %>% 
+  mutate(wateryear = ifelse(month(start_day) %in% 10:12, year(start_day)+1, year(start_day))) %>%
+  mutate(IVT_norm = IVT_max/max(IVT_max), 
+         duration_norm = duration/max(duration), 
+         hazard_norm = sqrt(IVT_norm^2 + duration_norm^2)) %>% 
+  aggregate(hazard_norm ~ wateryear, data = ., max) %>% 
+  left_join(catalog %>% 
+              mutate(wateryear = ifelse(month(start_day) %in% 10:12, year(start_day)+1, year(start_day))) %>% 
+              mutate(IVT_norm = IVT_max/max(IVT_max), 
+                     duration_norm = duration/max(duration), 
+                     hazard_norm = sqrt(IVT_norm^2 + duration_norm^2)), 
+        by = c('hazard_norm', 'wateryear'))
+
+g
+ggsave('./_plots/quals/slide18_fig4.jpg', width = size, height = size)
+
+g + 
+  # geom_point(data = temp, aes(x = IVT_max, y = duration), shape = 21, size = 1.5, color = 'white', fill = 'black') + 
+  geom_point(data = temp, aes(x = IVT_max, y = duration), color = 'black') + 
+  geom_point(aes(x = catalog[399, 'IVT_max'], y = catalog[399, 'duration']), color = 'red')
+ggsave('./_plots/quals/slide18_fig2.jpg', width = size, height = size)
+
+##
+IVT_breaks <- seq(250, 1250, 250) + 125
+duration_breaks <- seq(0, 144, 24) + 12
+df <- expand.grid(IVT = IVT_breaks, duration = duration_breaks)
+ARcat <- function(IVT, duration) {
+  if (duration >= 48) {
+    return(ifelse(IVT >= 1000, 5, 
+                  ifelse(IVT >= 750, 4, 
+                         ifelse(IVT >= 500, 3, 2))))
+  } else if (duration >= 24) {
+    return(ifelse(IVT >= 1250, 5, 
+                  ifelse(IVT >= 1000, 4, 
+                         ifelse(IVT >= 750, 3, 
+                                ifelse(IVT >= 500, 2, 1)))))
+  } else {
+    return(ifelse(IVT >= 1250, 4, 
+                  ifelse(IVT >= 1000, 3, 
+                         ifelse(IVT >= 750, 2, 
+                                ifelse(IVT >= 500, 1, 0)))))
+  }
+}
+for (i in 1:nrow(df)) {df$cat[i] <- ARcat(df$IVT[i], df$duration[i])}
+
+g + 
+  geom_hline(yintercept = duration_breaks[1:2] + 12, color = 'gray50', linetype = 'dashed') + 
+  geom_vline(xintercept = IVT_breaks[1:4] + 125, color = 'gray50', linetype = 'dashed') + 
+  ggnewscale::new_scale('fill') + 
+  geom_label(data = df %>% subset(duration <= 60), aes(x = IVT, y = duration, 
+                            label = paste0('Cat ', cat), fill = factor(cat)),
+             fontface = 'bold', show.legend = FALSE) +
+  scale_fill_brewer(palette = 'Spectral', direction = -1)
+ggsave('./_plots/quals/slide18_fig3.jpg', width = size, height = size)
+
+```
+
+```{r}
+## slide 19
+
+##
+storm <- catalog[399,]
+catalog$precip[catalog$precip < 0] <- 0
+catalog <- catalog[order(catalog$precip),]
+catalog$cut <- cut(catalog$IVT_max, 20)
+for (c in unique(catalog$cut)) {
+  index <- catalog$cut == c
+  catalog[index, 'precip.q'] <- (1:sum(index))/(sum(index)+1)
+}
+
+t90 <- rq(precip ~ IVT_max, catalog, tau = 0.9)
+t90.boot <- predict(t90, newdata = data.frame(IVT_max = catalog$IVT_max), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t50 <- rq(precip ~ IVT_max, catalog, tau = 0.5)
+t50.boot <- predict(t50, newdata = data.frame(IVT_max = catalog$IVT_max), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t10 <- rq(precip ~ IVT_max, catalog, tau = 0.1)
+t10.boot <- predict(t10, newdata = data.frame(IVT_max = catalog$IVT_max), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+
+ggplot(data = catalog) + 
+  geom_point(aes(x = IVT_max, y = precip/25.4, color = precip.q)) + 
+  scale_color_distiller(palette = 'Spectral', guide = 'colorbar') + 
+  geom_line(aes(x = IVT_max, y = t90$fitted.values/25.4), color = 'red') + 
+  geom_ribbon(aes(x = IVT_max, ymin = t90.boot$lower/25.4, ymax = t90.boot$higher/25.4), 
+              fill = 'red', alpha = 0.25) + 
+  geom_line(aes(x = IVT_max, y = t50$fitted.value/25.4), color = 'goldenrod') + 
+  geom_ribbon(aes(x = IVT_max, ymin = t50.boot$lower/25.4, ymax = t50.boot$higher/25.4), 
+              fill = 'goldenrod', alpha = 0.25) + 
+  geom_line(aes(x = IVT_max, y = t10$fitted.values/25.4), color = 'blue') +
+  geom_ribbon(aes(x = IVT_max, ymin = t10.boot$lower/25.4, ymax = t10.boot$higher/25.4), 
+              fill = 'blue', alpha = 0.25) + 
+  geom_vline(xintercept = storm$IVT_max, linetype = 'dashed') + 
+  ggtitle('IVT vs. Precipitation') + 
+  labs(y = 'Storm Total Precipitation (in)', x = 'Storm Max IVT (kg/m/s)',
+       color = 'Precip Quantile') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  coord_fixed(ratio = max(catalog$IVT_max)/max(catalog$precip)/1.4*25.4) + 
+  theme_classic()
+ggsave('./_plots/quals/slide19_fig1.jpg', width = 5, height = 5)
+
+##
+catalog$cut <- cut(catalog$duration, 25)
+for (c in unique(catalog$cut)) {
+  index <- catalog$cut == c
+  catalog[index, 'precip.q'] <- (1:sum(index))/(sum(index)+1)
+}
+
+t90 <- rq(precip ~ duration, catalog, tau = 0.9)
+t90.boot <- predict(t90, newdata = data.frame(duration = catalog$duration), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t50 <- rq(precip ~ duration, catalog, tau = 0.5)
+t50.boot <- predict(t50, newdata = data.frame(duration = catalog$duration), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t10 <- rq(precip ~ duration, catalog, tau = 0.1)
+t10.boot <- predict(t10, newdata = data.frame(duration = catalog$duration), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+
+ggplot(data = catalog) + 
+  geom_point(aes(x = duration, y = precip/25.4, color = precip.q)) + 
+  scale_color_distiller(palette = 'Spectral', guide = 'colorbar') + 
+  geom_line(aes(x = duration, y = t90$fitted.values/25.4), color = 'red') + 
+  geom_ribbon(aes(x = duration, ymin = t90.boot$lower/25.4, ymax = t90.boot$higher/25.4), 
+              fill = 'red', alpha = 0.25) + 
+  geom_line(aes(x = duration, y = t50$fitted.values/25.4), color = 'goldenrod') + 
+  geom_ribbon(aes(x = duration, ymin = t50.boot$lower/25.4, ymax = t50.boot$higher/25.4), 
+              fill = 'goldenrod', alpha = 0.25) + 
+  geom_line(aes(x = duration, y = t10$fitted.values/25.4), color = 'blue') +
+  geom_ribbon(aes(x = duration, ymin = t10.boot$lower/25.4, ymax = t10.boot$higher/25.4), 
+              fill = 'blue', alpha = 0.25) + 
+  geom_vline(xintercept = storm$duration, linetype = 'dashed') + 
+  ggtitle('Duration vs. Precipitation') + 
+  labs(y = 'Storm Total Precipitation (in)', x = 'Storm Duration (hours)',
+       color = 'Precip Quantile') + 
+  scale_x_continuous(expand = c(0.01,0)) + scale_y_continuous(expand = c(0,0)) + 
+  coord_fixed(ratio = max(catalog$duration)/max(catalog$precip)/1.4*25.4) + 
+  theme_classic()
+ggsave('./_plots/quals/slide19_fig2.jpg', width = 5, height = 5)
+
+##
+catalog <- catalog[order(catalog$AR),]
+quant.model <- list()
+dx <- 0.01
+tau <- seq(dx, 1-dx, dx)
+for (i in 1:length(tau)) {
+  quant.model[[i]] <- rq(precip ~ IVT_max + duration, data = catalog, tau = tau[i])
+}
+quant.result <- data.frame(tau = tau, fit = NA, lower = NA, higher = NA)
+for (i in 1:length(tau)) {
+  quant.boot <- predict(quant.model[[i]], newdata = AR[1,], 
+                        type = 'percentile', interval = 'confidence', se = 'boot')
+  quant.result[i, 2:4] <- quant.boot
+}
+
+ggplot() + 
+  geom_line(data = quant.result, aes(x = tau, y = fit/25.4)) + 
+  geom_ribbon(data = quant.result, aes(x = tau, ymin = lower/25.4, ymax = higher/25.4),
+              fill = 'grey70', alpha = 0.5) + 
+  geom_point(data = precip, aes(x = q, y = precip_mm/25.4)) + 
+  geom_hline(yintercept = catalog[399, 'precip']/25.4, linetype = 'dashed') +
+  geom_segment(aes(x = 0.1, xend = 0.1, 
+                   y = quant.result[round(quant.result$tau,2) == 0.1, 'lower']/25.4, 
+                   yend = quant.result[round(quant.result$tau,2) == 0.1, 'higher']/25.4), 
+               size = 1, color = 'blue') + 
+  geom_segment(aes(x = 0.5, xend = 0.5, 
+                   y = quant.result[round(quant.result$tau,2) == 0.5, 'lower']/25.4, 
+                   yend = quant.result[round(quant.result$tau,2) == 0.5, 'higher']/25.4), 
+               size = 1, color = 'goldenrod') + 
+  geom_segment(aes(x = 0.9, xend = 0.9, 
+                   y = quant.result[round(quant.result$tau,2) == 0.9, 'lower']/25.4, 
+                   yend = quant.result[round(quant.result$tau,2) == 0.9, 'higher']/25.4), 
+               size = 1, color = 'red') + 
+  ggtitle('Precipitation Cumulative Quantile Distribution') + 
+  labs(x = 'Quantile', y = 'Expected Precipitation (in)') + 
+  scale_x_continuous(limits = c(0,1), expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  coord_fixed(ratio = 1/300*25.4) + 
+  # coord_flip() + 
+  theme_classic()
+ggsave('./_plots/quals/slide19_fig3.jpg', width = 6, height = 5)
+
+```
+
+```{r}
+## slide 19, again
+
+##
+g <- ggplot()
+n.precip <- 1e2
+dx <- 0.01
+precip.threshold <- dx
+pb <- txtProgressBar(min = 0, max = 10, style = 3)
+for (n in 1:20) {
+  precip.stochastic <- expand.grid(n.AR = 1:n.AR, n.precip = 1:n.precip)
+  precip.stochastic$q <- sample(seq(precip.threshold, 1-dx, dx), size = n.AR * n.precip, replace = TRUE)
+  for (i in 1:nrow(precip.stochastic)) {
+    index <- which(round(quant.result$tau, 2) == round(precip$q[i], 2))
+    precip.stochastic$precip_mm[i] <- rltriangle(n = 1, a = quant.result[index, 'lower'], 
+                                      b = quant.result[index, 'higher'], 
+                                      c = quant.result[index, 'fit'])
+  }
+  g <- g + geom_density(data = precip.stochastic, aes(x = precip_mm/25.4), color = 'grey80', adjust = 0.9)
+  setTxtProgressBar(pb, n)
+}
+g + 
+  geom_density(data = quant.result, aes(x = fit/25.4), size = 1, adjust = 0.75) + 
+  ggtitle('Precipitation PDF') + 
+  labs(x = 'Precipitation (in)', y = 'Frequency of Occurrence') + 
+  geom_vline(xintercept = catalog[399, 'precip']/25.4, linetype = 'dashed') + 
+  geom_rug(data = precip, aes(x = precip_mm/25.4), size = 1, color = '#8c1515') + 
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() 
+ggsave('./_plots/quals/slide19_fig5d.jpg', width = 6, height = 5)
+
+
+
+```
+
+
+```{r}
+## slide 20
+catalog$wateryear <- ifelse(month(catalog$start) %in% 10:12, year(catalog$start)+1, year(catalog$start))
+wateryear.df <- data.frame(wateryear = unique(catalog$wateryear), precip = NA, runoff = NA)
+for (wy in 1:nrow(wateryear.df)) {
+  index <- catalog %>% 
+    subset(wateryear == unique(wateryear)[wy]) %>% 
+    select(precip) %>% unlist %>% which.max
+  index.value <- catalog %>% 
+    subset(wateryear == unique(wateryear)[wy]) %>% 
+    subset(1:nrow(.) == index)
+  wateryear.df[wy, 'precip'] <- index.value$precip / 25.4
+  wateryear.df[wy, 'runoff'] <- index.value$runoff / 25.4
+  wateryear.df[wy, 'IVT_max'] <- index.value$IVT_max
+  wateryear.df[wy, 'duration'] <- index.value$duration
+}
+P <- wateryear.df$precip
+Q <- wateryear.df$runoff
+S <- 5 * (P + 2*Q - sqrt(5*P*Q + 4*Q^2))
+S <- ifelse(P > 0 & Q > 0, S, NA)
+S.best <- Mean(log(S))
+S.std <- sd(log(S), na.rm = TRUE)
+S.lower <- S.best + 1.282*S.std
+S.upper <- S.best - 1.282*S.std
+CN <- 1000/(10+exp(S.best))
+CN.lower <- 1000/(10 + exp(S.lower))
+CN.upper <- 1000/(10 + exp(S.upper))
+
+dx <- seq(0, 20, 0.1)
+ggplot() + 
+  geom_ribbon(aes(x = dx, 
+                  ymin = ifelse(dx < 0.2*exp(S.lower), 0, (dx - 0.2*exp(S.lower))^2/(dx + 0.8*exp(S.lower))), 
+                  ymax = ifelse(dx < 0.2*exp(S.upper), 0, (dx - 0.2*exp(S.upper))^2/(dx + 0.8*exp(S.upper)))),
+              fill = 'grey80', alpha = 0.5) +
+  geom_line(aes(x = dx, y = ifelse(dx < 0.2*exp(S.best), 0, (dx - 0.2*exp(S.best))^2/(dx + 0.8*exp(S.best)))), 
+            color = ggcolor(1), size = 1) +
+  geom_point(data = runoff, aes(x = precip_in, y = runoff_in)) + 
+  geom_vline(xintercept = catalog[309, 'precip']/25.4, linetype = 'dashed') + 
+  geom_hline(yintercept = catalog[309, 'runoff']/25.4, linetype = 'dashed') + 
+  ggtitle('Russian River Curve Number Estimation') + 
+  labs(x = 'Precipitation Estimate (in)', y = 'Runoff Estimate (in)') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  coord_fixed(ratio = 1) + 
+  theme_classic()
+ggsave('./_plots/quals/slide20_fig1.jpg', width = 5.5, height = 5.5)
+
+ggplot() + 
+  geom_ribbon(aes(x = dx, 
+                  ymin = ifelse(dx < 0.2*exp(S.lower), 0, (dx - 0.2*exp(S.lower))^2/(dx + 0.8*exp(S.lower))), 
+                  ymax = ifelse(dx < 0.2*exp(S.upper), 0, (dx - 0.2*exp(S.upper))^2/(dx + 0.8*exp(S.upper)))),
+              fill = 'grey80', alpha = 0.5) +
+  geom_line(aes(x = dx, y = ifelse(dx < 0.2*exp(S.best), 0, (dx - 0.2*exp(S.best))^2/(dx + 0.8*exp(S.best)))), 
+            color = ggcolor(1), size = 1) +
+  geom_point(data = wateryear.df, aes(x = precip, y = runoff)) + 
+  geom_vline(xintercept = catalog[399, 'precip']/25.4, linetype = 'dashed') + 
+  geom_hline(yintercept = catalog[399, 'runoff']/25.4, linetype = 'dashed') + 
+  ggtitle('Russian River Curve Number Estimation') + 
+  labs(x = 'Precipitation Estimate (in)', y = 'Runoff Estimate (in)') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  coord_fixed(ratio = 1) + 
+  theme_classic()
+ggsave('./_plots/quals/slide20_fig2.jpg', width = 5.5, height = 5.5)
+
+```
+
+```{r}
+## slide 21
+
+##
+sonoma <- tigris::tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(toNumber(GEOID) != 6097990100)
+g <- ggplot() +
+  geom_sf(data = sonoma %>% st_intersection(aoi) %>% st_transform(proj4string(inundation[[1]])),
+          fill = 'grey90', color = 'grey75') +
+  # geom_sf(data = aoi %>% st_transform(proj4string(inundation[[1]])), color = 'black', alpha = 0.5) +
+  ggtitle('LISFLOOD Inundation Map') +
+  theme_void() + theme(plot.title = element_text(hjust = 0.5))
+
+for (i in 1:nlayers(inundation)) {
+  g <- g + geom_raster(data = inundation[[i]] %>%
+                         as.data.frame(xy = TRUE) %>%
+                         setNames(c('x','y','layer')) %>%
+                         subset(layer > 0),
+                       aes(x = x, y = y), fill = 'blue', alpha = 1.5/nlayers(inundation))
+}
+g
+ggsave('./_plots/quals/slide21_fig1.jpg', width = 5, height = 5)
+
+##
+flood2006 <- raster('./_data/FloodScan/Russian_River/storm2006/aer_sfed_max_3s_20051231-20060102_v04r00.tif')
+ggplot() + 
+  geom_sf(data = sonoma %>% st_intersection(st_transform(aoi, st_crs(.))), color = 'grey70', fill = 'grey90') +
+  geom_sf(data = russian %>% st_intersection(st_transform(aoi, st_crs(.))), color = 'grey40', size = 1) + 
+  geom_raster(data = flood2006 %>% 
+                crop(st_transform(aoi, proj4string(.))) %>% 
+                as.data.frame(xy = TRUE) %>% 
+                setNames(c('x', 'y', 'layer')) %>% 
+                subset(layer > 0), 
+              aes(x = x, y = y), fill = 'blue', alpha = 0.5) + 
+  geom_sf(data = claims_poly %>% st_intersection(st_transform(aoi, st_crs(.)))) + 
+  ggtitle('2006 Flood Damage Estimates') + 
+  theme_void() + theme(plot.title = element_text(hjust = 0.5))
+ggsave('./_plots/quals/slide21_fig2.jpg', width = 5, height = 5)
+
+```
+
+```{r}
+## slide 21, again
+
+##
+g.raster <- g
+inundation.mean <- calc(inundation, mean)
+struct <- st_read('./_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
+                  layer = 'CartographicBuildingFootprints', quiet = TRUE) %>% 
+  st_transform(crs(inundation.mean)) %>% st_buffer(0)
+sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf')
+g <- ggplot() + 
+  geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(inundation.mean)), fill = 'white', color = 'grey70') + 
+  geom_raster(data = inundation.mean %>% 
+                as.data.frame(xy = TRUE) %>% 
+                setNames(c('x', 'y', 'z')) %>% 
+                subset(z > 0), 
+              aes(x = x, y = y, fill = z*mft)) + 
+  scale_fill_distiller(name = 'Depth (ft)', palette = 'Blues', direction = 1, limits = c(0, 10), 
+                       na.value = brewer.pal(4, 'Blues')[4]) + 
+  geom_sf(data = hydropoly_rr %>% 
+            st_transform(st_crs(sonoma)) %>% 
+            st_intersection(st_union(sonoma)) %>% 
+            st_transform(crs(inundation.mean)), 
+          color = 'black', fill = 'black') + 
+  theme_void()
+
+ggplot() + 
+  geom_raster(data = inundation.mean %>% as.data.frame(xy = TRUE) %>% setNames(c('x', 'y', 'z')) %>% subset(z > 0), 
+              aes(x = x, y = y, fill = z*mft))
+
+g + 
+  geom_sf(data = struct %>% st_intersection(box1), color = 'grey25', fill = 'grey25') +
+  # lims(x = c(-13681000, -13675000), y = c(4648000, 4654000)) #3a
+  lims(x = c(-13681000, -13678000), y = c(4648500, 4651500)) #3b
+ggsave('./_plots/quals/slide21_fig3b.jpg', width = 4, height = 4)
+
+g + 
+  geom_sf(data = struct %>% st_intersection(box2), color = 'grey25', fill = 'grey25') +
+  # lims(x = c(-13696000, -13690000), y = c(4644000, 4650000)) #4a
+  # lims(x = c(-13694000, -13691000), y = c(4645000, 4648000)) #4b
+  lims(x = c(-13693000, -13690000), y = c(4649500, 4652500)) #4c
+ggsave('./_plots/quals/slide21_fig4c.jpg', width = 4, height = 4)
+
+##
+box1 <- expand.grid(x = c(-13681000, -13678000), y = c(4648500, 4651500))
+box1 <- box1[c(1,2,4,3,1),]
+box1 <- st_sf(st_sfc(st_polygon(list(as.matrix(box1)))))
+st_crs(box1) <- crs(inundation)
+box2 <- expand.grid(x = c(-13694000, -13691000), y = c(4645000, 4648000))
+box2 <- box2[c(1,2,4,3,1),]
+box2 <- st_sf(st_sfc(st_polygon(list(as.matrix(box2)))))
+st_crs(box2) <- crs(inundation)
+box3 <- expand.grid(x = c(-13693000, -13690000), y = c(4649500, 4652500))
+box3 <- box3[c(1,2,4,3,1),]
+box3 <- st_sf(st_sfc(st_polygon(list(as.matrix(box3)))))
+st_crs(box3) <- crs(inundation)
+
+g.raster + geom_sf(data = box1, color = '#8c1515', fill = '#8c1515', alpha = 0.35)
+ggsave('./_plots/quals/slide21_fig5a.jpg', width = 5, height = 5)
+g.raster + geom_sf(data = box2, color = '#8c1515', fill = '#8c1515', alpha = 0.35)
+ggsave('./_plots/quals/slide21_fig5b.jpg', width = 5, height = 5)
+g.raster + geom_sf(data = box3, color = '#8c1515', fill = '#8c1515', alpha = 0.35)
+ggsave('./_plots/quals/slide21_fig5c.jpg', width = 5, height = 5)
+
+
+diff(c(4644500, 4648500))
+
+```
+
+
+```{r}
+## slide 22
+dim(damage[[1]])
+
+temp <- lapply(damage, function(x) apply(x, 2, max)) %>% unlist
+temp2 <- temp[temp > 0]
+
+ggplot(data = data.frame(dm = temp2)) + 
+  geom_histogram(aes(x = dm), color = 'black', fill = 'white', bins = sqrt(length(temp2)))
+
+```
+
+```{r}
+## slide 23
+
+## 
+loss.dist <- cbind(loss[,1:6], total_loss = apply(loss[,-(1:6)], 1, sum))
+ggplot() + 
+  # geom_rect(aes(xmin = 50, xmax = 80, ymin = 0, ymax = Inf), fill = 'grey90') + 
+  geom_histogram(data = loss.dist, 
+                 aes(x = total_loss/1e6, y = ..density..), 
+                 color = 'black', fill = 'grey90', alpha = 0.75, bins = sqrt(nrow(loss.dist))) + 
+  # geom_vline(xintercept = 50, linetype = 'dashed') + 
+  geom_vline(xintercept = 104*0.81*0.85, linetype = 'dashed') + 
+  ggtitle('Distribution of Total Loss') + 
+  labs(x = 'Total Loss ($millions)', y = 'Frequency of Occurrence') + 
+  scale_x_continuous(limits = c(0, 120), expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + theme(plot.margin = margin(1,10,1,1))
+ggsave('./_plots/quals/slide23_fig1.jpg', width = 6, height = 5)
+
+(loss[,-(1:6)] %>% apply(1, sum) %>% min)/1e6
+(loss[,-(1:6)] %>% apply(1, sum) %>% mean)/1e6
+(loss[,-(1:6)] %>% apply(1, sum) %>% max)/1e6
+
+## 
+sonoma$GEOID <- toNumber(sonoma$GEOID)
+loss.sf <- loss %>% 
+  melt(id.vars = c('n.AR', 'n.precip', 'n.runoff', 'n.depth', 'n.damage', 'n.loss'), 
+       variable.name = 'GEOID', value.name = 'Loss') %>% 
+  mutate(GEOID = toNumber(gsub('CT', '', GEOID))) %>% 
+  group_by(GEOID) %>% 
+  summarize(mean_loss = mean(Loss)) %>% 
+  full_join(sonoma, ., by = 'GEOID')
+ggplot() + 
+  geom_sf(data = sonoma, fill = NA, color = 'grey70') +
+  geom_sf(data = loss.sf, aes(fill = mean_loss/1e6)) + 
+  geom_sf(data = russian %>% st_intersection(sonoma), size = 1, color = 'black') + 
+  scale_fill_distiller(name = 'Mean Loss ($M)', palette = 'Blues', direction = 1, na.value = NA) + 
+  ggtitle('Mean Loss by Census Tract') + 
+  theme_void()
+ggsave('./_plots/quals/slide23_fig2.jpg', width = 6, height = 5)
+
+```
+
+```{r}
+## slide 32
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+## 
+california <- counties(state = 'CA', class = 'sf')
+claims <- merge(claims, data.frame(countycode = 6000 + toNumber(california$COUNTYFP),
+                                   COUNTYNAME = california$NAME), 
+                by = 'countycode', all.x = TRUE)
+
+temp <- claims %>% 
+  subset(ymd(dateofloss) >= '2005-12-24' & ymd(dateofloss) <= '2006-01-05') %>%
+  subset(COUNTYNAME == 'Sonoma') %>% 
+  mutate(loss = apply(cbind(amountpaidonbuildingclaim, amountpaidoncontentsclaim), 1, Sum),
+         coverage = apply(cbind(totalbuildinginsurancecoverage, totalcontentsinsurancecoverage), 1, Sum), 
+         payout = loss/coverage) %>%
+  subset(payout <= 1)
+ggplot(temp) + 
+  geom_histogram(aes(x = payout), color = 'black', fill = 'grey90', bins = sqrt(nrow(temp))) + 
+  ggtitle('Damage Ratio - NFIP Claims', subtitle = '2006 New Years Storm, Sonoma County') + 
+  labs(x = 'Claim Payout / Policy Limit', y = 'Number of Observations') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+ggsave('./_plots/quals/slide32_fig1.jpg', width = 5, height = 5)
+
+## 
+penetration <- policies %>%
+  group_by(censustract) %>%
+  rename(GEOID = censustract) %>%
+  subset(year(ymd(policyeffectivedate)) <= 2018) %>%
+  summarize(years = length(unique(year(ymd(policyeffectivedate)))),
+            num_policies = Sum(counter)/years, 
+            value_policies = (Sum(totalbuildinginsurancecoverage) + Sum(totalcontentsinsurancecoverage))/years)
+
+housing <- read.csv('./_data/ACS/ACS_housing.csv', strip.white = TRUE)
+penetration <- right_join(penetration, data.frame(GEOID = housing$GEO.id2, HOUSES = housing$HC01_VC03, SFH = housing$HC01_VC14), 
+                          by = 'GEOID')
+penetration$num_policies[is.na(penetration$num_policies)] <- 0
+penetration$value_policies[is.na(penetration$value_policies)] <- 0
+
+penetration$penetration <- penetration$num_policies/penetration$HOUSES
+penetration$penetration[is.nan(penetration$penetration)] <- 0
+penetration$penetration[is.infinite(penetration$penetration)] <- 1
+
+claims <- inner_join(claims, data.frame(censustract = penetration$GEOID, penetration = penetration$penetration), 
+                     by = 'censustract')
+claims$damage <- apply(cbind(claims$amountpaidonbuildingclaim, claims$amountpaidoncontentsclaim), 1, Sum) /
+  claims$penetration
+claims$damage[is.nan(claims$damage)] <- 0
+
+ggplot(claims) + 
+  geom_histogram(aes(x = damage), color = 'black', fill = 'white', bins = sqrt(nrow(claims))) + 
+  scale_x_log10()
+
+sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% 
+  mutate(GEOID = toNumber(GEOID)) %>% 
+  subset(GEOID != 6097990100) %>% 
+  left_join(penetration, by = 'GEOID')
+ggplot() + 
+  geom_sf(data = sonoma, aes(fill = penetration*100)) +
+  ggtitle('NFIP Penetration Rate') +
+  scale_fill_viridis_c(name = 'Penetration (%)') + 
+  theme_void()
+
+##
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+sheldus <- read.csv('./_data/SHELDUS/SHELDUS Sonoma.csv')
+sheldus_events <- sheldus %>%
+  subset(Hazard_Simple == 'Flooding' | Hazard_Simple == 'Flash Flood') %>%
+  group_by(StartDate) %>%
+  summarize(duration = mean(Duration_Days), 
+            loss = Sum(PropertyDmg), 
+            hazard = getmode(paste(Hazard_Simple))) %>% 
+  mutate(StartDate = mdy(paste(StartDate)),
+         EndDate = StartDate + days(duration) - 1)
+sheldus_events <- sheldus_events[order(sheldus_events$StartDate),]
+sheldus_events$id <- 1
+
+eventid <- 1
+for (i in 2:(nrow(sheldus_events))) {
+  if (sheldus_events$EndDate[i-1]+1 < sheldus_events$StartDate[i]) {
+    eventid <- eventid + 1
+  }
+  sheldus_events$id[i] <- eventid
+}
+sheldus_events <- sheldus_events %>%
+  group_by(id) %>%
+  summarize(StartDate = min(StartDate), 
+            EndDate = max(EndDate), 
+            duration = toNumber(EndDate - StartDate + 1), 
+            loss = Sum(loss), 
+            hazard = getmode(paste(hazard)))
+
+claims_sonoma <- claims %>% 
+  subset(COUNTYNAME == 'Sonoma') %>% 
+  subset(is.finite(damage))
+sheldus_events$claims_loss <- 0
+for (i in 1:nrow(sheldus_events)) {
+  sheldus_events$claims_loss[i] <- claims_sonoma %>% 
+    subset(dateofloss >= sheldus_events$StartDate[i] & dateofloss <= sheldus_events$EndDate[i]) %>% 
+    summarize(claims_loss = Sum(damage)) %>% toNumber
+}
+sheldus_events$loss <- sheldus_events$loss + 1
+sheldus_events$claims_loss <- sheldus_events$claims_loss + 1
+
+maxval <- max(max(sheldus_events$loss), max(sheldus_events$claims_loss))
+ggplot() + 
+  geom_ribbon(data = data.frame(index = c(0.1, 1:100, maxval)), 
+              aes(x = index, ymin = apply(cbind(0.1, index/10), 1, max), ymax = index*10), fill = 'grey95') +
+  geom_line(data = data.frame(index = c(0.1, maxval)), aes(x = index, y = index), linetype = 'dashed') + 
+  geom_point(data = sheldus_events, aes(x = loss, y = claims_loss)) + 
+  ggtitle('NFIP vs. SHELDUS Event Comparison') + 
+  labs(x = 'SHELDUS Loss ($)', y = 'NFIP Loss ($)') + 
+  coord_fixed(ratio = 1, xlim = c(1, maxval), ylim = c(1, maxval)) + 
+  # lims(y = c(1, maxval)) + 
+  scale_x_log10(breaks = 10^seq(0,8,2), labels = scales::comma) + 
+  scale_y_log10(breaks = 10^seq(0,8,2), labels = scales::comma) + 
+  annotation_logticks(size = 0.25) + 
+  theme_classic()
+ggsave('./_plots/quals/slide32_fig2.jpg', width = 5, height = 5)
+
+```
+
+```{r}
+## slide 43
+timeline <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+df <- data.frame(date = timeline)
+df[,c('precip', 'discharge', 'IVT')] <- NA
+
+# load('./_data/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8) #+ hours(rep(seq(0, 21, 3), length(datelist)))
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+sonoma <- st_union(sonoma)
+pb <- txtProgressBar(min = 0, max = length(timeline), style = 3)
+for (i in 1:length(timeline)) {
+  d <- timeline[i]
+  
+  precip <- cpc_prcp(d, us = TRUE)
+  precip$lon <- precip$lon-360
+  precip$precip <- ifelse(precip$precip >= 0, precip$precip, NA)
+  precip <- rasterFromXYZ(precip, crs = st_crs(california)$proj4string)
+  df[df$date == d, 'precip'] <- velox(precip)$extract(sonoma) %>% lapply(Mean) %>% unlist
+  
+  IVT_raster <- apply(IVT[,,hourlist %in% d], c(1,2), Max)
+  IVT_raster <- raster(IVT_raster, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), 
+                       crs = st_crs(california)$proj4string)
+  df[df$date == d, 'IVT'] <- velox(IVT_raster)$extract(sonoma) %>% lapply(Mean) %>% unlist
+  setTxtProgressBar(pb, i)
+}
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+site.runoff <- readNWISdv(c(11464000, 11467000), parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>% 
+  renameNWISColumns() %>% 
+  full_join(readNWISsite(c(11464000, 11467000)), by = 'site_no') %>% 
+  mutate(Runoff_mmday = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) %>% 
+  group_by(Date) %>% 
+  summarize(Flow = Mean(Flow), 
+            Runoff_mmday = Mean(Runoff_mmday))
+df <- site.runoff %>% right_join(df, by = c('Date' = 'date'))
+df <- claims %>% 
+  subset(COUNTYNAME == 'Sonoma') %>% 
+  group_by(date = ymd(dateofloss)) %>% 
+  summarize(num_claims = Sum(counter),
+            value_claims = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim),
+            value_policy = Sum(totalbuildinginsurancecoverage) + Sum(totalcontentsinsurancecoverage),
+            payout = value_claims/value_policy) %>% 
+  right_join(df, by = c('date' = 'Date'))
+
+# df_save <- df
+df <- df %>% subset(month(date) %in% c(1:3, 11:12))
+
+names(df_save)
+df_save %>% 
+  group_by(month = month(date)) %>% 
+  summarize(claimdays = sum(!is.na(num_claims))) %>% 
+  View
+
+## 
+## claim days vs. all days
+ggplot() + 
+  geom_density(data = df, aes(x = IVT), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = IVT), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  labs(x = 'IVT (kg/m/s)') +
+  theme_classic() + theme(axis.title.y = element_blank())
+ggsave('./_plots/quals/slide42_fig1.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df, aes(x = precip/25.4), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = precip), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Precip (in)', breaks = 10^seq(-4, 4, 2), labels = c('0.0001', '0.01', '1', '100', '10,000')) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide42_fig2.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df, aes(x = Flow), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = Flow), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Discharge (cfs)', labels = scales::comma) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide42_fig3.jpg', width = 3, height = 4)
+ggplot(df) + 
+  geom_density(aes(x = 0, color = 'Claim Days', fill = 'Claim Days'), alpha = 0.35) + 
+  geom_density(aes(x = 0, color = 'All Days', fill = 'All Days'), alpha = 0.35) + 
+  scale_color_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  scale_fill_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  theme_void()
+ggsave('./_plots/quals/slide42_fig4.jpg', width = 3, height = 4)
+
+## 
+## claim days vs. no-claim days
+ggplot() + 
+  geom_density(data = df %>% subset(is.na(num_claims)), aes(x = IVT), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = IVT), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  labs(x = 'IVT (kg/m/s)') +
+  theme_classic() + theme(axis.title.y = element_blank())
+ggsave('./_plots/quals/slide43_fig1.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df %>% subset(is.na(num_claims)), aes(x = precip/25.4), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = precip), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Precip (in)', breaks = 10^seq(-4, 4, 2), labels = c('0.0001', '0.01', '1', '100', '10,000')) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide43_fig2.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df %>% subset(is.na(num_claims)), aes(x = Flow), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = Flow), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Discharge (cfs)', labels = scales::comma) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide43_fig3.jpg', width = 3, height = 4)
+ggplot(df) + 
+  geom_density(aes(x = 0, color = 'Claim Days', fill = 'Claim Days'), alpha = 0.35) + 
+  geom_density(aes(x = 0, color = 'All Days', fill = 'All Days'), alpha = 0.35) + 
+  scale_color_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  scale_fill_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  theme_void()
+ggsave('./_plots/quals/slide43_fig4.jpg', width = 3, height = 4)
+
+sum(!is.na(df$num_claims))/nrow(df)
+## only 2.5% of days have claims -> graphs look the same as above
+
+##
+## severe claim days vs. claim days
+## option a: number of claims >= 10
+ggplot() + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = IVT), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(num_claims >= 10), aes(x = IVT), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  labs(x = 'IVT (kg/m/s)') +
+  theme_classic() + theme(axis.title.y = element_blank())
+ggsave('./_plots/quals/slide44_fig1.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = precip/25.4), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(num_claims >= 10), aes(x = precip), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Precip (in)', breaks = 10^seq(-4, 4, 2), labels = c('0.0001', '0.01', '1', '100', '10,000')) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide44_fig2.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = Flow), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(num_claims >= 10), aes(x = Flow), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Discharge (cfs)', labels = scales::comma) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide44_fig3.jpg', width = 3, height = 4)
+ggplot(df) + 
+  geom_density(aes(x = 0, color = 'All Claim Days', fill = 'All Claim Days'), alpha = 0.35) + 
+  geom_density(aes(x = 0, color = 'Severe Claim Days', fill = 'Severe Claim Days'), alpha = 0.35) + 
+  scale_color_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  scale_fill_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  theme_void()
+ggsave('./_plots/quals/slide44_fig4.jpg', width = 3, height = 4)
+
+## option b: value of claims >= $33,000
+ggplot() + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = IVT), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(value_claims > 1e6/30), aes(x = IVT), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  labs(x = 'IVT (kg/m/s)') +
+  theme_classic() + theme(axis.title.y = element_blank())
+ggsave('./_plots/quals/slide45_fig1.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = precip/25.4), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(value_claims > 1e6/30), aes(x = precip), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Precip (in)', breaks = 10^seq(-4, 4, 2), labels = c('0.0001', '0.01', '1', '100', '10,000')) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide45_fig2.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_density(data = df %>% subset(!is.na(num_claims)), aes(x = Flow), 
+               color = 'grey70', fill = 'grey70', alpha = 0.35) + 
+  geom_density(data = df %>% subset(value_claims > 1e6/30), aes(x = Flow), 
+               color = 'grey30', fill = 'grey30', alpha = 0.35) + 
+  scale_x_log10(name = 'Discharge (cfs)', labels = scales::comma) + 
+  theme_classic() + theme(axis.title.y = element_blank()) + 
+  annotation_logticks(sides = 'b', size = 0.25)
+ggsave('./_plots/quals/slide45_fig3.jpg', width = 3, height = 4)
+ggplot(df) + 
+  geom_density(aes(x = 0, color = 'All Claim Days', fill = 'All Claim Days'), alpha = 0.35) + 
+  geom_density(aes(x = 0, color = 'Severe Claim Days', fill = 'Severe Claim Days'), alpha = 0.35) + 
+  scale_color_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  scale_fill_manual(name = 'Legend', values = c('grey70', 'grey30')) + 
+  theme_void()
+ggsave('./_plots/quals/slide45_fig4.jpg', width = 3, height = 4)
+
+## combine
+ggplot() + 
+  geom_histogram(data = df, aes(x = IVT, y = ..count../40), 
+               color = NA, fill = 'grey80', alpha = 0.5) + 
+  geom_histogram(data = df %>% subset(!is.na(num_claims)), aes(x = IVT, y = ..count../40), 
+               color = NA, fill = 'grey40', alpha = 0.5) + 
+  geom_histogram(data = df %>% subset(num_claims >= 10), aes(x = IVT, y = ..count../40), 
+               color = NA, fill = 'grey5', alpha = 0.5) + 
+  labs(x = 'IVT (kg/m/s)') +
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + theme(axis.title.y = element_blank())
+ggsave('./_plots/quals/slide46_fig1.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_histogram(data = df, aes(x = precip/25.4, y = ..count../40), 
+               color = NA, fill = 'grey80', alpha = 0.5) + 
+  geom_histogram(data = df %>% subset(!is.na(num_claims)), aes(x = precip/25.4, y = ..count../40), 
+               color = NA, fill = 'grey40', alpha = 0.5) + 
+  geom_histogram(data = df %>% subset(num_claims >= 10), aes(x = precip/25.4, y = ..count../40), 
+               color = NA, fill = 'grey5', alpha = 0.5) + 
+  scale_x_log10(name = 'Precipitation (in)', breaks = 10^seq(-4, 4, 2), 
+                labels = c('0.0001', '0.01', '1', '100', '10,000'), expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(vjust = -2.5), 
+        axis.title.x = element_text(vjust = -1),
+        axis.title.y = element_blank(), 
+        axis.ticks.length.x = unit(3, 'mm')) + 
+  annotation_logticks(sides = 'b', size = 0.25, outside = TRUE) +  
+  coord_cartesian(clip = 'off')
+ggsave('./_plots/quals/slide46_fig2.jpg', width = 3, height = 4)
+ggplot() + 
+  geom_histogram(data = df, aes(x = (Flow), y = ..count../40), 
+               color = NA, fill = 'grey80', alpha = 0.5) + 
+  geom_histogram(data = df %>% subset(!is.na(num_claims)), aes(x = (Flow), y = ..count../40), 
+               color = NA, fill = 'grey40', alpha = 0.5) + 
+  geom_histogram(data = df %>% subset(num_claims >= 10), aes(x = (Flow), y = ..count../40), 
+               color = NA, fill = 'grey5', alpha = 0.5) + 
+  scale_x_log10(name = 'Discharge (cfs)', labels = scales::comma, expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(vjust = -2.5), 
+        axis.title.x = element_text(vjust = -1),
+        axis.title.y = element_blank(), 
+        axis.ticks.length.x = unit(3, 'mm')) + 
+  annotation_logticks(sides = 'b', size = 0.25, outside = TRUE) +
+  coord_cartesian(clip = 'off')
+ggsave('./_plots/quals/slide46_fig3.jpg', width = 3, height = 4)
+ggplot(df) + 
+  geom_density(aes(x = 0, color = 'Claim Days', fill = 'Claim Days'), alpha = 0.35) + 
+  geom_density(aes(x = 0, color = 'All Days', fill = 'All Days'), alpha = 0.35) + 
+  geom_density(aes(x = 0, color = 'Severe Claim Days', fill = 'Severe Claim Days'), alpha = 0.35) + 
+  ggtitle('Comparison of Hazard Drivers, Sonoma County') +
+  labs(y = 'Average Days per Wet Season') + 
+  scale_color_manual(name = 'Legend', values = c('grey80', 'grey40', 'grey5')) + 
+  scale_fill_manual(name = 'Legend', values = c('grey80', 'grey40', 'grey5'))
+ggsave('./_plots/quals/slide46_fig4.jpg', width = 6, height = 4)
+
+```
+
+```{r}
+## slide 53
+
+##
+wing2020 <- data.frame(water_ft = c(1:5,7), 
+                       alpha = c(0.42, 0.48, 0.49, 0.53, 0.68, 0.80),
+                       beta = c(0.80, 0.65, 0.52, 0.41, 0.42, 0.38))
+beta.dist <- data.frame(x = seq(0.01, 0.99, 0.01))
+for (i in 1:6) {
+  beta.dist[,i+1] <- dbeta(beta.dist$x, wing2020$alpha[i], wing2020$beta[i])
+}
+names(beta.dist) <- c('x', paste0(wing2020$water_ft, 'ft'))
+beta.dist <- melt(beta.dist, id.vars = 'x', variable.name = 'water_ft', value.name = 'DM')
+ggplot(beta.dist) + 
+  geom_line(aes(x = x, y = toNumber(DM), color = water_ft, group = water_ft), size = 1) + 
+  ggtitle('Wing et al. (2020) Damage Distributions') +
+  labs(x = 'Relative Damage (%)', y = 'Probability Density') + 
+  scale_color_brewer(name = 'Depth (ft)', palette = 'Spectral') + 
+  scale_x_continuous(limits = c(0,1), breaks = seq(0, 1, 0.25), expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+# ggsave('./_plots/quals/slide53_fig1.jpg', width = 6, height = 4)
+
+##
+f.alpha <- lm(alpha ~ water_ft, data = wing2020)
+f.beta <- nls(beta ~ yf + (y0-yf)*exp(-alpha*water_ft), 
+           data = wing2020, 
+           start = list(y0 = 1, yf = 0, alpha = 1))
+beta.dist <- data.frame(water_ft = 1:50) %>% 
+  mutate(alpha = predict(f.alpha, data.frame(water_ft)), 
+         beta = predict(f.beta, data.frame(water_ft)), 
+         mu = alpha / (alpha + beta), 
+         sd = sqrt((alpha*beta) / ((alpha+beta)^2 * (alpha + beta + 1)))) %>% 
+  rbind(data.frame(water_ft = 0, alpha = NA, beta = NA, mu = 0, sd = 0))
+ggplot() +
+  geom_line(data = beta.dist, aes(x = water_ft, y = alpha)) +
+  geom_point(data = wing2020, aes(x = water_ft, y = alpha)) +
+  labs(x = 'Water Depth (ft)', y = 'Location Parameter, \u03b1') +
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+# ggsave('./_plots/quals/slide53_fig2.jpg', width = 3, height = 3)
+
+ggplot() +
+  geom_line(data = beta.dist, aes(x = water_ft, y = beta)) +
+  geom_point(data = wing2020, aes(x = water_ft, y = beta)) +
+  labs(x = 'Water Depth (ft)', y = 'Shape Parameter, \u03b2') +
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+# ggsave('./_plots/quals/slide53_fig3.jpg', width = 3, height = 3)
+
+##
+load('D:/Research/_data/depthdamage/depthdamage.Rdata')
+
+require(pracma)
+coords.df <- data.frame(flood_ft = 0:50)
+
+coords.df$hazus <- interp1(x = hazus$ft, y = hazus$x1, xi = coords.df$flood_ft)
+coords.df$flemo <- interp1(x = flemo$ft, y = flemo$PQ_SFH, xi = coords.df$flood_ft)
+coords.df$flood_ft_rounded <- round(coords.df$flood_ft)
+coords.df$beta <- rbeta(n = nrow(coords.df), 
+      shape1 = beta.dist[match(coords.df$flood_ft_rounded, beta.dist$water_ft), 'alpha'], 
+      shape2 = beta.dist[match(coords.df$flood_ft_rounded, beta.dist$water_ft), 'beta']) * 100
+
+
+hazus <- read.csv('D:/Research/_data/depthdamage/HAZUS.csv')
+hazus <- hazus %>% 
+  subset(Curve != 'San Francisco' & Type == 'Struct') %>% 
+  mutate(FIA = toNumber(gsub('FIA ', '', Curve))) %>% 
+  subset(FIA > 1970) %>% 
+  t %>% data.frame %>% 
+  select(-X8) %>% 
+  setNames(c('x1','x2','x3','x4','x5','x6')) %>% 
+  subset(!((1:nrow(.)) %in% 1:5)) %>% 
+  subset(1:nrow(.) != 20) %>% 
+  apply(2, toNumber) %>% data.frame %>% 
+  mutate(ft = -8:10) 
+add <- 11:50
+hazus <- hazus[nrow(hazus), -ncol(hazus)] %>% 
+  apply(2, function(x) rep(x, length(add))) %>% 
+  cbind(ft = add) %>% 
+  rbind(hazus, .)
+hazus_names <- c('One Story - No Basement', 'One Story - Basement', 
+                 'Split Story - No Basement', 'Split Story - Basement', 
+                 '2+ Stories - No Basement', '2+ Stories - Basement')
+
+## get FLEMO damage curves
+flemo <- read.csv('D:/Research/_data/depthdamage/flemo.csv')
+flemo$ft <- flemo$cm/100*mft
+add <- seq(260, ceiling(50*2.54*12/10)*10, 10)
+flemo <- flemo[nrow(flemo), -(1:2)] %>% 
+  apply(2, function(x) rep(x, length(add))) %>% 
+  cbind(cm = add, ft = add/2.54/12, .) %>% 
+  rbind(flemo, .)
+
+## get beta distribution parameters
+wing2020 <- data.frame(water_ft = c(1:5,7), 
+                       alpha = c(0.42, 0.48, 0.49, 0.53, 0.68, 0.80),
+                       beta = c(0.80, 0.65, 0.52, 0.41, 0.42, 0.38))
+f.alpha <- lm(alpha ~ water_ft, data = wing2020)
+f.beta <- nls(beta ~ yf + (y0-yf)*exp(-alpha*water_ft), 
+           data = wing2020, 
+           start = list(y0 = 1, yf = 0, alpha = 1))
+beta.dist <- data.frame(water_ft = 1:50) %>% 
+  mutate(alpha = predict(f.alpha, data.frame(water_ft)), 
+         beta = predict(f.beta, data.frame(water_ft)), 
+         mu = alpha / (alpha + beta), 
+         sd = sqrt((alpha*beta) / ((alpha+beta)^2 * (alpha + beta + 1)))) %>% 
+  rbind(data.frame(water_ft = 0, alpha = NA, beta = NA, mu = 0, sd = 0))
+g1 <- ggplot() +
+  geom_line(data = beta.dist, aes(x = water_ft, y = alpha)) +
+  geom_point(data = wing2020, aes(x = water_ft, y = alpha)) +
+  labs(x = 'Water Depth (ft)', y = 'alpha') +
+  theme_classic()
+g2 <- ggplot() +
+  geom_line(data = beta.dist, aes(x = water_ft, y = beta)) +
+  geom_point(data = wing2020, aes(x = water_ft, y = beta)) +
+  labs(x = 'Water Depth (ft)', y = 'beta') +
+  theme_classic()
+gridExtra::grid.arrange(g1, g2, ncol = 2)
+
+for (i in 1:length(inundation)) {
+  flood <- inundation[[i]]
+  coords.df$flood_m <- extract(flood, coords.df %>% st_transform(proj4string(dem)) %>% as('Spatial')) 
+  coords.df$flood_m[is.na(coords.df$flood_m)] <- 0
+  
+  coords.df$flood_ft <- coords.df$flood_m * mft
+  coords.df$flood_ft_rounded <- round(coords.df$flood_ft)
+
+  coords.df$hazus <- interp1(x = hazus$ft, y = hazus$x1, xi = coords.df$flood_ft)
+  coords.df$flemo <- interp1(x = flemo$ft, y = flemo$PQ_SFH, xi = coords.df$flood_ft)
+  coords.df$beta <- rbeta(n = nrow(coords.df), 
+        shape1 = beta.dist[match(coords.df$flood_ft_rounded, beta.dist$water_ft), 'alpha'], 
+        shape2 = beta.dist[match(coords.df$flood_ft_rounded, beta.dist$water_ft), 'beta']) * 100
+}
+
+ggplot() + 
+  geom_ribbon(data = beta.dist, 
+              aes(x = water_ft, ymin = (mu-sd)*100, ymax = apply(cbind(rep(100, nrow(beta.dist)), (mu+sd)*100), 1, min)), 
+              fill = 'grey95') + 
+  geom_line(data = beta.dist, aes(x = water_ft, y = mu*100, color = 'Beta', linetype = 'Beta'), size = 1) + 
+  geom_line(data = coords.df, aes(x = flood_ft, y = hazus, color = 'HAZUS', linetype = 'HAZUS'), size = 1) + 
+  geom_step(data = coords.df, aes(x = flood_ft, y = flemo, color = 'FLEMO', linetype = 'FLEMO'), size = 1) + 
+  scale_linetype_manual(name = 'Curve Type', values = c('dotted', 'solid', 'longdash')) + 
+  scale_color_manual(name = 'Curve Type', values = c('grey30', 'grey60', 'black')) + 
+  ggtitle('Depth-Damage Relationships') + 
+  labs(x = 'Water Depth (ft)', y = 'Damage Ratio (%)') + 
+  coord_cartesian(xlim = c(NA, 12)) + 
+  scale_x_continuous(expand = c(0,0), breaks = 0:12, 
+                     labels = c(0, '','', 3, '','', 6, '','', 9, '','', 12)) + 
+  scale_y_continuous(expand = c(0,0)) +
+  theme_classic()
+ggsave('D:/Research/_plots/depthdamage.jpg', width = 7, height = 5)
+
+```
+
+

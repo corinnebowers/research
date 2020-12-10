@@ -1,0 +1,824 @@
+---
+title: "Sonoma"
+author: "Corinne"
+start_date: "07/31/2019"
+end_date: ""
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'C:/Users/cbowers/Desktop/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+```
+
+```{r packages, echo = FALSE}
+require(lubridate)
+require(ggplot2); theme_set(theme_bw())
+require(foreign)
+require(GGally)
+require(stringr)
+require(sf)
+
+```
+
+```{r functions, echo = FALSE}
+toNumber <- function(x) { as.numeric(paste(x)) }
+
+```
+
+
+
+### July 31st
+```{r}
+#### goal for today: target 2006 Sonoma floods ####
+
+# ## load policies & claims
+# claims <- read.csv('./_data/NFIP/openFEMA_claims20190331.csv')
+# claims <- claims[claims$state == 'CA',]
+# keep_names <- c(3, 5, 7:10, 14:15, 17, 19, 22, 25:32, 34:37)
+# claims <- claims[,keep_names]
+# claims$counter <- 1
+# claim_names <- names(claims)
+# 
+# policies <- read.csv('./_scripts/_working/CA_policies_0709.csv')
+# keep_names <- c(5, 8:12, 16:17, 19, 21, 25, 27:34, 43:45)
+# policies <- policies[,keep_names]
+# policies$counter <- 1
+# policy_names <- names(policies)
+# 
+# ## create water year variable
+# claims$wateryear <- claims$yearofloss
+# claims[month(claims$dateofloss) %in% c(10:12), 'wateryear'] <- 
+#   claims[month(claims$dateofloss) %in% 10:12, 'wateryear'] + 1
+# policies$wateryear <- year(policies$policyeffectivedate)
+# policies[month(policies$policyeffectivedate) %in% 10:12, 'wateryear'] <-
+#   policies[month(policies$policyeffectivedate) %in% 10:12, 'wateryear'] + 1
+# 
+# ## subset to single family homes
+# claims <- claims[claims$occupancytype == 1,]
+# policies <- policies[policies$occupancytype == 1,]
+# 
+# save(claims, policies, file = './_data/NFIP.Rdata')
+
+load('./_data/NFIP.Rdata')
+
+```
+
+
+```{r}
+## subset policies & claims
+event = 2006
+claims <- claims[claims$wateryear == event,]
+
+keep_counties <- c(6097, 6041, 6055, 6045, 6033) #Sonoma, Napa, Lake, Mendocino, & Marin
+claims <- claims[claims$countycode %in% keep_counties,]
+policies <- policies[policies$countycode %in% keep_counties,]
+
+## determine the length of the event
+claimdays <- data.frame(table(claims$dateofloss))
+claimdays <- claimdays[claimdays$Freq > 0,]
+startdate <- ymd('2005-12-30')
+enddate <- ymd('2006-01-03')
+claims_event <- claims[ymd(claims$dateofloss) >= startdate & ymd(claims$dateofloss) <= enddate,]
+
+```
+
+```{r}
+#### plot records from the river gauge ####
+
+dailyrecord <- read.csv('./_data/rivergauges/WY2006/USGS_11467000_DailyData.csv',
+                        comment.char = '#', sep = '\t')
+dailyrecord <- dailyrecord[2:nrow(dailyrecord), 3:4]
+names(dailyrecord) <- c('Date', 'RecordedCFS')
+
+avgrecord <- read.csv('./_data/rivergauges/WY2006/USGS_11467000_DailyStats.csv',
+                      comment.char = '#', sep = '\t')
+avgrecord <- avgrecord[2:nrow(avgrecord), c(6:7, 11:ncol(avgrecord))]
+toNumber <- function(x) as.numeric(paste(x))
+avgrecord <- data.frame(apply(avgrecord, 2, toNumber))
+avgrecord$date <- ymd(paste('2016', avgrecord$month_nu, avgrecord$day_nu, sep = '-'))
+avgrecord[avgrecord$month_nu %in% c(10, 11, 12), 'date'] <- avgrecord[avgrecord$month_nu %in% c(10, 11, 12), 'date'] - years(1)
+
+ggplot(data = avgrecord[avgrecord$date - years(10) <= max(ymd(dailyrecord$Date)) &
+                          avgrecord$date - years(10) >= min(ymd(dailyrecord$Date)),]) +
+  geom_line(aes(x = date - years(10), y = mean_va, color = 'dailymean')) +
+  geom_line(aes(x = date - years(10), y = max_va, color = 'dailymax')) +
+  geom_line(aes(x = date - years(10), y = p90_va, color = 'daily90th')) +
+  geom_line(aes(x = date - years(10), y = p95_va, color = 'daily95th')) +
+  geom_line(data = dailyrecord, aes(x = ymd(Date), y = as.numeric(paste(RecordedCFS)), color = 'recorded'))
+
+```
+
+
+### August 5th
+```{r}
+#### plot records from the river gauge ####
+# sitelist_sonoma = c(11458433, 11458500, 11458600, 11463170, 11463200, 11463500, 11463682, 11463900,
+#                     11463980, 11464000, 11465200, 11465240, 11465350, 11465390, 11465660, 11465680,
+#                     11465690, 11465700, 11465750, 11466170, 11466200, 11466320, 11466800, 11467000,
+#                     11467002, 11467200, 11467270, 11467510)
+# siteno = c(2, 4, 10, 16, 18:24, 26)
+
+sitelist_sonoma = 11467000
+siteno = 1
+
+# something's funky with record #11
+
+toNumber <- function(x) as.numeric(paste(x))
+
+for (i in 1:length(siteno)) {
+  dailyrecord <- read.csv(paste('C:/Users/cbowers/Desktop/Research/_data/rivergauges/WY2006/USGS',
+                                sitelist_sonoma[siteno[i]], 'DailyData.csv', sep = '_'),
+                          comment.char = '#', sep = '\t')
+  dailyrecord <- dailyrecord[2:nrow(dailyrecord), 3:4]
+  names(dailyrecord) <- c('Date', 'RecordedCFS')
+  
+  avgrecord <- read.csv(paste('C:/Users/cbowers/Desktop/Research/_data/rivergauges/WY2006/USGS',
+                              sitelist_sonoma[siteno[i]], 'DailyStats.csv', sep = '_'),
+                        comment.char = '#', sep = '\t')
+  avgrecord <- data.frame(apply(avgrecord, 2, toNumber))
+  
+  year_start <- which((avgrecord$month_nu == 1) & (avgrecord$day_nu == 1))
+  year_end <- which((avgrecord$month_nu == 12) & (avgrecord$day_nu == 31))
+  if (length(year_start) > 1 | length(year_end) > 1) {
+    if (length(year_start) == length(year_end)) {
+      keep <- which(year_end - year_start == 365)
+      year_start <- year_start[keep]; year_end <- year_end[keep]
+      cut <- which.max(avgrecord[year_end, 'end_yr'] - avgrecord[year_end, 'begin_yr'])
+      avgrecord <- avgrecord[year_start[cut]:year_end[cut],]
+    }
+  } else {
+    avgrecord <- avgrecord[year_start:year_end,]
+  }
+  
+  avgrecord$date <- ymd(paste('2016', avgrecord$month_nu, avgrecord$day_nu, sep = '-'))
+  avgrecord[avgrecord$month_nu %in% c(10, 11, 12), 'date'] <- 
+    avgrecord[avgrecord$month_nu %in% c(10, 11, 12), 'date'] - years(1)
+  
+  g <- ggplot(data = avgrecord[avgrecord$date - years(10) <= max(ymd(dailyrecord$Date)) & 
+                                 avgrecord$date - years(10) >= min(ymd(dailyrecord$Date)),]) + 
+    geom_line(aes(x = date - years(10), y = mean_va, color = 'dailymean', linetype = 'dailymean')) + 
+    # geom_line(aes(x = date - years(10), y = max_va, color = 'dailymax', linetype = 'dailymax')) + 
+    # geom_line(aes(x = date - years(10), y = p90_va, color = 'daily90th', linetype = 'daily90th')) + 
+    geom_line(aes(x = date - years(10), y = p95_va, color = 'daily95th', linetype = 'daily95th')) +
+    geom_line(data = dailyrecord, aes(x = ymd(Date), y = as.numeric(paste(RecordedCFS)), 
+                                      color = 'recorded', linetype = 'recorded')) +
+    # scale_linetype_manual(values = c(2, 3, 1, 1, 1)) + 
+    # scale_color_manual(values = c('black', 'black', 'gray', 'black', 'red')) + 
+    scale_linetype_manual(values = c(1, 1, 1)) + 
+    scale_color_manual(values = c('gray', 'black', 'red')) + 
+    guides(color = guide_legend("Flows"), linetype = guide_legend("Flows")) + 
+    ggtitle(paste('USGS Gauge #', sitelist_sonoma[siteno[i]], sep = ""))
+  
+  print(g)
+  # Sys.sleep(1)
+}
+
+```
+
+get a graph of just Guerneville
+```{r}
+start = ymd('2005-12-01')
+end = ymd('2006-01-15')
+ggplot(data = avgrecord %>% subset(date >= start + years(10) & date <= end + years(10))) + 
+  geom_rect(aes(xmin = ymd('2005-12-18'), xmax = ymd('2005-12-25'), ymin = 0, ymax = 8.5e4),
+            fill = 'lightblue') +
+  geom_rect(aes(xmin = ymd('2005-12-29'), xmax = ymd('2006-01-03'), ymin = 0, ymax = 8.5e4),
+            fill = 'lightblue') +
+  geom_line(aes(x = date - years(10), y = mean_va, color = 'Mean', linetype = 'Mean'), size = 1) + 
+  geom_line(aes(x = date - years(10), y = p95_va, color = '95th Perc.', linetype = '95th Perc.'), size = 1) + 
+  geom_line(data = dailyrecord %>% subset(ymd(Date) >= start & ymd(Date) <= end),
+            aes(x = ymd(Date), y = as.numeric(paste(RecordedCFS)), 
+                                      color = 'Recorded', linetype = 'Recorded'), size = 1) + 
+  scale_linetype_manual(values = c(1, 1, 1)) + 
+  scale_color_manual(values = c('gray60', 'black', 'red')) + 
+  guides(color = guide_legend("Flows"), linetype = guide_legend("Flows")) + 
+  ggtitle(paste('Russian River Gauge at Guerneville')) + 
+  labs(x = 'Date', y = 'River Flow (CFS)')
+
+  
+
+
+```
+
+
+### August 23rd
+See ArcGIS Python code for: 
+
+* Precipitation raster manipulation  
+    + Total rainfall (inches)  
+    + Storm length (days)  
+    + Max rain intensity (inches/day)  
+* Percent of each CT/grid cell within NFHL  
+* Mean elevation by CT/grid cell  
+* Distance to Russian River (not complete)  
+* Nearest river gauge  
+
+```{r}
+## goal: get everything in one dataframe, and maybe even get a correlation matrix
+## this code gets information by fishnet grid cell
+
+## choose storm to consider
+start <- date('2005-12-24')
+end <- date('2006-01-03')
+raindata <- read.csv('./_scripts/_WY2006/raindata_fishnet.csv')
+
+## import data from ArcGIS/Python
+NFHLdata <- read.csv('./_data/ArcGIS/NFHL_byfishnet.csv')
+claimsdata <- read.dbf('./_gis/_working/claims_fishnet_join2.dbf')
+sonoma <- read.csv('./_data/_working/fishnetID_sonoma.csv')
+
+####  create new dataframe for analysis ####
+
+## select fishnet grid cells of interest (Sonoma County)
+df <- data.frame(sonoma$FID); names(df) <- 'ID'
+
+## add rainfall data
+df <- merge(df, raindata, by.x = 'ID', by.y = 'FID_', all = FALSE)
+
+## add floodplain data
+df_NFHL <- NFHLdata[NFHLdata$FLOODPLAIN == 'YES', c(2, 5)]; names(df_NFHL) <- c('ID', 'pct_floodplain')
+df <- merge(df, df_NFHL, by = 'ID', all.x = TRUE)
+df$pct_floodplain[is.na(df$pct_floodplain)] <- 0
+
+## add elevation data
+elevation1 <- read.dbf('./_data/ArcGIS/elevation1_fishnet.dbf')
+elevation2 <- read.dbf('./_data/ArcGIS/elevation2_fishnet.dbf')
+elevation <- rbind(elevation1, elevation2)
+elevation <- aggregate(MEAN ~ FID_, data = elevation, mean)
+elevation$MEAN <- elevation$MEAN * 3.28084  #convert from meters to feet
+names(elevation) <- c('ID', 'ft_elevation')
+df <- merge(df, elevation, by = 'ID', all.x = TRUE)
+
+## add claims data
+df_claims <- claimsdata[,c('dateofloss', 'amountpaid', 'amountpa_1', 'FID_2')]
+names(df_claims) <- c('dateofloss', 'buildingclaim', 'contentsclaim', 'ID')
+df_claims[,1] <- date(df_claims[,1])
+df_claims[,2:4] <- data.frame(apply(df_claims[,2:4], 2, toNumber))
+df_claims[is.na(df_claims)] <- 0
+df_claims$value_claim <- df_claims$buildingclaim + df_claims$contentsclaim
+df_claims <- df_claims[df_claims$dateofloss >= start & df_claims$dateofloss <= end,]
+
+df_claims <- aggregate(value_claim ~ ID, data = df_claims, sum)
+df <- merge(df, df_claims[,c('ID', 'value_claim')], by = 'ID', all.x = TRUE)
+df$value_claim[is.na(df$value_claim)] <- 0
+
+df$logvalue_claim = log10(df$value_claim)
+df <- df[df$logvalue_claim > 0,]
+
+
+#### correlation matrix ####
+names(df)
+keep = c('logvalue_claim', 'rain_sofar', 'rain_prevmonth', 'rain_stormtotal', 'rain_maxday', 'pct_floodplain', 'ft_elevation')
+
+ggpairs(data = df, columns = keep, progress = FALSE)
+
+```
+
+### September 17th
+```{r}
+## this code gets information by census tract
+
+## choose storm to consider
+start <- date('2005-12-24')
+end <- date('2006-01-03')
+raindata <- read.csv('./_scripts/_WY2006/raindata_CT.csv')
+
+## import data from ArcGIS/Python
+NFHLdata <- read.csv('./_data/ArcGIS/NFHL_bypolygon.csv')
+sonoma <- read.dbf('./_gis/_working/sonomatracts.dbf')
+
+## import claims data
+claimsdata <-  read.csv('./_data/NFIP/openFEMA_claims20190331.csv')
+claimsdata$censustract <- toNumber(claimsdata$censustract)
+claimsdata <- claimsdata[claimsdata$censustract %in% toNumber(sonoma$GEOID),]
+
+```
+
+
+```{r}
+##  create new dataframe for analysis
+
+## select fishnet grid cells of interest (Sonoma County)
+df <- data.frame(toNumber(sonoma$GEOID)); names(df) <- 'ID'
+
+## add rainfall data
+df <- merge(df, raindata[,c('GEOID', 'rain_sofar', 'rain_prevmonth', 'rain_stormtotal', 'days_max', 'rain_maxday')], 
+            by.x = 'ID', by.y = 'GEOID', all = FALSE)
+
+## add floodplain data
+df_NFHL <- NFHLdata[NFHLdata$FLOODPLAIN == 'YES', c(2, 5)]; names(df_NFHL) <- c('ID', 'pct_floodplain')
+df_NFHL$ID <- toNumber(df_NFHL$ID)
+df <- merge(df, df_NFHL, by = 'ID', all.x = TRUE)
+df$pct_floodplain[is.na(df$pct_floodplain)] <- 0
+
+## add elevation data
+elevation1 <- read.dbf('./_data/ArcGIS/elevation1_CT.dbf')
+elevation2 <- read.dbf('./_data/ArcGIS/elevation2_CT.dbf')
+elevation <- rbind(elevation1, elevation2)
+elevation <- aggregate(MEAN ~ GEOID, data = elevation, mean)
+elevation$MEAN <- elevation$MEAN * 3.28084  #convert from meters to feet
+names(elevation) <- c('ID', 'ft_elevation')
+elevation <- apply(elevation, 2, toNumber)
+df <- merge(df, elevation, by = 'ID', all.x = TRUE)
+
+## add claims data
+df_claims <- claimsdata[,c('dateofloss', 'amountpaidonbuildingclaim', 'amountpaidoncontentsclaim', 
+                           'totalbuildinginsurancecoverage', 'totalcontentsinsurancecoverage', 'censustract')]
+names(df_claims) <- c('dateofloss', 'buildingclaim', 'contentsclaim', 'buildingpolicy', 'contentspolicy', 'ID')
+df_claims[,1] <- date(df_claims[,1])
+df_claims[,2:6] <- data.frame(apply(df_claims[,2:6], 2, toNumber))
+df_claims[is.na(df_claims)] <- 0
+df_claims$value_claim <- df_claims$buildingclaim + df_claims$contentsclaim
+df_claims$value_policy <- df_claims$buildingpolicy + df_claims$contentspolicy
+df_claims$num_claim <- 1
+df_claims <- df_claims[df_claims$dateofloss >= start & df_claims$dateofloss <= end,]
+
+df_claims <- aggregate(cbind(value_claim, value_policy, num_claim) ~ ID, data = df_claims, sum)
+df <- merge(df, df_claims, by = 'ID', all.x = TRUE)
+df$percentpayout <- df$value_claim / df$value_policy
+df$percentpayout[is.na(df$percentpayout)] <- 0
+
+## add population data
+population <- read.dbf('./_gis/California/_demographics/populationinfo/SimplyAnalytics_targetarea.dbf')
+population <- population[,c('VALUE6', 'FIPS')]; names(population) <- c('POP', 'ID')
+population <- apply(population, 2, toNumber)
+df <- merge(df, population, by = 'ID', all.x = TRUE)
+df$claimdensity <- df$num_claim / df$POP
+df$claimdensity[is.na(df$claimdensity)] <- 0
+
+## normalize claims 
+df$log_claimvalue <- log(df$value_claim + 1)
+df$log_claimdensity <- log(df$claimdensity * 1000 + 1)
+df$log_pctpayout <- log(df$percentpayout * 1000 + 1)
+```
+
+
+```{r}
+## correlation matrix
+names(df)
+keep = c('claimdensity', 'percentpayout', 'rain_sofar', 'rain_prevmonth', 'rain_stormtotal', 'rain_maxday', 'pct_floodplain', 'ft_elevation')
+
+ggpairs(data = df, columns = keep, progress = FALSE)
+
+```
+
+### September 18th
+<!-- This is messed up; the distance to the river variable is wrong (noted 11/05) -->
+```{r}
+## pull nearest gauge (with enough data) from Python
+
+riverdist <- read.dbf('./_scripts/_working/disttorussianriver.dbf')
+riverdist <- riverdist[,c('GEOID', 'MEAN')]; names(riverdist) <- c('GEOID', 'DIST_FACTOR')
+riverdist <- data.frame(apply(riverdist, 2, toNumber))
+nearest_gauge <- read.dbf('./_scripts/_working/nearest_gauge.dbf')
+nearest_gauge <- nearest_gauge[,c('GEOID', 'GAUGE')]
+nearest_gauge$GEOID <- toNumber(nearest_gauge$GEOID)
+
+river_info = merge(riverdist, nearest_gauge, by = 'GEOID', all.y = TRUE)
+river_info$DIST_FACTOR[is.na(river_info$DIST_FACTOR)] <- 0
+gaugeid <- data.frame(str_split(river_info$GAUGE, '_', n = 2, simplify = TRUE))
+names(gaugeid) <- c('GAUGE_ID', 'GAUGE_NAME')     
+river_info <- cbind(river_info, gaugeid)
+
+
+# ## get flood stages (this is done manually, find a better way)
+# gauges = data.frame('GAUGE_NAME' = unique(river_info$GAUGE_NAME))
+# actionstage <- c(0, 31, 29, 20, 20.8, 38, 0, 0)
+# floodstage <- c(0, 0, 32, 23, 25.4, 39.7, 0, 0)
+# gauges$FLOOD_FT <- actionstage
+# river_info <- merge(river_info, gauges, by = 'GAUGE_NAME')
+## for now, just use 200% of the mean
+
+
+## get river gauge info for the 2006 storm
+#(see august 5th R script)
+
+siteno = unique(river_info$GAUGE_ID)
+stormyear = 2006
+start <- date('2005-12-24')
+end <- date('2006-01-03')
+
+
+gauges <- data.frame('GAUGE_ID' = siteno)
+gauges$days_max = 0
+gauges$pct_maxday = 0
+
+for (i in 1:length(siteno)) {
+  dailyrecord <- read.csv(paste('./_data/rivergauges/WY', stormyear, '/USGS_', siteno[i], '_DailyData.csv', sep = ''),
+                          comment.char = '#', sep = '\t')
+  dailyrecord <- dailyrecord[2:nrow(dailyrecord), 3:4]
+  names(dailyrecord) <- c('Date', 'RecordedCFS')
+  
+  avgrecord <- read.csv(paste('./_data/rivergauges/WY', stormyear, '/USGS_', siteno[i], '_DailyStats.csv', sep = ''),
+                        comment.char = '#', sep = '\t')
+  avgrecord <- data.frame(apply(avgrecord, 2, toNumber))
+  year_start <- which((avgrecord$month_nu == 1) & (avgrecord$day_nu == 1))
+  year_end <- which((avgrecord$month_nu == 12) & (avgrecord$day_nu == 31))
+  if (length(year_start) > 1 | length(year_end) > 1) {
+    if (length(year_start) == length(year_end)) {
+      keep <- which(year_end - year_start == 365)
+      year_start <- year_start[keep]; year_end <- year_end[keep]
+      cut <- which.max(avgrecord[year_end, 'end_yr'] - avgrecord[year_end, 'begin_yr'])
+      avgrecord <- avgrecord[year_start[cut]:year_end[cut],]
+    }
+  } else {
+    avgrecord <- avgrecord[year_start:year_end,]
+  }
+  avgrecord$date <- ymd(paste('2016', avgrecord$month_nu, avgrecord$day_nu, sep = '-'))  #2016 chosen as default year because of leap day
+  avgrecord[avgrecord$month_nu %in% c(10, 11, 12), 'date'] <- avgrecord[avgrecord$month_nu %in% c(10, 11, 12), 'date'] - years(1)
+  
+  
+  ## set flooding threshold: 200% of mean
+  avgrecord$flood <- avgrecord$mean_va * 2
+  
+  days_sofar = 0
+  days_max = 0
+  pct_worstday = 0
+  duration = length(integer(end - start))
+  
+  for (delta in 0:duration) {
+    ## find the number of days flow exceeds the threshold
+    if (toNumber(dailyrecord[date(dailyrecord$Date) == date(start + days(delta)),'RecordedCFS']) > 
+        avgrecord[day(avgrecord$date) == day(start + days(delta)) & month(avgrecord$date) == month(start + days(delta)),'flood']) {
+      days_sofar <- days_sofar + 1
+    } else {
+      days_sofar <- 0
+    }
+    days_max = max(days_sofar, days_max)
+    
+    ## find the flow (% of average mean) on the worst day
+    flow_today = toNumber(dailyrecord[date(dailyrecord$Date) == start + days(delta),'RecordedCFS'])
+    flow_avg = avgrecord[day(avgrecord$date) == day(start + days(delta)) & month(avgrecord$date) == month(start + days(delta)),'mean_va']
+    # flow_worstday = max(flow_worstday, flow_sofar)
+    # if (flow_worstday == flow_sofar) {
+    #   pct_worstday = flow_worstday/flow_avg * 100
+    # }  
+    pct_worstday = max(pct_worstday, flow_today/flow_avg)
+  }
+  gauges[i, 'days_max'] <- days_max
+  gauges[i, 'pct_maxday'] <- pct_worstday * 100
+}
+
+## NOTE: see updated version in 11/05 code
+# ## attach river flow values back to census tracts
+# river_info <- merge(river_info, gauges, by = 'GAUGE_ID', all.x = TRUE)
+# 
+# river_info$pct_maxday_adj <- river_info$pct_maxday * river_info$DIST_FACTOR
+# river_info$days_max_adj <- river_info$days_max * river_info$DIST_FACTOR
+# 
+# names(river_info)
+# drop <- c('GAUGE', 'GAUGE_NAME')
+# river_info <- river_info[,!names(river_info) %in% drop]
+
+```
+
+### November 5th
+```{r}
+# require(rnaturalearth)
+# require(rnaturalearthdata)
+# require(rnaturalearthhires)
+# 
+# rivers10 <- ne_download(scale = 10, type = 'rivers_lake_centerlines', category = 'physical', returnclass = 'sf')
+# 
+# ggplot() + 
+#   geom_sf(data = USA, fill = NA, color = 'black') + 
+#   geom_sf(data = rivers10, color = 'blue') +
+#   xlim(c(-130,-115)) + ylim(c(34,42))
+
+## note: rnaturalearth does not include the Russian River
+
+## import the Russian River
+require(rgdal)
+
+# # The input file geodatabase
+# fgdb <- "./_gis/California/_hydrology/CA_Streams_3.gdb"
+# 
+# List all feature classes in a file geodatabase
+subset(ogrDrivers(), grepl("GDB", name))
+fc_list <- ogrListLayers(fgdb)
+print(fc_list)
+# 
+# # Read the feature class
+# fc <- readOGR(dsn=fgdb,layer="CA_Streams_3")
+# 
+# # Determine the FC extent, projection, and attribute information
+# summary(fc)
+# 
+# # View the feature class
+# plot(fc)
+
+require(sf)
+rivers <- st_read('./_gis/California/_hydrology/CA_Streams_3.gdb', layer = 'CA_Streams_3')
+russian <- rivers[grepl('Russian River', rivers$Name, ignore.case = TRUE),]
+russian <- russian[2,]
+st_crs(rivers)
+
+CA_counties <- st_read('./_gis/California/_geography/CA_Counties_TIGER2016.shp')
+st_crs(CA_counties)
+
+CA_CT <- st_read('./_gis/California/_geography/tl_2016_06_tract.shp')
+sonoma_CT <- CA_CT[toNumber(CA_CT$COUNTYFP) == 97,]
+st_crs(sonoma_CT)
+
+ggplot() +
+  geom_sf(data = sonoma_CT, fill = NA, color = 'gray70') + 
+  # geom_sf(data = CA_counties, fill = NA) + 
+  geom_sf(data = russian, color = 'blue')
+
+## come back here at some point and make intelligent decisions about CRS
+
+```
+
+```{r}
+## get distance from russian river
+require(lwgeom)
+
+st_crs(russian)
+st_crs(sonoma_CT)
+
+russian <- st_transform(russian, st_crs(sonoma_CT))
+sonoma_centroid <- st_centroid(sonoma_CT)
+sonoma_centroid$DIST <- st_distance(x = sonoma_centroid, y = russian)   # meters
+sonoma_centroid$DIST <- toNumber(sonoma_centroid$DIST) / 1609.34        # miles
+
+ggplot() + 
+  geom_sf(data = sonoma_CT, fill = NA, color = 'gray70') + 
+  geom_sf(data = CA_counties, fill = NA) + 
+  geom_sf(data = sonoma_centroid, aes(color = -DIST)) + 
+  geom_sf(data = russian, color = 'blue', size = 1) + 
+  lims(x = c(-124, -122), y = c(38,39))
+
+## convert distance to a factor
+sonoma_centroid$DIST_FACTOR <- apply(cbind(1 - sonoma_centroid$DIST/10, rep(0,nrow(sonoma_centroid))), 1, max)
+sonoma_centroid$GEOID <- toNumber(sonoma_centroid$GEOID)
+
+## compare this to old DIST_FACTOR
+test <- merge(st_set_geometry(sonoma_centroid[,c('GEOID', 'DIST_FACTOR')], NULL),
+              river_info[,c('GEOID','DIST_FACTOR')], by = 'GEOID', all = TRUE)
+require(reshape2)
+ggplot(data = test) + 
+  geom_line(aes(x = 1:nrow(test), y = sort(DIST_FACTOR.x, decreasing = TRUE), color = 'a'), size = 1) + 
+  geom_line(aes(x = 1:nrow(test), y = sort(DIST_FACTOR.y, decreasing = TRUE), color = 'b'), size = 1) +
+  scale_color_discrete(labels = c('New Version (R)', 'Old Version (GIS)'))
+
+```
+
+```{r}
+## updated scatterplot matrix
+
+## run 09/17 code to generate df
+
+## add in distance factor
+# df$DIST_FACTOR <- st_set_geometry(sonoma_centroid[sonoma_CT$GEOID %in% df$ID, 'DIST_FACTOR'], NULL)
+
+## run 09/18 code to generate river_info
+## attach river flow values back to census tracts
+river_info <- merge(river_info, gauges, by = 'GAUGE_ID', all.x = TRUE)
+river_info <- river_info[,!(names(river_info) == 'DIST_FACTOR')]
+river_info <- merge(river_info, st_set_geometry(sonoma_centroid[,c('GEOID', 'DIST_FACTOR')], NULL), 
+                    by = 'GEOID', all.x = TRUE)
+
+river_info$pct_maxday_adj <- river_info$pct_maxday * river_info$DIST_FACTOR
+river_info$days_max_adj <- river_info$days_max * river_info$DIST_FACTOR
+
+names(river_info)
+drop <- c('GAUGE', 'GAUGE_NAME', 'days_max', 'pct_maxday')
+river_info <- river_info[,!names(river_info) %in% drop]
+df <- merge(df, river_info, by.x = 'ID', by.y = 'GEOID', all.x = TRUE)
+
+## correlation matrix
+names(df)
+keep = c('log_claimdensity', 
+         'log_pctpayout', 
+         'rain_sofar',
+         'rain_prevmonth', 
+         'rain_stormtotal', 
+         'rain_maxday', 
+         'pct_floodplain', 
+         # 'ft_elevation', 
+         'DIST_FACTOR', 
+         'pct_maxday_adj',
+         'days_max_adj')
+
+keep <- c('log_claimdensity', 
+         'log_pctpayout', 
+         'DIST_FACTOR',
+         'pct_maxday',
+         'days_max')
+
+ggpairs(data = df, columns = keep, progress = FALSE)
+ggpairs(data = df, columns = keep[c(1:2,7:10)], progress = FALSE)
+
+```
+
+```{r}
+## look into soil moisture
+# https://cds.climate.copernicus.eu/cdsapp#!/dataset/satellite-soil-moisture?tab=form
+# https://www.drought.gov/drought/data-maps-tools/soil-moisture
+```
+
+
+```{r}
+## how much of the claims can be explained by the hazard variables I've collected?
+
+library(corrplot)
+correlations <- cor(df[,keep])
+corrplot(correlations, method="circle")
+
+# library(Amelia)
+# library(mlbench)
+# missmap(claims_sonoma, col=c("blue", "red"), legend=FALSE)
+
+```
+
+
+### November 7th
+```{r}
+## try a logistic regression
+f <- glm(percentpayout ~ rain_stormtotal + pct_floodplain + DIST_FACTOR, data = df, family = 'gaussian')
+summary(f)
+## y is not bounded from 0 to 1 -> doesn't work
+
+## try a lognormal regression
+require(gamlss)
+f <- gamlss(log_claimdensity ~ rain_stormtotal + pct_floodplain + DIST_FACTOR, 
+            data = df[,keep], family = LOGNO())
+## y has zeros -> doesn't work
+
+```
+
+```{r}
+claim_names
+```
+
+
+```{r}
+## try to get a dependent variable that is most indicative of damage
+## goals: bounded from 0 to 1, not too skewed
+
+## load claims & policies from 07/31
+
+## subset to SFH
+claims <- claims[claims$occupancytype == 1,]
+policies <- policies[policies$occupancytype == 1,]
+
+## subset to the same time frame
+claims <- claims[claims$wateryear >= min(policies$wateryear),]
+
+## subset to a particular area 
+claims_subset <- claims
+policies_subset <- policies
+
+## get a bunch of variables by CT
+claims$censustract <- toNumber(claims$censustract)
+policies$censustract <- toNumber(policies$censustract)
+
+df <- data.frame(GEOID = unique(claims$censustract))
+
+df1 <- aggregate(cbind(policycount, amountpaidonbuildingclaim, amountpaidoncontentsclaim,
+                       totalbuildinginsurancecoverage, totalcontentsinsurancecoverage, 
+                       counter) ~ censustract, data = claims_subset, sum)
+names(df1) <- paste('claim', names(df1), sep = '.')
+df <- merge(df, df1, by.x = 'GEOID', by.y = 'claim.censustract', all.x = TRUE)
+
+df2 <- aggregate(cbind(deductibleamountinbuildingcoverage, deductibleamountincontentscoverage, policycost, 
+                       policycount, totalbuildinginsurancecoverage, totalcontentsinsurancecoverage, 
+                       counter) ~ censustract, data = policies_subset, sum)
+names(df2) <- paste('policy', names(df2), sep = '.')
+df <- merge(df, df2, by.x = 'GEOID', by.y = 'policy.censustract', all.x = TRUE)
+
+# df[is.na(df)] <- 0
+```
+
+
+```{r}
+## get ratios by CT
+names(df)
+df$ratio.policycount <- df$claim.policycount / df$policy.policycount
+df$ratio.exposedassets <- (df$claim.totalbuildinginsurancecoverage + df$claim.totalcontentsinsurancecoverage) / 
+  (df$policy.totalbuildinginsurancecoverage + df$policy.totalcontentsinsurancecoverage)
+df$claim.payout <- (df$claim.amountpaidonbuildingclaim + df$claim.amountpaidoncontentsclaim) / 
+  (df$claim.totalbuildinginsurancecoverage + df$claim.totalcontentsinsurancecoverage)
+
+logscale <- function(min, max) {
+  vec <- vector()
+  for (i in min:max) {
+    vec <- c(vec, seq(10^i, 10^(i+1), 10^i))
+  }
+  return(vec)
+}
+
+ggplot(data = df) + 
+  geom_histogram(aes(x = ratio.policycount), color = 'black', fill = 'white', bins = round(sqrt(nrow(df)))) + 
+  ggtitle('Number of SFH Submitting Claims / Total SFH') + 
+  scale_x_log10(minor_breaks = logscale(-5,0))
+
+ggplot(data = df) + 
+  geom_histogram(aes(x = ratio.exposedassets), color = 'black', fill = 'white', 
+                 bins = round(sqrt(nrow(df)))) + 
+  ggtitle('Insurance Limits of SFH Submitting Claims / Insurance Limits of All SFH') + 
+  scale_x_log10(minor_breaks = logscale(-5,0))
+
+ggplot(data = df) + 
+  geom_histogram(aes(x = claim.payout), color = 'black', fill = 'white', 
+                 bins = round(sqrt(nrow(df)))) + 
+  ggtitle('Insurance Claim / Policy Limit') +
+  scale_x_log10(minor_breaks = logscale(-5,0))
+
+
+
+
+ggplot(data = df) + 
+  geom_point(aes(x = claim.amountpaidonbuildingclaim, y = claim.amountpaidoncontentsclaim)) +
+  ggtitle('Building vs. Contents Claims') +
+  scale_x_log10(minor_breaks = logscale(1,7)) + scale_y_log10(minor_breaks = logscale(1,6))
+
+ggplot(data = df) + 
+  geom_point(aes(x = policy.totalbuildinginsurancecoverage, y = policy.totalcontentsinsurancecoverage)) + 
+  ggtitle('Building vs. Contents Policy Limits') +
+  scale_x_log10(minor_breaks = logscale(5,10)) + scale_y_log10(minor_breaks = logscale(4,10))
+
+ggplot(data = df) + 
+  geom_point(aes(x = claim.amountpaidonbuildingclaim/claim.totalbuildinginsurancecoverage, 
+                 y = claim.amountpaidoncontentsclaim/claim.totalcontentsinsurancecoverage)) +
+  ggtitle('Building vs. Contents Payout') + 
+  labs(x = 'Building Claim/Building Limit', y = 'Contents Claim/Contents Limit') 
+
+```
+
+### November 14th
+```{r}
+## prepare for 11/15 meeting with Katy:
+## - go through old notes
+## - make a map of claims from the 2006 Sonoma storm
+
+## find storm dates
+## see ARmodel code --> 12/29/05 to 1/3/06
+
+#### GUERNEVILLE
+# start <- ymd('1995-01-03'); end <- ymd('1995-01-15')  #largest Sonoma storm on record
+# start <- ymd('1986-02-11'); end <- ymd('1986-02-21')  #2nd largest
+# start <- ymd('1996-12-27'); end <- ymd('1997-01-07')  #3nd largest
+# start <- ymd('2005-12-29'); end <- ymd('2006-01-03')  #4th largest: 2006 NYD storm
+# start <- ymd('1995-03-07'); end <- ymd('1995-03-15')  #5th largest
+
+#### HEALDSBURG
+# start <- ymd('1995-01-03'); end <- ymd('1995-01-15')  #largest
+
+
+sonoma = 6097 #county code
+
+## load CT shapefile & plot
+CT <- st_read('./_gis/California/_geography/tl_2016_06_tract.shp')
+CT_subset <- CT[toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP) == sonoma,]  
+CT_subset$GEOID <- toNumber(CT_subset$GEOID)
+
+## find storm claims by CT
+claims_subset <- claims[ymd(claims$dateofloss) >= start & ymd(claims$dateofloss) <= end,]
+claims_subset <- claims_subset[claims_subset$countycode == sonoma,]  
+
+df_claims <- aggregate(amountpaidonbuildingclaim ~ censustract, data = claims_subset, length)  
+temp <- aggregate(ymd(dateofloss) ~ censustract, data = claims_subset, 
+                  function(x) length(unique(x)))                                      
+df_claims <- merge(df_claims, temp, by = 'censustract', all = TRUE)
+temp <- aggregate(amountpaidonbuildingclaim ~ censustract, data = claims_subset, sum)      
+df_claims <- merge(df_claims, temp, by = 'censustract', all = TRUE)
+temp <- aggregate(amountpaidoncontentsclaim ~ censustract, data = claims_subset, sum)      
+df_claims <- merge(df_claims, temp, by = 'censustract', all = TRUE)
+temp <- aggregate(totalbuildinginsurancecoverage ~ censustract, data = claims_subset, sum)
+df_claims <- merge(df_claims, temp, by = 'censustract', all = TRUE)
+temp <- aggregate(totalcontentsinsurancecoverage ~ censustract, data = claims_subset, sum)
+df_claims <- merge(df_claims, temp, by = 'censustract', all = TRUE)
+
+names(df_claims) <- c('GEOID', 'numclaims', 'numlossdays', 'buildingclaims', 
+                      'contentsclaims', 'buildingcoverage', 'contentscoverage')
+df_claims <- merge(df_claims, data.frame(GEOID = CT_subset$GEOID), by = 'GEOID', all.y = TRUE)
+
+df_claims$totalclaims <- df_claims$buildingclaims + df_claims$contentsclaims
+df_claims$totalcoverage <- df_claims$buildingcoverage + df_claims$contentscoverage
+df_claims$payout <- df_claims$totalclaims / df_claims$totalcoverage
+df_claims[!complete.cases(df_claims), -1] <- 0
+
+## plot
+CT_subset <- merge(CT_subset, df_claims, by = 'GEOID', all.x = TRUE)
+ggplot() + 
+  geom_sf(data = CT_subset, aes(fill = totalclaims)) + 
+  geom_sf(data = russian, color = 'deepskyblue1', size = 1) + 
+  geom_point(data = data.frame(x = guerneville[2], y = guerneville[1]), aes(x=x, y=y), 
+             fill = 'red', color = 'black', shape = 21, size = 3) + 
+  scale_fill_viridis_c() + 
+  coord_sf(xlim = st_bbox(CT_subset)[c(1,3)], ylim = st_bbox(CT_subset)[c(2,4)])
+
+
+```
+
+```{r}
+## take the map above & repeat it for all storms passing over Healdsburg 
+## (we get those from the ARmodel code)
+
+## since we're pulling from the same claims, top 5 storms are the same
+```
+

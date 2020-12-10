@@ -1,0 +1,1182 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "6/10/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+require(rnoaa)
+require(quantreg)
+require(dataRetrieval)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## common geometries
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class = 'sf')
+
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+## import watersheds
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp', quiet = TRUE)
+wbd6 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU6.shp', quiet = TRUE)
+wbd8 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU8.shp', quiet = TRUE)
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp', quiet = TRUE)
+wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp', quiet = TRUE)
+
+load('./_data/prob_precip.Rdata')
+load('./prob_precip_updated.Rdata')
+
+
+```
+
+```{r}
+## get Sonoma gauges
+param <- c('00060', '00065')
+names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008')
+names(statcode) <- c('max', 'min', 'mean', 'median')
+
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv') %>% 
+  subset(str_length(paste(site_no)) == 8) %>% 
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california)) %>% 
+  st_intersection(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))) %>% 
+  subset(grepl('RUSSIAN', station_nm))
+rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp') %>% 
+  st_zm(st_transform(albers)) %>% 
+  subset(grepl('Russian', GNIS_Name))
+lakes <- st_read('./_gis/California/_hydrology/nhd_majorlakesandreservoirs/NHD_MajorLakesAndReservoirs_20200109.shp') %>%
+  st_transform(albers) %>% st_zm %>% 
+  st_intersection(st_transform(california %>% subset(NAME %in% c('Sonoma', 'Mendocino')), albers))
+
+ggplot() + 
+  geom_sf(data = california) + 
+  geom_sf(data = lakes, color = 'deepskyblue', fill = 'deepskyblue') + 
+  geom_sf(data = rivers, color = 'deepskyblue3') + 
+  geom_sf(data = sites) + 
+  lims(x = matrix(st_bbox(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))), nrow = 2)[1,], 
+       y = matrix(st_bbox(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))), nrow = 2)[2,])
+
+sites <- sites %>% st_intersection(california %>% subset(NAME == 'Sonoma'))  #subset to gauges below reservoirs
+sites <- sites[sites$site_no != 11467002,]  #subset to gauges with cfs only
+info <- readNWISsite(sites$site_no)
+data <- readNWISdv(sites$site_no, parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>% 
+  renameNWISColumns()
+
+## plot average runoff response
+data_avg <- data %>% 
+  group_by(month = month(Date), day = day(Date), site_no) %>% 
+  summarize(Date = ymd(paste(ifelse(month[1] %in% 10:12, '2019', '2020'), month[1], day[1], sep = '-')), 
+            Flow = mean(Flow)) %>% 
+  full_join(info, by = 'site_no')
+ggplot(data = data_avg) + 
+  geom_line(aes(x = ymd(Date), y = Flow/drain_area_va / 5280^2 * (60*60*24) * (25.4*12), 
+                group = site_no, color = site_no), size = 1) + 
+  ggtitle('Average Daily Runoff') + 
+  labs(x = '', y = 'Gage Runoff (mm/day)')
+ggplot() + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma')) + 
+  geom_sf(data = rivers %>% st_intersection(california %>% subset(NAME == 'Sonoma'))) + 
+  geom_sf(data = sites, aes(color = site_no), size = 4) + 
+  theme_void()
+
+## discard weird-looking gages
+# data %>% subset(site_no == 11465390) %>% select(Date) %>% summary
+# data %>% subset(site_no == 11465390) %>% 
+#   right_join(data.frame(Date = seq(ymd('2009-06-01'), ymd('2020-06-09'), 'days'))) %>% 
+#   ggplot() + geom_line(aes(x = Date, y = Flow))
+sites <- sites[!(sites$site_no %in% c(11463980, 11465390)),]
+info <- info[!(info$site_no %in% c(11463980, 11465390)),]
+data <- data[!(data$site_no %in% c(11463980, 11465390)),]
+data_avg <- data %>% 
+  group_by(month = month(Date), day = day(Date), site_no) %>% 
+  summarize(Date = ymd(paste(ifelse(month[1] %in% 10:12, '2019', '2020'), month[1], day[1], sep = '-')), 
+            Flow = mean(Flow)) %>% 
+  full_join(info, by = 'site_no')
+
+data <- data %>% 
+  full_join(info[,c('site_no', 'dec_long_va', 'dec_lat_va', 'drain_area_va')], by = 'site_no') %>% 
+  mutate(Runoff_mmday = Flow/drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) #convert cfs/mi^2 --> mm/day
+
+## get watersheds
+watersheds <- st_read('C:/Users/cbowers/Documents/ArcGIS/Projects/research/research.gdb', 
+                      layer = 'feature_set43', quiet = TRUE) %>% 
+  subset(PourPtID %in% sites$site_no) %>% 
+  st_transform(st_crs(california))
+ggplot() + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = 'white') + 
+  geom_sf(data = watersheds, fill = 'grey50', alpha = 0.5) + 
+  geom_sf(data = rivers, color = 'deepskyblue3') + 
+  geom_sf(data = sites) + 
+  theme_void()
+
+ggplot() + 
+  geom_sf(data = california %>% subset(NAME %in% c('Sonoma', 'Mendocino')), fill = 'white') + 
+  geom_sf(data = watersheds, fill = 'grey50', alpha = 0.5) + 
+  geom_sf(data = rivers, color = 'deepskyblue3') + 
+  geom_sf(data = sites) + 
+  geom_tile(data = tracker %>% subset(step %in% tracker.id), aes(x = lon, y = lat), color = 'grey60', fill = 'NA') + 
+  coord_sf(xlim = matrix(st_bbox(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))), nrow = 2)[1,],
+           ylim = matrix(st_bbox(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))), nrow = 2)[2,]) + 
+  theme_void()
+
+```
+
+
+```{r}
+## get precipitation for all data points
+# datelist <- seq(min(data$Date), max(data$Date), 'days')
+# precip.df <- data.frame(matrix(nrow = length(datelist), ncol = nrow(sites)))
+# pb <- txtProgressBar(min = 0, max = length(datelist), style = 3)
+# for (i in 1:length(datelist)) {
+#   d <- datelist[i]
+#   cpc_precip <- cpc_prcp(d)
+#   cpc_precip$lon <- cpc_precip$lon-360
+#   cpc_precip <- rasterFromXYZ(cpc_precip, crs = st_crs(california)$proj4string)  
+#   precip.df[i,] <- velox(cpc_precip)$extract(watersheds, small = TRUE) %>% lapply(mean) %>% unlist
+#   setTxtProgressBar(pb, i)
+# }
+# 
+# ## match precipitation to runoff
+# names(precip.df) <- watersheds$PourPtID
+# precip.df <- cbind(data.frame(Date = datelist), precip.df)
+# precip.df <- melt(precip.df, id.vars = 'Date', variable.name = 'site_no', value.name = 'Precip_mm')
+# data <- full_join(precip.df, data, by = c('site_no', 'Date'))
+# 
+# ggplot(data = data) + 
+#   geom_point(aes(x = Precip_mm, y = Runoff_mmday))
+# ggplot(data = data %>% subset(month(Date) %in% c(10:12, 1:3))) + 
+#   geom_point(aes(x = Precip_mm, y = Runoff_mmday))
+
+# data$Runoff_in <- data$Runoff_mmday/25.4
+# data$Precip_in <- data$Precip_mm/25.4
+
+```
+
+```{r}
+## try to make a list of storms by watershed
+catalog <- list()
+tracker.raster <- tracker[,c(2,1,3,4)]
+tracker.raster <- rasterFromXYZ(tracker.raster, crs = st_crs(california)$proj4string) 
+
+for (wbd in 1:nrow(watersheds)) {
+  watershed.id <- rasterize(watersheds[wbd,], tracker.raster, getCover = TRUE) %>% 
+    as.data.frame(xy = TRUE) %>% 
+    subset(layer > 0) %>% 
+    left_join(tracker, by = c('x'='lon', 'y'='lat')) %>% 
+    select(step) %>% 
+    unlist %>% unname %>% sort
+  
+  storm.df <- data.frame(date = seq(ymd('1980-01-01'), ymd('2019-12-31'), 'days'))
+  storm.df[,paste(watershed.id)] <- 0
+  for (id in 1:length(watershed.id)) {
+    ar_list <- ar_grid[[watershed.id[id]]]
+    for (i in 1:nrow(ar_list)) {
+      storm <- seq(ymd(ar_list[i, 'start_date']), ymd(ar_list[i, 'end_date']), 'days')
+      storm.df[storm.df$date %in% storm, id+1] <- 1
+    }
+  }
+  
+  ## subset to rainy season
+  storm.df <- storm.df %>% subset(month(date) %in% c(10:12, 1:3))
+  storm.df$storm <- apply(storm.df[,2:(length(watershed.id)+1)], 1, sum)
+  
+  ## number AR storms
+  storm.df$ar <- 0
+  ar <- 0
+  for (i in 2:nrow(storm.df)) {
+    if (storm.df[i, 'storm'] > 1) {
+      if (storm.df[i-1, 'storm'] <= 1) {
+        ar <- ar + 1
+      }
+      storm.df[i, 'ar'] <- ar
+    }
+  }
+  # max(storm.df$ar)
+  # table(table(storm.df$ar))
+  
+  ## make a catalog
+  catalog[[wbd]] <- data.frame(AR = 1:max(storm.df$ar))
+  for (ar in 1:max(storm.df$ar)) {
+    catalog[[wbd]]$start[ar] <- paste(min(ymd(storm.df[storm.df$ar == ar, 'date'])))
+    catalog[[wbd]]$end[ar] <- paste(max(ymd(storm.df[storm.df$ar == ar, 'date'])))
+  }
+}
+
+```
+
+```{r}
+## get storm-total precip 
+for (c in 1:length(catalog)) {
+  for (ar in 1:nrow(catalog[[c]])) {
+    datelist <- seq(ymd(catalog[[c]]$start[ar]), ymd(catalog[[c]]$end[ar]), 'days')
+    precip <- rep(0,4)
+    for (i in 1:length(datelist)) {
+      d <- datelist[i]
+      cpc_precip <- cpc_prcp(d)
+      cpc_precip$lon <- cpc_precip$lon-360
+      cpc_precip <- rasterFromXYZ(cpc_precip, crs = st_crs(california)$proj4string)  
+      precip <- precip + velox(cpc_precip)$extract(watersheds, small = TRUE) %>% lapply(mean) %>% unlist
+    }
+    catalog[[c]][ar, 'precip'] <- precip[c]
+  }
+}
+
+## get storm-total discharge
+Sum <- function(x) ifelse(nrow(x)>0, sum(x, na.rm = TRUE), NA)
+for (c in 1:length(catalog)) {
+  for (ar in 1:nrow(catalog[[c]])) {
+    datelist <- seq(ymd(catalog[[c]]$start[ar]), ymd(catalog[[c]]$end[ar]), 'days')
+    catalog[[c]][ar, 'runoff'] <- data %>% 
+      subset(site_no == watersheds$PourPtID[c]) %>% 
+      subset(Date %in% datelist) %>% 
+      select(Runoff_mmday) %>% Sum
+  }
+}
+# by(data$Date[!is.na(data$Runoff_mmday)], data$site_no[!is.na(data$Runoff_mmday)], summary)
+
+g1 <- ggplot(data = catalog[[1]]) + 
+  geom_point(aes(x = precip/25.4, y = runoff/25.4), color = ggcolor(4)[1]) + 
+  ggtitle(label = waiver(), subtitle = '1980-2020') + 
+  lims(x = c(0, 16), y = c(0, 16)) + 
+  theme_classic() + theme(axis.title = element_blank()) + 
+  coord_fixed(ratio = 1)
+g2 <- ggplot(data = catalog[[2]]) + 
+  geom_point(aes(x = precip/25.4, y = runoff/25.4), color = ggcolor(4)[2]) + 
+  ggtitle(label = waiver(), subtitle = '2012-2020') + 
+  lims(x = c(0, 16), y = c(0, 16)) + 
+  theme_classic() + theme(axis.title = element_blank()) + 
+  coord_fixed(ratio = 1)
+g3 <- ggplot(data = catalog[[3]]) + 
+  geom_point(aes(x = precip/25.4, y = runoff/25.4), color = ggcolor(4)[3]) + 
+  ggtitle(label = waiver(), subtitle = '1980-2020') + 
+  lims(x = c(0, 16), y = c(0, 16)) + 
+  theme_classic() + theme(axis.title = element_blank()) + 
+  coord_fixed(ratio = 1)
+g4 <- ggplot(data = catalog[[4]]) + 
+  geom_point(aes(x = precip/25.4, y = runoff/25.4), color = ggcolor(4)[4]) + 
+  ggtitle(label = waiver(), subtitle = '2009-2020') + 
+  lims(x = c(0, 16), y = c(0, 16)) + 
+  theme_classic() + theme(axis.title = element_blank()) + 
+  coord_fixed(ratio = 1)
+gmap <- ggplot() + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = 'gray95') + 
+  geom_sf(data = rivers %>% st_intersection(california %>% subset(NAME == 'Sonoma'))) + 
+  geom_sf(data = sites, aes(color = site_no), size = 3, show.legend = FALSE) + 
+  theme_void()
+
+gridExtra::grid.arrange(grobs = list(g1, g2, g3, g4, gmap), 
+                        layout_matrix = rbind(c(1,2,5), c(3,4,5)))
+
+```
+
+Fit curve numbers to data
+```{r}
+## CN method #1: by weighted land cover
+
+## load LULC data
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img') 
+lulc.att <- lulc@data@attributes[[1]]
+lulc <- lulc %>% 
+  crop(st_transform(california, proj4string(lulc))) %>%
+  extract(st_transform(watersheds, proj4string(lulc))) %>%
+  lapply(function(x) data.frame(prop.table(table(x))))
+
+lulc.df <- lulc[[1]]
+for (i in 2:length(lulc)) {
+  lulc.df <- lulc.df %>% full_join(data.frame(lulc[[i]]), by = 'x')
+}
+names(lulc.df) <- c('ID', watersheds$PourPtID)
+lulc.df$Class <- lulc.att$NLCD.Land.Cover.Class[which(lulc.att$ID %in% lulc.df$ID)]
+
+## assign CNs to LULCs
+lulc.df$CN <- c(100, 84, 94, 95, 98, 94, 63, 80, 74, 84, 89, 84, 90, 91, 92)
+CN1 <- apply(lulc.df[,c(2:5)] * lulc.df[,7], 2, sum)[1] %>% unname
+
+lulc %>% 
+  crop(california %>% subset(NAME == 'Sonoma') %>% st_transform(proj4string(lulc))) %>% 
+  mask(california %>% subset(NAME == 'Sonoma') %>% st_transform(proj4string(lulc))) %>%
+  plot
+
+lulc.colors <- data.frame(name = lulc@data@attributes[[1]]$NLCD.Land.Cover.Class, 
+                          color = lulc@legend@colortable) %>% subset(color != '#000000')
+ggplot() + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[1,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[2,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[3,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[4,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[5,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[6,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[7,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[8,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[9,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[10,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[11,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[12,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[13,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[14,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[15,1])) + 
+  geom_area(aes(x = NA, y = NA, fill = lulc.colors[16,1])) + 
+  scale_fill_manual(values = paste(lulc.colors[,2]))
+  
+
+```
+
+
+```{r}
+## CN method #2: empirical fit to data
+df <- catalog[[1]]
+
+# P <- df$precip / 25.4
+# Q <- df$runoff / 25.4
+# S <- 5 * (P + 2*Q - sqrt(5*P*Q + 4*Q^2))
+# S <- ifelse(P > 0 & Q > 0, S, NA)
+# ## getting negative numbers wherever Q > P --> work on that (maybe try PRISM?)
+# ## could also try converting from daily --> storm total precip & runoff
+# 
+# S.best <- Mean(log(S))
+# S.std <- sd(log(S), na.rm = TRUE)
+# 
+# CN2 <- 1000/(10+S.best)
+# CN2.lower <- 1000/(10 + S.best + 1.282*S.std)
+# CN2.upper <- 1000/(10 + S.best - 1.282*S.std)
+
+```
+
+```{r}
+## repeat method #2, but only look at annual max storms
+df$wateryear <- ifelse(month(df$start) %in% 10:12, year(df$start), year(df$start))
+
+wateryear.df <- data.frame(wateryear = unique(df$wateryear), precip = NA, runoff = NA)
+for (wy in 1:nrow(wateryear.df)) {
+  wateryear.df[wy, 'precip'] <- df %>% 
+    subset(wateryear == unique(wateryear)[wy]) %>% 
+    dplyr::select(precip) %>% 
+    Max / 25.4
+  wateryear.df[wy, 'runoff'] <- df %>% 
+    subset(wateryear == unique(wateryear)[wy]) %>%
+    dplyr::select(runoff) %>%
+    Max / 25.4
+}
+
+P <- wateryear.df$precip
+Q <- wateryear.df$runoff
+S <- 5 * (P + 2*Q - sqrt(5*P*Q + 4*Q^2))
+S <- ifelse(P > 0 & Q > 0, S, NA)
+
+S.best <- Mean(log(S))
+S.std <- sd(log(S), na.rm = TRUE)
+S.lower <- S.best + 1.282*S.std
+S.upper <- S.best - 1.282*S.std
+
+ggplot(data = data.frame(CN = (1000/(10 + S)))) + 
+  geom_histogram(aes(x = CN), bins = 7, color = 'black', fill = 'white') + 
+  theme_classic()
+sort(1000/(10+S))
+
+CN2 <- 1000/(10+exp(S.best))
+CN2.lower <- 1000/(10 + exp(S.lower))
+CN2.upper <- 1000/(10 + exp(S.upper))
+
+dx <- seq(0, 20, 0.1)
+ggplot() + 
+  geom_ribbon(aes(x = dx, 
+                  ymin = ifelse(dx < 0.2*exp(S.lower), 0, (dx - 0.2*exp(S.lower))^2/(dx + 0.8*exp(S.lower))), 
+                  ymax = ifelse(dx < 0.2*exp(S.upper), 0, (dx - 0.2*exp(S.upper))^2/(dx + 0.8*exp(S.upper)))),
+              fill = 'grey80', alpha = 0.5) +
+  geom_point(data = wateryear.df, aes(x = precip, y = runoff)) + 
+  geom_line(aes(x = dx, y = ifelse(dx < 0.2*exp(S.best), 0, (dx - 0.2*exp(S.best))^2/(dx + 0.8*exp(S.best)))), 
+            color = ggcolor(1), size = 1) +
+  ggtitle('SCS-CN: Lower Russian River', subtitle = 'Annual Max Storms') + 
+  labs(x = 'Storm Total Precipitation (in)', y = 'Storm Total Runoff (in)') + 
+  coord_fixed(ratio = 1)
+
+ggplot() + 
+  geom_ribbon(aes(x = dx, 
+                  ymin = ifelse(dx < 0.2*exp(S.lower), 0, (dx - 0.2*exp(S.lower))^2/(dx + 0.8*exp(S.lower))), 
+                  ymax = ifelse(dx < 0.2*exp(S.upper), 0, (dx - 0.2*exp(S.upper))^2/(dx + 0.8*exp(S.upper)))),
+              fill = 'grey80', alpha = 0.5) +
+  geom_point(data = wateryear.df, aes(x = precip, y = runoff)) + 
+  geom_line(aes(x = dx, y = ifelse(dx < 0.2*exp(S.best), 0, (dx - 0.2*exp(S.best))^2/(dx + 0.8*exp(S.best)))), 
+            color = ggcolor(1), size = 1) +
+  ggtitle('SCS-CN: Russian River') + 
+  labs(x = 'Storm Total Precipitation (in)', y = 'Storm Total Runoff (in)') + 
+  coord_fixed(ratio = 1) + 
+  theme_classic()
+ggsave('./_plots/prob_runoff.jpg', width = 3, height = 3)
+
+ggplot() + 
+  geom_ribbon(aes(x = dx, 
+                  ymin = ifelse(dx < 0.2*exp(S.lower), 0, (dx - 0.2*exp(S.lower))^2/(dx + 0.8*exp(S.lower))), 
+                  ymax = ifelse(dx < 0.2*exp(S.upper), 0, (dx - 0.2*exp(S.upper))^2/(dx + 0.8*exp(S.upper)))),
+              fill = 'grey80', alpha = 0.5) +
+  geom_line(aes(x = dx, y = ifelse(dx < 0.2*exp(S.best), 0, (dx - 0.2*exp(S.best))^2/(dx + 0.8*exp(S.best)))), 
+            color = ggcolor(1), size = 1) +
+  geom_point(data = df %>% subset(precip > 0), aes(x = precip/25.4, y = runoff/25.4), size = 0.75) + 
+  ggtitle('SCS-CN: Lower Russian River', subtitle = 'All Storms') + 
+  labs(x = 'Storm Total Precipitation (in)', y = 'Storm Total Runoff (in)') + 
+  coord_fixed(ratio = 1)
+
+
+```
+
+```{r}
+## CN method #3: pairwise comparison
+
+P <- df$precip / 25.4
+Q <- df$runoff / 25.4
+S <- 5 * (sort(P) + 2*sort(Q) - sqrt(5*sort(P)*sort(Q) + 4*sort(Q)^2))
+S <- ifelse(sort(P) > 0 & sort(Q) > 0, S, NA)
+CN3 <- 1000/(S+10)
+
+theta.0 <- 70
+beta.0 <- lm(log((CN3 - theta.0) / (100 - theta.0)) ~ sort(P) + 0)$coefficients
+model <- nls(CN3 ~ (100-theta) * exp(beta * sort(P)) + theta , start = list(beta = beta.0, theta = theta.0))
+
+CN.best <- 57.3044
+b <- -1/-0.3686
+
+ggplot() + 
+  geom_point(data = data.frame(P = sort(P), CN = CN3), aes(x = P, y = CN)) + 
+  geom_line(data = data.frame(dp = seq(0, 18, 0.1), CN = CN.best + (100-CN.best)*exp(-seq(0, 18, 0.1)/b)), 
+            aes(x = dp, y = CN), color = 'red', size = 1) +
+  geom_hline(yintercept = CN.best, color = ggcolor(1), linetype = 'dashed') + 
+  ggtitle('SCS-CN: Lower Russian River') + 
+  labs(x = 'Storm Total Precipitation (in)', y = 'Storm CN') + 
+  # geom_line(data = data.frame(dp = seq(0, 15, 0.1), CN.lower = 100/(seq(0, 15, 0.1)/2 + 1)),
+  #           aes(x = dp, y = CN.lower), color = 'grey60') + 
+  scale_x_continuous(limits = c(0, NA)) + 
+  scale_y_continuous(limits = c(50, 100)) + 
+  coord_fixed(ratio = 50/15)
+
+```
+
+ArcGIS vignette:
+
+* get a California DEM (Fig. 1a)
+    + TopoBathy: http://www.arcgis.com/home/item.html?id=c753e5bfadb54d46b69c3e68922483bc
+    + Extract a 1km-resolution .tif for CA
+* run the Fill tool (Fig. 1b-1c)
+* run the Flow Direction tool (Fig. 1d)
+* run the Flow Accumulation tool (Fig. 1e)
+* run the Polyline to Raster tool to rasterize majorriversandcreeks.shp
+
+```{r HAND}
+## goal: find the optimal threshold for defining the drainage network
+
+flow_accum <- raster('./_gis/California/flowaccum_fill_1km.tif')
+river_raster <- raster('./_gis/California/river_raster.tif')
+river_raster <- river_raster > 0
+
+# origin_adjust <- matrix(c(origin(flow_accum), origin(river_raster)), nrow = 2) %>% apply(1, function(x) mean(x)-x) 
+# flow_accum <- shift(flow_accum, dx = origin_adjust[1,1], dy = origin_adjust[1,2])
+# river_raster <- shift(river_raster, dx = origin_adjust[2,1], dy = origin_adjust[2,2])
+flow_accum <- flow_accum %>% crop(river_raster)
+river_raster <- river_raster %>% crop(flow_accum)
+
+require(caret)
+index <- c()
+sens <- c()
+spec <- c()
+accuracy <- c()
+river_values <- river_raster@data@values %>% as.numeric %>% factor
+flow_values <- flow_accum@data@values
+
+pb <- txtProgressBar(min = 0, max = 302, style = 3)
+for (i in 1:302) {
+  index[i] <- c(1:21, quantile(flow_values, seq(93, 100, 0.025)/100))[i]
+  cm <- confusionMatrix(river_values, factor(as.numeric(flow_values > index[i])))
+  sens[i] <- cm$byClass['Sensitivity']
+  spec[i] <- cm$byClass['Specificity']
+  accuracy[i] <- cm$overall['Accuracy']
+  setTxtProgressBar(pb, i)
+}
+index[which.max(spec)]
+
+ggplot(data = data.frame(sens = c(0,sens,1), spec = c(1,spec,0))) + 
+  geom_step(aes(x = 1-spec, y = sens)) + 
+  lims(x = c(0,1), y = c(0,1)) + 
+  coord_fixed(ratio = 1)
+ggplot(data = data.frame(i = index[-length(index)], acc = accuracy)) + 
+  geom_step(aes(x = i, y = acc)) + 
+  scale_x_log10() + 
+  scale_x_log10(minor_breaks = log_breaks(0, 6))
+ggplot(data = data.frame(i = index[-length(index)], sens = sens, spec = spec)) + 
+  geom_step(aes(x = i, y = 1-spec, color = 'FP')) + 
+  geom_step(aes(x = i, y = sens, color = 'FN')) + 
+  scale_x_log10(minor_breaks = log_breaks(0, 6))
+
+creeks <- st_read('./_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp') %>% 
+  st_zm(st_transform(albers))
+# require(mapview)
+# mapview(flow_accum > index[which.max(spec)]) + mapview(creeks)
+
+## the optimal threshold seems way higher than the one found using a visual check (~50 vs. ~3000)
+
+```
+
+```{r}
+require(caret)
+index <- c()
+sens <- c()
+spec <- c()
+accuracy <- c()
+river_values <- crop(river_raster, st_transform(california %>% subset(NAME == 'Sonoma'),
+                                                proj4string(river_raster)))@data@values %>% as.numeric %>% factor
+flow_values <- crop(flow_accum, st_transform(california %>% subset(NAME == 'Sonoma'),
+                                             proj4string(flow_accum)))@data@values
+
+pb <- txtProgressBar(min = 0, max = 302, style = 3)
+for (i in 1:302) {
+  index[i] <- c(1:21, quantile(flow_values, seq(93, 100, 0.025)/100))[i]
+  cm <- confusionMatrix(river_values, factor(as.numeric(flow_values > index[i])))
+  sens[i] <- cm$byClass['Sensitivity']
+  spec[i] <- cm$byClass['Specificity']
+  accuracy[i] <- cm$overall['Accuracy']
+  setTxtProgressBar(pb, i)
+}
+index[which.max(spec)]
+
+ggplot() + 
+  geom_raster(data = as.data.frame(flow_accum %>% 
+                                     crop(california %>% subset(NAME == 'Sonoma') %>%
+                                            st_transform(proj4string(flow_accum))) %>% 
+                                     mask(california %>% subset(NAME == 'Sonoma') %>%
+                                            st_transform(proj4string(flow_accum))), xy = TRUE) %>% 
+                subset(flowaccum_fill_1km > 300), aes(x = x, y = y)) + 
+  geom_sf(data = creeks %>% 
+            st_intersection(california %>% subset(NAME == 'Sonoma')) %>% 
+            st_transform(proj4string(flow_accum)), color = 'lightblue3') + 
+  geom_sf(data = california %>% 
+            subset(NAME == 'Sonoma') %>% 
+            st_transform(proj4string(flow_accum)), fill = NA) + 
+  theme_void()
+  
+
+```
+ 
+```{r lisflood}
+## set up LISFLOOD files
+sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME != 9901)
+terrain <- raster('./_gis/California/_hydrology/sonoma_terrain.tif')
+topobathy <- raster('./_gis/California/_hydrology/sonoma_topobathy.tif')
+
+bathy <- (terrain - topobathy) %>% 
+  mask(st_transform(sonoma, proj4string(terrain)))
+russian <- st_read('D:/Research/_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp') %>% 
+  subset(grepl('Russian', GNIS_Name)) %>% 
+  st_zm() %>% 
+  st_intersection(sonoma)
+
+ggplot() + 
+  geom_sf(data = russian %>% st_transform(proj4string(terrain)), size = 1, color = 'red') + 
+  geom_raster(data = as.data.frame(bathy, xy = TRUE) %>% subset(abs(layer) > 1e-2), 
+              aes(x = x, y = y, fill = log10(layer))) +
+  geom_sf(data = california %>% subset(NAME == 'Sonoma') %>% st_transform(proj4string(terrain)), fill = NA) + 
+  scale_fill_viridis_c() + 
+  theme_void()
+
+## topobathy doesn't actually seem to have river outlines
+
+# ## try point elevation data from Stanford EarthWorks
+# elev <- st_read('C:/Users/cbowers/Downloads/data(9)/rr_scwa_pts.shp')
+# elev$terrain <- extract(terrain, elev)*39/12
+ggplot(data = elev) + 
+  geom_point(aes(x = terrain, y = ELEVPOINT)) + 
+  geom_line(aes(x = terrain, y = terrain), linetype = 'dotted') + 
+  coord_fixed(ratio = 1)
+
+sum(elev$ELEVPOINT > elev$terrain) / nrow(elev)
+
+## try extracting a channel width
+rr_poly <- st_read('C:/Users/cbowers/Downloads/data/rr_hydropola.shp', crs = 26910) %>% 
+  subset(MINOR1 == 412) %>% 
+  mutate(WIDTH = 2*AREA/PERIMETER)
+
+# ggplot() + 
+#   # geom_sf(data = sonoma, fill = NA) + 
+#   # geom_sf(data = russian, color = 'blue') + 
+#   geom_sf(data = rr_poly, color = NA, aes(fill = WIDTH)) + 
+#   scale_fill_viridis_c() + 
+#   theme_void()
+
+
+ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(proj4string(terrain)), fill = NA) + 
+  geom_raster(data = as.data.frame(test, xy = TRUE) %>% subset(!is.na(layer_WIDTH)), 
+              aes(x = x, y = y, fill = layer_WIDTH)) +
+  geom_sf(data = russian %>% st_transform(proj4string(terrain)), color = 'black')
+
+```
+ 
+```{r}
+## try running LISFLOOD
+sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME != 9901)
+
+#### terrain: https://www.arcgis.com/home/item.html?id=58a541efc59545e6b7137f961d7de883
+terrain <- raster('./_gis/California/_hydrology/russian_terrain.tif') 
+ext <- extent(terrain)
+terrain <- terrain %>% raster::aggregate(fact = 10)
+writeRaster(terrain, format = 'ascii', 
+            filename = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/russian.dem.asc', 
+            overwrite = TRUE)
+
+#### river width
+
+# ## hydrographic polygons: http://purl.stanford.edu/ym034ms1211
+# rr_poly <- st_read('C:/Users/cbowers/Downloads/data/rr_hydropola.shp', crs = 26910) %>% 
+#   subset(MINOR1 == 412) %>% 
+#   mutate(WIDTH = 2*AREA/PERIMETER)
+
+## hydrographic polygons: https://www.usgs.gov/core-science-systems/ngp/national-hydrography/
+hydropoly <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+                     layer = 'NHDArea')
+fcode <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+                 layer = 'NHDFCode')
+hydropoly_rr <- hydropoly %>% 
+  left_join(fcode %>% select('FCODE', 'DESCRIPTION'), by = c('FCode' = 'FCODE')) %>% 
+  subset(grepl('Stream/River', DESCRIPTION)) %>% 
+  subset(row.names(.) == '2104') %>%  #get Russian River only
+  st_intersection(st_transform(wbd12, st_crs(.))) %>% 
+  mutate(feature_id = row.names(.)) %>% 
+  subset(!(feature_id %in% c('2104', '2104.12', '2104.20'))) %>% 
+  st_transform(albers) %>% 
+  select(feature_id, Shape) %>% 
+  mutate(AREA = st_area(.), 
+         PERIMETER = lwgeom::st_perimeter(.),
+         WIDTH = 2*AREA/PERIMETER) %>%  
+  st_transform(proj4string(terrain)) %>% 
+  st_crop(extent(terrain))
+width <- rasterize(x = hydropoly_rr %>% st_cast(to = 'MULTILINESTRING'), y = terrain, field = 'WIDTH')
+proj4string(width) <- proj4string(terrain)
+writeRaster(width, format = 'ascii', 
+            filename = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/russian.width.asc',
+            overwrite = TRUE)
+
+ggplot() + 
+  geom_sf(data = sonoma %>% st_union %>% st_transform(proj4string(terrain))) + 
+  geom_rect(data = data.frame(xmin = ext@xmin, xmax = ext@xmax, ymin = ext@ymin, ymax = ext@ymax), 
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), 
+            color = 'black', fill = 'grey60', alpha = 0.2) + 
+  geom_raster(data = width.df, aes(x = x, y = y, fill = layer)) + 
+  scale_fill_viridis_c() + 
+  theme_void()
+
+#### get boundary conditions
+width.df <- as.data.frame(width, xy = TRUE) %>% subset(!is.na(layer))
+edge.in <- width.df[which(width.df$y == max(width.df$y)),]
+min(edge.in$x)
+max(edge.in$x)
+edge.out <- width.df[which(width.df$x == min(width.df$x)),]
+min(edge.out$y)
+max(edge.out$y)
+
+## convert boundaries to latlong
+edges <- matrix(c(mean(edge.in$x), mean(edge.in$y), 'in',
+                  mean(edge.out$x), mean(edge.out$y), 'out'), byrow = TRUE, nrow = 2) %>%
+  data.frame %>%
+  setNames(c('long', 'lat', 'edge')) %>%
+  mutate(lat = toNumber(lat), long = toNumber(long)) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = proj4string(terrain)) %>% 
+  st_transform(NAD) %>% 
+  st_coordinates
+
+
+#### get initial flow
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv') %>% 
+  subset(str_length(paste(site_no)) == 8) %>% 
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california)) %>% 
+  st_intersection(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))) %>% 
+  subset(grepl('RUSSIAN', station_nm)) %>% 
+  st_intersection(california %>% subset(NAME == 'Sonoma')) %>%  #subset to gauges below reservoirs
+  # subset(site_no != 11457002) %>%  #subset to gauges with cfs only
+  subset(!(site_no %in% c(11463980, 11465390)))  #keep gauges with long records only
+
+readNWISdv(11464000, parameterCd = param, startDate = '2005-12-31', endDate = '2006-01-03') %>% 
+  renameNWISColumns() %>% 
+  mutate(Flow_m3s = Flow/35.315) %>%  #convert cfs to m3/s
+  mutate(Flow_m2s = Flow_m3s / mean(edge.in$layer))
+# ggplot() +
+#   geom_sf(data = sonoma %>% st_transform(proj4string(terrain)), fill = NA) +
+#   geom_raster(data = as.data.frame(terrain, xy = TRUE), 
+#               aes(x = x, y = y, fill = russian_terrain)) +
+#   scale_fill_viridis_c() +
+#   geom_sf(data = hydropoly_rr %>% st_transform(proj4string(terrain)), color = 'black') + 
+#   geom_sf(data = sites %>% st_transform(proj4string(terrain)), aes(color = factor(site_no)), size = 1) + 
+#   theme_void()
+
+#### plot results
+depth <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma/results/russian-0010.wdfp')
+g <- ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(proj4string(width)), color = 'gray80', fill = NA) + 
+  geom_rect(data = data.frame(xmin = ext@xmin, xmax = ext@xmax, ymin = ext@ymin, ymax = ext@ymax), 
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), 
+            color = 'black', fill = 'grey60', alpha = 0.2) + 
+  geom_raster(data = depth %>% as.data.frame(xy = TRUE) %>% setNames(c('x', 'y', 'layer')) %>% subset(layer > 0), 
+              aes(x = x, y = y, fill = layer)) + 
+  # geom_sf(data = hydropoly_rr %>% st_transform(proj4string(width)) %>% st_crop(ext), size = 1, color = 'red') +
+  theme_void()
+  
+ggplot() + 
+  geom_sf(data = sonoma, color = 'gray80', fill = NA) + 
+  geom_sf(data = hydropoly_rr, size = 1, color = 'red')
+
+
+
+```
+
+```{r}
+## flood flow frequency: find the 100-yr return period flow for each gauge
+data <- readNWISdv('11463000', parameterCd = param) %>% renameNWISColumns
+
+## get annual max floods
+alpha <- 0.5
+annual_flow <- data %>% 
+  # subset(!(year(Date) %in% 1970:1979)) %>% 
+  group_by(WY = ifelse(month(Date) %in% 10:12, year(Date)+1, year(Date))) %>% 
+  summarize(Flow = max(Flow)) %>% 
+  subset(WY < 2020)
+annual_flow <- annual_flow[order(annual_flow$Flow),]
+annual_flow <- annual_flow %>% 
+  mutate(Q = Flow,
+         x = log10(Q),
+         i = 1:nrow(annual_flow),
+         p = (i - alpha)/(nrow(annual_flow) + 1 - 2*alpha)) %>% 
+  select(-Flow)
+
+## test threshold values 
+error <- c()
+for (i in 0:(n/2)) {
+  threshold <- i
+  x <- annual_flow[annual_flow$i > threshold, 'x'] %>% unlist
+  n <- length(x)
+  mu <- mean(x)
+  sigma <- sd(x)
+  skew <- n/(sigma^3*(n-1)*(n-2)) * sum((x - mu)^3)
+  alpha_hat <- 4/(skew^2)
+  beta_hat <- sign(skew) * sqrt(sigma^2/alpha_hat)
+  tau_hat <- mu - alpha_hat*beta_hat
+  error[i+1] <- sum(annual_flow$p - ppearsonIII(q = x, shape = alpha_hat, scale = beta_hat, location = tau_hat))^2
+  
+  dx <- seq(1,5,0.01)
+  y <- ppearsonIII(q = dx, shape = alpha_hat, scale = beta_hat, location = tau_hat)
+  g <- ggplot(data = data.frame(x = dx, y = y)) +
+    geom_line(aes(x = 10^x, y = y)) +
+    geom_point(data = annual_flow, aes(x = Q, y = p, color = (i > threshold)), show.legend = FALSE) +
+    scale_color_manual(values = c('grey70', 'black')) +
+    scale_x_continuous(limits = c(0,NA)) +
+    ggtitle('Flood Frequency Analysis') +
+    labs(x = 'Flow (cfs)', y = '1 - Probability of Exceedance') +
+    coord_fixed(ratio = 0.8e5)
+  print(g)
+}
+
+## plot them to check for PILFs
+threshold <- which.min(error)-1
+ggplot(data = annual_flow) + 
+  geom_point(aes(x = Q, y = p, color = (i > threshold))) + 
+  scale_x_continuous(limits = c(0, 80000)) + 
+  scale_y_log10(limits = c(1e-3, 1))
+
+x <- annual_flow[annual_flow$i > threshold, 'x'] %>% unlist
+n <- length(x)
+mu <- mean(x)
+sigma <- sd(x)
+skew <- n/(sigma^3*(n-1)*(n-2)) * sum((x - mu)^3)
+alpha_hat <- 4/(skew^2)
+beta_hat <- sign(skew) * sqrt(sigma^2/alpha_hat)
+tau_hat <- mu - alpha_hat*beta_hat
+
+require(PearsonDS)
+dx <- seq(0,5,0.01)
+y <- ppearsonIII(q = dx, shape = alpha_hat, scale = beta_hat, location = tau_hat)
+ggplot(data = data.frame(x = dx, y = y)) + 
+  geom_line(aes(x = 10^x, y = y)) +
+  geom_point(data = annual_flow, aes(x = Q, y = p, color = (i > threshold)), show.legend = FALSE) + 
+  scale_color_manual(values = c('grey70', 'black')) + 
+  scale_x_continuous(limits = c(0,NA)) + 
+  ggtitle('Flood Frequency Analysis') + 
+  labs(x = 'Flow (cfs)', y = '1 - Probability of Exceedance') + 
+  coord_fixed(ratio = 0.8e5)
+
+
+rpflow <- 10^qpearsonIII(p = 0.99, shape = alpha_hat, scale = beta_hat, location = tau_hat)
+## this is the 100-year flow in CFS
+
+## convert this to m3/s
+rpflow / 35.315 / mean(edge.in$layer)
+
+```
+
+```{r}
+## get Manning's n (roughness coefficient) from NLCD
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img') 
+lulc.att <- lulc@data@attributes[[1]]
+lulc.crop <- crop(lulc, sonoma %>% st_union %>% st_transform(proj4string(lulc)) %>% as('Spatial') %>% extent)
+
+lulc.n <- lulc.crop
+vals <- unique(lulc.crop[])
+manning <- data.frame(lulc = c(21:24, 31, 41:43, 52, 71, 81, 90, 95), 
+                      n = c(0.0404, 0.0678, 0.0678, 0.0404, 0.0113, 0.36, 0.32, 0.4, 0.4, 0.368, 0.325, 
+                            0.086, 0.1825))
+for (i in 1:length(vals)) {
+  if (vals[i] %in% manning$lulc) {
+    lulc.n[lulc.n == vals[i]] <- manning[manning$lulc == vals[i], 'n']
+  } else {
+    lulc.n[lulc.n == vals[i]] <- 0.05
+  }
+}
+lulc.n <- resample(projectRaster(lulc.n, terrain), terrain)
+writeRaster(lulc.n, format = 'ascii', 
+            filename = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/russian.n.asc',
+            overwrite = TRUE)
+
+## plot which values are made up
+temp <- lulc.crop %>% 
+  as.data.frame(xy = TRUE) %>% 
+  left_join(lulc.att, by = c('NLCD_2016_Land_Cover_L48_20190424_NLCD.Land.Cover.Class' = 'NLCD.Land.Cover.Class')) %>% 
+  select(x, y, ID) 
+ggplot() + 
+  geom_raster(data = temp, aes(x = x, y = y, fill = (ID %in% manning$lulc))) + 
+  geom_sf(data = sonoma %>% st_union %>% st_transform(proj4string(lulc.crop)), fill = NA) +
+  geom_sf(data = rivers %>% st_transform(proj4string(lulc.crop))) + 
+  theme_void()
+
+## plot magnitude of Manning's n
+ggplot() + 
+  geom_sf(data = sonoma %>% st_union %>% st_transform(proj4string(lulc.n))) +
+  geom_raster(data = as.data.frame(lulc.n, xy = TRUE) %>% setNames(c('x', 'y', 'layer')), 
+              aes(x = x, y = y, fill = layer)) + 
+  geom_rect(data = data.frame(xmin = ext@xmin, xmax = ext@xmax, ymin = ext@ymin, ymax = ext@ymax), 
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), 
+            color = 'black', fill = 'grey60', alpha = 0.2) + 
+  scale_fill_viridis_c() + 
+  theme_void()
+
+```
+
+```{r}
+## compare 100-year flow vs. 100-year floodplain
+## source: https://catalog.data.gov/dataset/national-flood-hazard-layer-nfhl
+NFHL <- st_read('./_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp') %>% 
+  st_transform(albers)
+floodzone <- function(x) {
+  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO', 'V', 'VE')) {
+    return('YES') 
+  } else if (x %in% c('D', 'X')) {
+    return('NO')
+  } else if (x == 'OPEN WATER') {
+    return('WATER')
+  } else {
+    return(NA)
+  }
+}
+NFHL$FLOODPLAIN <- factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))
+NFHL <- NFHL %>% select(FLOODPLAIN, geometry) %>% subset(FLOODPLAIN == 'YES')
+
+depth <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma/results/russian-0010.wdfp', crs = proj4string(terrain))
+# NFHL_raster <- rasterize(st_transform(NFHL, proj4string(depth)), depth)
+
+g <- ggplot() + 
+  geom_sf(data = sonoma %>% st_union %>% st_transform(proj4string(terrain)) %>% st_crop(extent(terrain))) + 
+  geom_raster(data = as.data.frame(depth, xy = TRUE) %>% setNames(c('x', 'y', 'depth')) %>% subset(depth > 0), 
+            aes(x = x, y = y), fill = 'red', alpha = 0.5) + 
+  geom_raster(data = as.data.frame(NFHL_raster, xy = TRUE) %>% setNames(c('x', 'y', 'NFHL')) %>% subset(!is.na(NFHL)), 
+            aes(x = x, y = y,), fill = 'blue', alpha = 0.5) + 
+  theme_void()
+
+
+```
+
+
+```{r}
+# ## intersect census tracts & latlong grid
+# CT <- tracts(state = 'CA', county = 'Sonoma', class = 'sf')
+# latlon <- st_sf(st_make_grid(california, cellsize = 0.1, what = 'polygons', offset = c(-125.05, 32.05)))
+# latlon[,c('lon', 'lat')] <- round(st_coordinates(st_centroid(latlon)), 1)
+# latlon <- st_transform(latlon, st_crs(CT))
+# 
+# ## assign claims to intersection polygons
+# polys <- st_intersection(CT, latlon) %>% 
+#   select(c(GEOID, lat, lon)) %>% 
+#   setNames(c('censustract', 'latitude', 'longitude', 'geometry')) %>% 
+#   mutate(polygon_id = 1:nrow(polys), 
+#          censustract = toNumber(censustract))
+# claims_poly <- inner_join(claims, st_drop_geometry(polys), by = c('censustract', 'latitude', 'longitude'))
+# 
+# ## distribute claims randomly within polygons
+# claims_poly[,c('lat_jitter', 'lon_jitter')] <- NA
+# pb <- txtProgressBar(min = 0, max = length(unique(claims_poly$polygon_id)), style = 3)
+# for (i in 1:length(unique(claims_poly$polygon_id))) {
+#   index <- unique(claims_poly$polygon_id)[i]
+#   claims_index <- (claims_poly$polygon_id == index)
+#   n <- sum(claims_index)
+#   samp <- st_sample(st_transform(polys[polys$polygon_id == index,], albers), size = n, type = 'random')
+#   claims_poly[claims_index, c('lon_jitter', 'lat_jitter')] <- st_coordinates(st_transform(samp, st_crs(CT)))
+#   setTxtProgressBar(pb, i)
+# }
+# claims_poly <- st_as_sf(claims_poly, coords = c('lon_jitter', 'lat_jitter'), crs = NAD)
+# ggplot() + 
+#   geom_sf(data = sonoma %>% st_union) + 
+#   geom_sf(data = claims_poly, aes(color = factor(polygon_id)), show.legend = FALSE) + 
+#   geom_sf(data = sonoma, fill = NA) + 
+#   geom_sf(data = rivers %>% st_intersection(sonoma), color = 'blue', size = 1) + 
+#   theme_void()
+# 
+# ## get downstream water surface elevation from NOAA tide gauge
+cities <- matrix(c(38.507930, -122.985860, 'Guerneville',
+         38.616588, -122.858989, 'Healdsburg'), byrow = TRUE, nrow = 2) %>%
+  data.frame %>%
+  setNames(c('lat', 'long', 'city')) %>%
+  mutate(lat = toNumber(lat), long = toNumber(long)) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = NAD)
+# 
+# sonoma.claims <- sonoma %>% 
+#   mutate(GEOID = toNumber(GEOID)) %>% 
+#   inner_join(claims, by = c('GEOID' = 'censustract')) %>% 
+#   group_by(GEOID) %>% 
+#   summarize(num_claims = Sum(counter), 
+#             val_claims = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim))
+# 
+# ggplot() + 
+#   geom_sf(data = sonoma.claims, aes(fill = log(val_claims)), color = NA, show.legend = FALSE) +
+#   scale_fill_gradient(low = 'white', high = 'black') + 
+#   # geom_sf(data = claims_poly %>% st_transform(st_crs(sonoma)) %>% st_intersection(sonoma), alpha = 0.1) + 
+#   geom_sf(data = rivers %>% st_intersection(sonoma), color = 'blue', size = 1) + 
+#   geom_sf(data = sites, aes(color = site_no), size = 2) + 
+#   geom_sf(data = cities, color = 'black', size = 2) + 
+#   geom_sf_label(data = cities, aes(label = city), nudge_x = -0.11, nudge_y = 0.02) + 
+#   theme_void()
+
+```
+
+```{r}
+## try to create a startfile based on typical water levels
+test <- readNWISdv(sites$site_no, param = param, statCd = statcode) %>% 
+  renameNWISColumns %>% 
+  subset(!is.na(GH_Max) | !is.na(GH_Min))
+test$GH_Mean <- apply(cbind(test$GH_Max, test$GH_Min), 1, mean)
+
+test %>% 
+  subset(!is.na(GH_Mean)) %>% 
+  select(site_no) %>% unique
+ggplot(test) + 
+  geom_histogram(aes(x = GH_Mean), color = 'black', fill = 'white') + 
+  labs(x = 'Mean Gage Height (ft)', y = 'Number of Days') + 
+  facet_grid(cols = vars(site_no))
+
+test %>% 
+  subset(site_no == 11467002) %>% 
+  subset(month(Date) %in% c(10:12, 1:3)) %>% 
+  summarize(gage = Mean(GH_Mean) / (39/12))
+
+sites$type <- 'Flow'
+sites$type[sites$site_no == 11467002] <- 'Height'
+ggplot() + 
+  geom_sf(data = california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))) + 
+  geom_sf(data = rivers) + 
+  geom_sf(data = sites %>% subset(site_no %in% toNumber(sites_fff)), size = 2, aes(color = site_no)) + 
+  geom_sf(data = cities, color = 'black', size = 2) +
+  geom_sf_text(data = cities, aes(label = city), nudge_x = -0.18, nudge_y = 0.04) +
+  lims(y = c(NA, 39.4)) +
+  theme_void()
+
+```
+ 
+```{r}
+## try to find average flow for a gage
+data <- readNWISstat('11464000', parameterCd = param, startDate = '1980-01-01')
+ggplot(data %>% subset(month_nu %in% c(10:12, 1:3))) + 
+  geom_histogram(aes(x = mean_va), color = 'black', fill = 'white', bins = sqrt(nrow(data)))
+
+meanflow <- data %>% 
+  subset(month_nu %in% c(10:12, 1:3)) %>% 
+  summarize(flow = Mean(mean_va))
+meanflow / 35.315 / mean(edge.in$layer)
+
+```
+
+```{r}
+## get extent for FloodScan
+x1 <- -123.3
+x2 <- -122.6
+y1 <- 38.3
+y2 <- 38.9
+box <- c(x1,y1, x1,y2, x2,y2, x2,y1, x1,y1) %>% 
+  matrix(ncol = 2, byrow = TRUE) %>% list %>%
+  st_polygon(dim = 'XY') %>% 
+  st_sfc(crs = NAD)
+
+box %>% 
+  st_transform(proj4string(terrain)) %>% 
+  st_coordinates() %>% 
+  as.data.frame %>% 
+  summarize(x1 = min(X), x2 = max(X), y1 = min(Y), y2 = max(Y)) %>% 
+  summarize(dx = x2-x1, dy = y2-y1) / 30
+
+ggplot() + 
+  geom_sf(data = sonoma %>% st_union %>% st_transform(proj4string(terrain))) + 
+  geom_sf(data = box %>% st_transform(proj4string(terrain)), fill = 'grey70', alpha = 0.5) + 
+  geom_raster(data = as.data.frame(depth, xy = TRUE) %>% setNames(c('x', 'y', 'depth')) %>% subset(depth > 0), 
+            aes(x = x, y = y, fill = depth), alpha = 0.5) +
+  scale_fill_viridis_c()
+
+```
+
+```{r}
+## go through LISFLOOD diagnostic files
+url <- 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/results/'
+
+## check output .dem file
+## note: for subgrid solver, this should be the same
+plot(terrain - raster(paste0(url, 'russian.dem'), crs = proj4string(terrain)))
+
+## check river channel
+sgc_bed <- raster(paste0(url, 'russian_SGC_bedZ.asc'), crs = proj4string(terrain))
+sgc_depth <- raster(paste0(url, 'russian_SGC_bfdepth.asc'), crs = proj4string(terrain))
+sgc_width <- raster(paste0(url, 'russian_SGC_width.asc'), crs = proj4string(terrain))
+
+plot(terrain - sgc_bed)
+plot(sgc_depth)
+plot(sgc_width)
+
+## deepen channel
+sgc_bed_new <- terrain - (sgc_depth*2)
+writeRaster(sgc_bed_new, format = 'ascii', 
+            filename = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/russian.bed.asc',
+            overwrite = TRUE)
+
+## LISFLOOD notes
+#### should add keyword mint_hk when doing this in parallel (should speed things up)
+#### "capable of simulating grids up to 10^6 cells"
+
+
+```
+
+```{r}
+## sonomavegmap
+
+## load hydroDEM
+hydro <- raster('C:/Users/cbowers/Downloads/Willow Creek/Willow Creek LiDAR Derived Hydro Rasters/Willow Creek_HYDRO_DEM_1.tif')
+hydro <- resample(hydro %>% projectRaster(terrain), terrain)
+
+## plot a histogram of differences between hydroDEM vs. terrain
+diff.raster <- (hydro/3.28084 - terrain)
+ggplot(data = data.frame(diff = diff.raster[])) + 
+  geom_histogram(aes(x = diff), color = 'black', fill = 'white', bins = sqrt(sum(!is.na(diff.raster[]))))
+
+## check if discrepancies are where hydrologic features were burned into the DEM
+burn <- st_read('C:/Users/cbowers/Downloads/Vector_Hydrologic_Data/Vector_Hydrologic_Data.gdb', 
+                layer = 'Hydroenforcement_Burn_Locations')
+burn.raster <- burn %>% 
+  st_transform(st_crs(terrain)) %>% 
+  st_crop(terrain) %>% 
+  rasterize(terrain)
+ggplot() + 
+  geom_raster(data = as.data.frame(diff.raster, xy = TRUE) %>% 
+                setNames(c('x', 'y', 'layer')) %>% 
+                subset(layer > 10), 
+              aes(x = x, y = y), fill = 'red', alpha = 0.5) + 
+  geom_raster(data = as.data.frame(burn.raster, xy = TRUE) %>% 
+                select(1:3) %>% 
+                setNames(c('x', 'y', 'layer')) %>% 
+                subset(!is.na(layer)),
+              aes(x = x, y = y), fill = 'blue', alpha = 0.5) + 
+  geom_raster(data = as.data.frame(diff.raster + burn.raster, xy = TRUE) %>% 
+                select(1:3) %>% 
+                setNames(c('x', 'y', 'layer')) %>%
+                subset(!is.na(layer)), 
+              aes(x = x, y = y), fill = 'black')
+## this seems to be the case
+## there does seem to be something funky going on at the boundaries -> make sure to extend beyond those
+
+diff.mask <- mask(diff.raster, burn.raster %>% projectRaster(diff.raster), inverse = TRUE)
+
+plot(abs(diff.mask/terrain) > 0.1)
+ggplot(data = data.frame(diff = diff.mask[])) + 
+  geom_histogram(aes(x = diff), color = 'black', fill = 'white', bins = sqrt(sum(!is.na(diff.mask[])))) + 
+  scale_x_continuous(limits = c(-10,10))
+
+crs(burn.raster)
+crs(diff.raster)
+
+```
+
+```{r}
+## choose a gauge
+View(st_drop_geometry(sites))
+data <- readNWISdv(siteNumbers = sites$site_no, parameterCd = param) %>% renameNWISColumns
+# by(data = ymd(data$Date), data$site_no, summary)
+
+sites_fff <- data %>% 
+  group_by(site_no) %>% 
+  summarize(record_length = length(unique(year(ymd(Date))))) %>% 
+  subset(record_length > 50) %>% 
+  select(site_no) %>% unlist
+
+```
+
+```{r}
+## define new DEM
+
+## open FloodScan rasters
+floodscan <- raster('C:/Users/cbowers/Downloads/FloodScan_Russian_River/Russian_River/aer_sfed_max_3s_20051231-20060102_v04r00.tif')
+res(floodscan)
+crs(floodscan)
+
+hydro <- raster('C:/Users/cbowers/Documents/ArcGIS/Projects/research/Willow Creek_HYDRO_DEM_1.tif') 
+res(hydro)
+crs(hydro)
+hydro <- aggregate(hydro, fact = 5)
+
+(prod(dim(hydro))/1e6) %>% sqrt
+hydro
+
+```
+

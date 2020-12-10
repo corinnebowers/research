@@ -1,0 +1,69 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "1/9/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+variables across location and time: 
+
+* ~~rain~~
+  + ~~total rain in rainy season~~
+  + ~~total rain in previous month~~
+  + ~~total rain in previous week~~
+  + ~~total rain over storm duration~~
+  + ~~max rain intensity~~
+* ~~storm duration~~
+<!-- * streamflow: no longer doing this -->
+<!--   + max pct of mean streamflow -->
+<!--   + number of days over streamflow threshold -->
+* ~~river discharge~~
+  + ~~average river discharge over storm duration~~
+  + ~~max river discharge over storm duration~~
+  + ~~total river discharge over storm duraction~~
+  + ~~average river discharge in previous week~~
+  + ~~total river discharge in previous week~~
+* ~~claims~~
+* ~~policies~~
+* **NDVI**
+* ~~soil moisture~~
+<!-- * temperature (available from PRISM) -->
+* ~~IVT~~
+* **LULC**
+
+variables across location: 
+
+* ~~elevation~~
+* ~~percent within floodplain~~
+* ~~distance to river~~
+* **pct of buildings designated residential** (get employment counts from ACS)
+* ~~number of SFH~~
+* ~~number of housing units~~
+* ~~insurance penetration~~
+
+variables across time: 
+
+* ~~ENSO~~
+* ~~PDO~~
+* ~~days since landfall~~
+* ~~days since 10/1 (start of rainy season)~~
+
+
+
+
+
+to do: 
+
+* finish running PRISM, 1982-1984 (ran out of tries)
+* rerun hazard code and get updated % zeros
+  + greaterthan2 case
+  + greaterthan5 case
+* add location-only & time-only variables
+* break down the hazard array
+* get a new GGally plot
+
+

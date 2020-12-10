@@ -1,0 +1,1102 @@
+---
+title: "river discharge"
+author: "Corinne"
+date: "2/24/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(dataRetrieval)
+require(EGRET)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r}
+# ## untar files from Copernicus
+# untar('C:/Users/cbowers/Downloads/dataset-cems-glofas-historical-56767d20-e682-4145-ae3b-5745923e8aa5.tar.gz',
+#       exdir = './_data/streamflow/')
+
+```
+
+
+## RASTER DISCHARGE ##
+```{r}
+# ## find mean & max discharge over entire record
+# filelist <- list.files('./_data/streamflow')
+# discharge_tot <- matrix(data = 0, nrow = 95, ncol = 104)
+# discharge_max <- discharge_tot
+# 
+# timer <- Sys.time()
+# pb <- txtProgressBar(min = 0, max = length(filelist), style = 3)
+# setTxtProgressBar(pb, 0)
+# for (i in 1:length(filelist)) {
+#   filename <- paste('./_data/streamflow', filelist[i], sep = '/')
+#   ncfile <- nc_open(filename)
+#   discharge <- t(ncvar_get(ncfile, 'dis24'))
+#   if (i == 1) {  #first time only
+#     lat <- ncvar_get(ncfile, 'lat')
+#     lon <- ncvar_get(ncfile, 'lon')
+#     lonbox <- lon >= st_bbox(california)$xmin & lon <= st_bbox(california)$xmax
+#     latbox <- lat >= st_bbox(california)$ymin & lat <= st_bbox(california)$ymax
+#   }
+#   discharge <- discharge[latbox, lonbox]
+#   nc_close(ncfile)
+# 
+#   discharge_tot <- apply(array(data = c(discharge, discharge_tot), dim = c(dim(discharge), 2)), c(1,2), Sum)
+#   discharge_max <- apply(array(data = c(discharge, discharge_max), dim = c(dim(discharge), 2)), c(1,2), Max)
+#   setTxtProgressBar(pb, i)
+# }
+# close(pb)
+# discharge_mean <- discharge_tot / length(filelist)
+# Sys.time() - timer
+# 
+# ## save out files
+# discharge_mean_raster <- raster(discharge_mean, xmn = st_bbox(california)$xmin, xmx = st_bbox(california)$xmax,
+#                            ymn = st_bbox(california)$ymin, ymx = st_bbox(california)$ymax)
+# discharge_max_raster <- raster(discharge_max, xmn = st_bbox(california)$xmin, xmx = st_bbox(california)$xmax,
+#                            ymn = st_bbox(california)$ymin, ymx = st_bbox(california)$ymax)
+# writeRaster(discharge_mean_raster, './_data/streamflow/summary/discharge_mean.nc')
+# writeRaster(discharge_max_raster, './_data/streamflow/summary/discharge_max.nc')
+
+```
+
+
+```{r}
+## find date of max discharge for the AOI
+filelist <- list.files('./_data/streamflow')[-length(list.files('./_data/streamflow'))]
+datelist <- ymd('1979-01-01') + days(1:length(filelist))
+discharge.df <- data.frame(matrix(nrow = nrow(CT_aoi)))
+
+timer <- Sys.time()
+pb <- txtProgressBar(min = 0, max = length(filelist), style = 3)
+setTxtProgressBar(pb, 0)
+for (i in 1:length(filelist)) {
+  filename <- paste('./_data/streamflow', filelist[i], sep = '/')
+  ncfile <- nc_open(filename)
+  discharge <- t(ncvar_get(ncfile, 'dis24'))
+  if (i == 1) {  #first time only
+    lat <- ncvar_get(ncfile, 'lat')
+    lon <- ncvar_get(ncfile, 'lon')
+    lonbox <- lon >= st_bbox(CT_aoi)$xmin & lon <= st_bbox(CT_aoi)$xmax
+    latbox <- lat >= st_bbox(CT_aoi)$ymin & lat <= st_bbox(CT_aoi)$ymax
+  }
+  discharge <- discharge[latbox, lonbox]
+  nc_close(ncfile)
+
+  discharge.raster <- raster(discharge, xmn = min(lon[lonbox]), xmx = max(lon[lonbox]),
+                             ymn = min(lat[latbox]), ymx = max(lat[latbox]))
+  discharge.df[,i] <- raster::extract(discharge.raster, CT_aoi, small = TRUE,
+                         weights = TRUE, normalizeWeights = TRUE, fun = mean)
+  setTxtProgressBar(pb, i)
+}
+close(pb)
+Sys.time() - timer
+
+## plot results
+discharge.df <- data.frame(t(discharge.df))
+# discharge.df <- discharge.df.save  # discharge.df.save <- discharge.df
+names(discharge.df) <- CT_aoi$GEOID
+discharge.df$DATE <- datelist - days(1)
+
+temp <- melt(discharge.df, id.vars = 'DATE', variable.name = 'GEOID', value.name = 'discharge')
+temp2 <- temp %>%
+  group_by(wateryear = ifelse(month(DATE) %in% 10:12, year(DATE)+1, year(DATE)), GEOID) %>%
+  summarize(discharge = Max(discharge))
+temp2$GEOID <- forcats::fct_relevel(temp2$GEOID, paste(sort(toNumber(unique(temp2$GEOID)))))
+
+temp3 <- temp2 %>% group_by(GEOID) %>% summarize(dis_max = max(discharge))
+temp3$wateryear <- NA
+for (i in 1:4) {
+  temp3$wateryear[i] <- temp2[which(temp2$GEOID == temp3$GEOID[i] &
+                                 temp2$discharge == temp3$dis_max[i]), 'wateryear'] %>% unlist
+}
+ggplot() +
+  geom_line(data = temp2, aes(x = wateryear, y = discharge, color = factor(GEOID))) +
+  geom_point(data = temp3, aes(x = wateryear, y = dis_max, color = factor(GEOID)), size = 2) +
+  ggtitle('Max Annual River Discharge') +
+  labs(x = 'Year', y = 'Discharge (cfs)', color = 'CT')
+
+dis_max <- vector(mode = 'character', length = 4)
+names(dis_max) <- CT_aoi$GEOID
+for (i in 1:4) {
+  dis_max[i] <- paste(discharge.df[which(discharge.df[,which(names(discharge.df) == temp3$GEOID[i])] ==
+                                           temp3$dis_max[i]), 'DATE'])
+}
+
+```
+
+
+```{r}
+## plot discharge cells vs. AOI 
+
+discharge_stack <- raster::stack()
+for (i in -2:5) {
+  d <- ymd('1995-12-22') + days(i)
+  filename <- paste('./_data/streamflow/CEMS_ECMWF_dis24', gsub('-', '', d), 'glofas_v2.1.nc', sep = '_')
+  ncfile <- nc_open(filename)
+  discharge <- t(ncvar_get(ncfile, 'dis24'))
+  lat <- ncvar_get(ncfile, 'lat')
+  lon <- ncvar_get(ncfile, 'lon')
+  nc_close(ncfile)
+  discharge_raster <- raster(discharge, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+  discharge_stack <- raster::stack(discharge_stack, discharge_raster)
+}
+discharge_storm_avg <- mean(discharge_stack)
+discharge_storm_max <- max(discharge_stack)
+discharge_storm_total <- sum(discharge_stack)
+
+temp <- as.data.frame(crop(discharge_max, CT_sonoma), xy = TRUE)
+ggplot() + 
+  geom_raster(data = temp, aes(x=x, y=y, fill = layer), color = 'white') + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = NA, color = 'gray60') +
+  geom_sf(data = CT_aoi, fill = NA, aes(color = factor(GEOID)), size = 1) + 
+  geom_sf(data = rivers %>% subset(GNIS_Name == 'Russian River'), color = 'lightblue', size = 1) + 
+  ggtitle('Max Daily River Discharge') + 
+  lims(x = st_bbox(CT_sonoma)[c(1,3)], y = st_bbox(CT_sonoma)[c(2,4)])
+  # lims(x = c(-123.25, -122.75), y = c(38.35, 38.65))
+
+```
+
+```{r explore 12/22/95}
+## parameters
+# load('./_data/Rutzcatalog.Rdata')
+# load('./_data/NFIP.Rdata')
+# point <- st_as_sf(data.frame(name = 'guerneville', lon = -122.998788, lat = 38.502189),
+#                 coords = c('lon', 'lat'), crs = NAD)
+# 
+# datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+# hourlist <- rep(datelist, each = 8) #+ hours(rep(seq(0, 21, 3), length(datelist)))
+# LON <- seq(-105, -150, -0.625)
+# LAT <- seq(27.5, 52.5, 0.5)
+# loc <- st_coordinates(point)
+# loc[1] <- round(loc[1]/0.625)*0.625
+# loc[2] <- round(loc[2]/0.5)*0.5
+# 
+# precip_pt <- data.frame(matrix(ncol = length(1982:2018), nrow = 182))
+# discharge_pt <- data.frame(matrix(ncol = length(1982:2018), nrow = 182))
+# IVT_pt <- data.frame(matrix(ncol = length(1982:2018), nrow = 182))
+# claims_pt <- data.frame(matrix(ncol = length(1982:2018), nrow = 182))
+
+# for (wateryear in 1982:2018) {
+for (wateryear in 2006) {
+  print(wateryear)
+  wy <- seq(ymd(paste(wateryear-1, 10, 1, sep = '-')),
+            ymd(paste(wateryear, 3, 31, sep = '-')), 'days')
+  wy <- wy[!(month(wy) == 2 & day(wy) == 29)]
+
+  pb <- txtProgressBar(min = 0, max = length(wy), style = 3)
+  for (i in 1:length(wy)) {
+    ## get precipitation at point
+    filename <- paste0('./_data/PRISM/', year(wy[i]), '/PRISM_ppt_stable_4kmD2_',
+                       gsub('-', '', wy[i]), '_bil.bil')
+    precip_pt[i, wateryear-1981] <- raster::extract(raster(filename), point)
+
+    ## get discharge at point
+    filename <- paste0('./_data/streamflow/CEMS_ECMWF_dis24_', gsub('-', '', wy[i]), '_glofas_v2.1.nc')
+    ncfile <- nc_open(filename)
+    dis24 <- t(ncvar_get(ncfile, 'dis24'))
+    lat <- ncvar_get(ncfile, 'lat')
+    lon <- ncvar_get(ncfile, 'lon')
+    nc_close(ncfile)
+    discharge_raster <- raster(dis24, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+    discharge_pt[i, wateryear-1981] <- raster::extract(discharge_raster, point)
+
+    setTxtProgressBar(pb, i)
+  }
+  
+  ## get IVT at point
+  IVT_point <- drop(IVT[LAT %in% loc[,2], LON %in% loc[,1], hourlist %in% wy])
+  IVT_pt[,wateryear-1981] <- data.frame(IVT = IVT_point, hourlist = hourlist[hourlist %in% wy]) %>%
+    group_by(hourlist) %>%
+    summarize(IVT = Max(IVT)) %>%
+    select(IVT) %>% unlist 
+  
+  ## get claims
+  claims_pt[,wateryear-1981] <- claims %>% 
+    subset(wateryear == wateryear & COUNTYNAME == 'Sonoma') %>%
+    mutate(claim_date = ymd(dateofloss),
+           claim_value = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim)) %>%
+    right_join(data.frame(claim_date = wy), by = 'claim_date') %>%
+    group_by(claim_date) %>%
+    summarize(counter = Sum(counter)) %>%
+    select(counter) %>% unlist
+}
+
+glist <- list()
+# for (wateryear in 1982:2018) {
+for (wateryear in 2006) {
+  ## get annual max
+  claims_max <- max(claims_pt[,wateryear-1981])*1.25
+  IVT_max <- max(IVT_pt[,wateryear-1981])
+  discharge_max <- max(discharge_pt[,wateryear-1981])
+  precip_max <- max(precip_pt[,wateryear-1981])
+
+  ## plot results
+  g <- ggplot(data = data.frame(wy = wy, IVT = IVT_pt[,wateryear-1981], precip = precip_pt[,wateryear-1981],
+                                discharge = discharge_pt[,wateryear-1981], claims = claims_pt[,wateryear-1981])) +
+    geom_area(aes(x = wy, y = IVT/IVT_max, color = 'Normalized IVT', 
+                  fill = 'Normalized IVT'), alpha = 0.5) +
+    geom_area(aes(x = wy-1, y = discharge/discharge_max, color = 'Normalized Discharge',
+                  fill = 'Normalized Discharge'), alpha = 0.5) +
+    geom_area(aes(x = wy, y = precip/precip_max, color = 'Normalized Precipitation',
+                  fill = 'Normalized Precipitation'), alpha = 0.5) +
+    geom_col(aes(x = wy, y = claims/claims_max), width = 0.75, fill = 'black') +
+    scale_y_continuous(limits = c(0,1), sec.axis = sec_axis(~.*claims_max, name = 'Number of Claims')) +
+    ggtitle(paste0('Guerneville - ', wateryear, ' Water Year')) +
+    # lims(x = c(ymd('2005-10-1'), ymd('2006-3-31'))) +
+    labs(x = 'Date', y = 'Normalized Hazard', fill = 'Values', color = 'Values')
+  glist[[wateryear-1981]] <- g
+}
+
+ggplot(data = data.frame(wy = wy, IVT = IVT_pt[,wateryear-1981], precip = precip_pt[,wateryear-1981],
+                         discharge = discharge_pt[,wateryear-1981], claims = claims_pt[,wateryear-1981])) +
+  geom_area(aes(x = wy, y = IVT/IVT_max, color = 'Normalized IVT', 
+                fill = 'Normalized IVT'), alpha = 0.5) +
+  geom_area(aes(x = wy-1, y = discharge/discharge_max, color = 'Normalized Discharge',
+                fill = 'Normalized Discharge'), alpha = 0.5) +
+  geom_area(aes(x = wy, y = precip/precip_max, color = 'Normalized Precipitation',
+                fill = 'Normalized Precipitation'), alpha = 0.5) +
+  scale_fill_manual(name = 'Hazard', values = c('#62bcd8', '#b2df8a', '#1f78b4')) + 
+  scale_color_manual(name = 'Hazard', values = c('#62bcd8', '#b2df8a', '#1f78b4')) + 
+  ggnewscale::new_scale_fill() + 
+  geom_col(aes(x = wy, y = claims/claims_max, fill = 'NFIP Claims'), width = 0.75) +
+  scale_fill_manual(values = 'black', name = 'Damage') + 
+  scale_x_date(labels = c(paste0('Oct ', wateryear-1), 'Nov', 'Dec', 'Jan', 'Feb', 'Mar', paste0('Apr ', wateryear)),
+               breaks = mdy(c(paste(10:12, 1, wateryear-1, sep = '-'), paste(1:4, 1, wateryear, sep = '-'))),
+               expand = c(0,1)) +
+  scale_y_continuous(limits = c(0,1), expand = c(0,0), 
+                     sec.axis = sec_axis(~.*claims_max, name = 'Number of Claims')) +
+  ggtitle(paste0('Guerneville - ', wateryear, ' Water Year')) +
+  labs(x = 'Date', y = 'Normalized Hazard', fill = 'Values', color = 'Values') + 
+  theme_classic() + theme(axis.title.x = element_blank())
+ggsave('./_plots/quals/chart2006.jpg', width = 12, height = 5)
+
+## remember: dates are wrong for discharge
+
+# wateryear <- 2017
+# 
+# claims %>%
+#   subset(COUNTYNAME == 'Sonoma') %>%
+#   subset(month(dateofloss) %in% c(10:12, 1:3)) %>%
+#   group_by(wateryear) %>%
+#   summarize(claims = Sum(counter)) %>%
+#   right_join(data.frame(wateryear = 1982:2017), by = 'wateryear')
+
+```
+
+
+```{r further explore}
+ggplot(data = CT_subset) +
+  geom_sf(aes(fill = factor(GEOID))) + 
+  geom_sf(data = st_as_sf(data.frame(name = 'guerneville', lon = -122.998788, lat = 38.502189), 
+                          coords = c('lon', 'lat'), crs = NAD), size = 8, shape = 23, fill = 'black')
+
+
+filename <- './_data/streamflow/CEMS_ECMWF_dis24_19951212_glofas_v2.1.nc'
+ncfile <- nc_open(filename)
+dis24 <- t(ncvar_get(ncfile, 'dis24'))
+lat <- ncvar_get(ncfile, 'lat')
+lon <- ncvar_get(ncfile, 'lon')
+nc_close(ncfile)
+discharge_raster <- raster(dis24, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+
+ggplot(data = as.data.frame(discharge_raster, xy = TRUE)) + 
+  geom_raster(aes(x=x, y=y, fill = layer)) + 
+  geom_sf(data = CT_sonoma, fill = NA) + 
+  geom_sf(data = CT_subset, aes(color = factor(GEOID), fill = NA)) + 
+  scale_fill_viridis_c() + 
+  lims(x = st_bbox(CT_sonoma)[c(1,3)], y = st_bbox(CT_sonoma)[c(2,4)])
+  
+
+
+
+## make penetration a time & location variable?
+
+
+
+```
+
+
+## USGS GAUGE DATA ##
+```{r explore dataRetrieval}
+siteNumber <- '11467000'
+startDate <- '1980-01-01'
+endDate <- ''
+
+param <- c('00060', '00065')
+names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008')
+names(statcode) <- c('max', 'min', 'mean', 'median')
+
+## get side & parameter code information
+info <- readNWISsite(siteNumber)
+info$drain_area_va
+readNWISpCode(param)
+
+## get raw daily streamflow data
+daily <- readNWISdv(siteNumbers = siteNumber, parameterCd = param, statCd = statcode,
+                    startDate = startDate, endDate = endDate)
+
+## rename columns
+daily <- renameNWISColumns(daily)
+names(daily)
+## dataframe attributes
+attr(daily, 'statisticInfo')
+attr(daily, 'variableInfo')
+attr(daily, 'siteInfo')
+
+plot(daily$Date, daily$Flow, ylab = attr(daily, 'variableInfo')$parameter_desc[1], xlab = '', col = 'red', type = 'l',
+     xaxt = 'n', yaxt = 'n', axes = FALSE)
+
+## get unit data
+## so this is way too much data -> don't do it
+discharge_unit <- readNWISuv(siteNumber, param, startDate, endDate)
+
+## peak flow data
+peak <- readNWISpeak(siteNumber, startDate, endDate)
+comment(peak)
+
+## rating curve data
+rating <- readNWISrating(siteNumber)
+rating_exsa <- readNWISrating(siteNumber, type = 'exsa')
+# rating_corr <- readNWISrating(siteNumber, type = 'corr')
+attr(rating, 'RATING')
+comment(rating)
+names(rating)
+
+# ggplot(data = rating) +
+#   geom_point(aes(x = INDEP, y = DEP))
+ggplot(data = rating_exsa %>% subset(INDEP >= 1.2)) +
+  geom_point(aes(x = INDEP, y = DEP))
+ggplot(data = rating_exsa %>% subset(INDEP >= 1.2)) +
+  geom_point(aes(x = INDEP, y = DEP)) +
+  scale_y_log10() + scale_x_log10()
+
+## surface water measurement data
+surface <- readNWISmeas(siteNumber)
+names(surface)
+ggplot(data = surface) +
+  geom_point(aes(x = gage_height_va, y = discharge_va))
+
+## get site information
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv')
+sites <- sites %>% subset(str_length(paste(site_no)) == 8)
+sites
+
+ggplot() + 
+  geom_sf(data = california, fill = NA) + 
+  geom_sf(data = st_as_sf(sites, coords = c('dec_long_va', 'dec_lat_va'), crs =  st_crs(california))) + 
+  ggtitle('USGS Gauges')
+
+# sites[grep('YUBA', sites$station_nm), c('site_no', 'station_nm')]
+# sites[sites$site_no == '11421000',]
+
+```
+
+```{r explore EGRET}
+## egret
+daily <- readNWISDaily(siteNumber, '00060', startDate, endDate)
+daily <- daily  %>% subset(Qualifier != 'P')
+summary(daily$Date)
+plot(daily$DecYear, daily$Q, log = 'y', type = 'l')
+
+## EGRET functions for flow history analysis
+info <- readNWISInfo(siteNumber, '00060', interactive = FALSE)
+eList <- as.egret(info, daily)
+eList <- setPA(eList, paStart = 10, paLong = 6) #wet season
+
+## plot results
+plotFlowSingle(eList, istat = 4)
+plotFlowSingle(eList, istat = 5)
+plotFlowSingle(eList, istat = 7)
+plotFlowSingle(eList, istat = 8)
+## extract results
+printSeries(eList, istat = 5, runoff = TRUE)
+## change units
+printqUnitCheatSheet()
+printSeries(eList, istat = 5, qUnit = 1)
+## plot standard deviation
+plotSDLogQ(eList)
+
+## plot daily discharge record
+plotQTimeDaily(eList, lwd = 1)
+plotQTimeDaily(eList, lwd = 1, qLower = 2e4)
+
+## multi-panel layouts
+plotFour(eList, qUnit = 1)
+```
+
+```{r explore rnoaa}
+require(rnoaa)
+
+## precipitation
+CONUS <- USA[-c(32, 35:37, 41:42, 50),]
+ggplot(data = rnoaa::cpc_prcp('1999-01-01', us = TRUE) %>% subset(precip >= 0)) + 
+  geom_raster(aes(x = lon-360, y = lat, fill = precip)) + 
+  geom_sf(data = CONUS, fill = NA) + 
+  scale_fill_gradient(high = "darkblue", low = 'white')
+
+noaa_precip <- cpc_prcp('1999-01-01', us = TRUE)
+names(noaa_precip) <- c('x', 'y', 'z')
+noaa_precip$y <- noaa_precip$y - 360
+
+diff(noaa_precip$x)[diff(noaa_precip$x) > 0] %>% median
+diff(noaa_precip$y)[diff(noaa_precip$y) > 0] %>% median
+raster(filename)
+## NOAA resolution is an order of magnitude more coarse than PRISM resolution -> keep PRISM
+
+## storm data
+test <- storm_data(basin = 'WP')
+test2 <- storm_shp(basin = 'WP')
+
+test2
+
+```
+
+## FLOOD STAGE DATA ##
+```{r}
+param <- c('00060', '00065')
+names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008')
+names(statcode) <- c('max', 'min', 'mean', 'median')
+
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv')
+sites <- sites %>% subset(str_length(paste(site_no)) == 8)
+
+```
+
+
+```{r load flood stage data}
+## add in flood stage data
+# https://water.weather.gov/ahps/
+gauges <- read.csv('./gauges_tab.csv')
+gauges <- gauges %>% rename(site_no = USGS.ID)
+gauges$site_no <- paste(gauges$site_no)
+
+## plot gauges  
+gauges.sf <- inner_join(sites, gauges %>% dplyr::select(-Latitude, -Longitude), by = 'site_no')
+gauges.sf <- st_as_sf(gauges.sf, coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california))
+# ggplot() + 
+#   geom_sf(data = california, fill = NA) +
+#   geom_sf(data = gauges.sf)  + 
+#   ggtitle('CA Gauges with Flood Stage Data')
+
+```
+
+
+```{r check elevations}
+## note: elevations from gauges file might actually be datums (confirm) #####
+
+## check elevations against elevatr
+gauges.sf <- elevatr::get_elev_point(gauges.sf)
+
+# bound <- 600
+# g <- ggplot() + 
+#   geom_point(data = gauges.sf, aes(x = elevation*3.281, y = Elevation)) + 
+#   geom_line(data = data.frame(line = seq(0,5000,10)), aes(x = line, y = line), linetype = 'dashed') 
+# g + geom_rect(aes(xmin = 0, xmax = bound, ymin = 0, ymax = bound), fill = NA, color = 'red')
+# g + lims(x = c(0, bound), y = c(0, bound))
+# 
+# ## check residuals
+# ggplot(data = data.frame(resid = gauges.sf$elevation*3.281 - gauges.sf$Elevation)) +
+#   geom_histogram(aes(x = resid), bins = 10, color = 'black', fill = 'white')
+# ggplot(data = data.frame(index = 1:nrow(gauges.sf), resid = gauges.sf$elevation*3.281 - gauges.sf$Elevation)) + 
+#   geom_point(aes(x = index, y = resid)) + 
+#   geom_line(aes(x = index, y = 0), linetype = 'dashed')
+
+# ## take the average of the two elevation values
+# test.sf$elevation_ft <- rowMeans(cbind(test.sf$elevation*3.281, test.sf$Elevation))
+# test.sf <- test.sf %>% select(-elevation, -elev_units, -Elevation)
+# test.sf <- test.sf %>% select(-X.1, -X.2)
+
+```
+
+```{r plot Sonoma gauges}
+## focus on gauges in Sonoma
+sites <- st_as_sf(sites, coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california))
+
+## assign counties to sites
+california <- counties(state = 'CA', class = 'sf'); california$GEOID <- toNumber(california$GEOID)
+sonoma <- california %>% subset(NAME == 'Sonoma')
+sites_sonoma <- st_intersection(st_transform(sites, albers), 
+                                st_transform(california %>% select(COUNTYFP, NAME, geometry), albers)) %>%
+  st_transform(NAD) %>% subset(NAME == 'Sonoma')
+
+rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp')
+rivers <- st_zm(st_transform(rivers, albers))  # find out what Z&M are (flowrates?? idk?)
+rivers_sonoma <- st_intersection(st_transform(rivers, albers),
+                                 st_transform(california %>% subset(NAME == 'Sonoma'), albers)) %>% 
+  st_transform(NAD) %>% subset(NAME == 'Sonoma')
+
+creeks <- st_read('./_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp')
+creeks <- st_zm(st_transform(creeks, albers))
+creeks_sonoma <- st_intersection(st_transform(creeks, albers), 
+                                 st_transform(california %>% subset(NAME == 'Sonoma'), albers)) %>%
+  st_transform(NAD) %>% subset(NAME == 'Sonoma')
+
+ggplot() + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = NA) + 
+  geom_sf(data = creeks_sonoma, color = 'lightblue', size = 0.75) + 
+  geom_sf(data = rivers_sonoma, color = 'blue', size = 0.75) + 
+  geom_sf(data = sites_sonoma %>% left_join(gauges), aes(color = is.na(FloodGH))) + 
+  scale_color_manual(name = 'Flood Stage Info?', labels = c('Yes', 'No'), values = c('black', 'red')) +
+  ggtitle('Sonoma USGS Gauges')
+
+```
+
+## DETERMINING FLOOD FLOWS ##
+```{r try HAND method}
+## goal: figure out how much water there is in excess of the flood stage, and distribute that water over an area
+# sites_sonoma <- elevatr::get_elev_point(sites_sonoma)
+
+# ## figure out which zoom level to use
+# require(mapview)
+# require(leaflet)
+# m <- mapview(sonoma)
+# m@map %>% setView(st_coordinates(st_centroid(sonoma))[1], st_coordinates(st_centroid(sonoma))[2], zoom = 9)
+# 
+# ## get Sonoma elevation as a raster
+# sonoma_elev <- raster(resolution = 0.01, xmn = st_bbox(sonoma)$xmin, xmx = st_bbox(sonoma)$xmax, 
+#                       ymn = st_bbox(sonoma)$ymin, ymx = st_bbox(sonoma)$ymax, crs = st_crs(sonoma), vals = 0)
+# sonoma_elev <- elevatr::get_elev_raster(sonoma_elev, z = 9, prj = st_crs(california)$proj4string)
+#
+# ggplot() +
+#   geom_raster(data = as.data.frame(test, xy = TRUE), aes(x=x, y=y, fill = layer > 0)) +
+#   scale_fill_viridis_c() +
+#   geom_sf(data = sonoma, fill = NA)
+
+```
+
+
+```{r fill in missing rating curves}
+## pick a period of data: 2006 storm
+daily <- readNWISdv(siteNumbers = sites_sonoma$site_no, parameterCd = param, statCd = statcode, 
+                    startDate = '2005-12-30', endDate = '2006-01-04') %>% renameNWISColumns
+surface <- readNWISmeas(sites_sonoma$site_no, startDate = '2005-12-30', endDate = '2006-01-04')
+
+## get rating curve data for all Sonoma gauges
+rating <- array(dim = c(8000, 2, nrow(sites_sonoma)))
+for (i in 1:nrow(sites_sonoma)) {
+  rating_exsa <- readNWISrating(sites_sonoma$site_no[i], type = 'exsa')
+  if (nrow(rating_exsa) > 0) {
+    rating[1:nrow(rating_exsa),,i] <- cbind(rating_exsa$INDEP, rating_exsa$DEP)
+  } else {
+    test <- readNWISmeas(sites_sonoma$site_no[i], startDate = '', endDate = '')
+    # ggplot(data = test) + 
+    #   geom_point(aes(x = gage_height_va, y = discharge_va))
+    ?smooth.spline
+  }
+}
+g <- ggplot()
+for (i in 1:nrow(sites_sonoma)) {
+  if(Sum(apply(rating[,,i], 2, Sum)) > 0) {
+    g <- g + geom_line(data = data.frame(x = rating[,1,i], y = rating[,2,i]), aes(x=x, y=y), 
+                       color = ggcolor(nrow(sites_sonoma))[i])
+  }
+}
+g + labs(x = 'Gauge height (ft)', y = 'Discharge (cfs)')
+
+# ## try to replicate one stage-discharge curve following USGS
+# breakpt <- 4.84
+# e1 = 3.74
+# e2 = 4
+# 
+# rating_exsa$offset <- ifelse(rating_exsa$INDEP <= breakpt, e1, e2)
+# ggplot() + 
+#   geom_point(data = rating_exsa, aes(x = INDEP-offset, y = DEP)) +
+#   scale_x_log10() + scale_y_log10() + 
+#   labs(y = 'Discharge', x = 'Gage Height') + 
+#   coord_flip()
+# 
+# y1 <- rating_exsa$INDEP[1]
+# q1 <- rating_exsa$DEP[1]
+# y2 <- rating_exsa$INDEP[rating_exsa$INDEP < breakpt] %>% tail(1)
+# q2 <- rating_exsa$DEP[rating_exsa$INDEP < breakpt] %>% tail(1)
+# c1 <- (log(q2)-log(q1))/(log(y2-e1)-log(y1-e1))
+# 
+# y1 <- rating_exsa$INDEP[rating_exsa$INDEP > breakpt][1]
+# q1 <- rating_exsa$DEP[rating_exsa$INDEP > breakpt][1]
+# y2 <- rating_exsa$INDEP[nrow(rating_exsa)]
+# q2 <- rating_exsa$DEP[nrow(rating_exsa)]
+# c2 <- (log(q2)-log(q1))/(log(y2-e2)-log(y1-e2))
+# 
+# a <- 0
+# b <- 60
+# 
+# x <- c(log_breaks(-4,0), 1:max(ceiling(rating_exsa$INDEP)))
+# y <- ifelse(x < breakpt, a + b*(x - e1)^c1, a + b*(x - e2)^c2)
+# ggplot() + 
+#   geom_point(data = rating_exsa, aes(x = INDEP, y = DEP)) +
+#   scale_x_log10() + scale_y_log10() + 
+#   labs(y = 'Discharge', x = 'Gage Height') + 
+#   coord_flip() + 
+#   geom_line(data = data.frame(x=x[!is.na(y)], y=y[!is.na(y)]), aes(x=x, y=y), color = 'red', size = 1) +
+#   lims(x = c(1, 50))
+# 
+# rating_exsa %>% mutate(test = INDEP - offset) %>% select(test)
+
+## this didn't work out at all -> move on
+
+```
+
+```{r find stage-discharge through interpolation}
+# ## instead of using stage-discharge relations, pull data from the last year before 
+# ## manually find stage-discharge relations
+# storm_start <- '2005-12-30'
+# stagedischarge <- readNWISmeas(sites_sonoma$site_no, startDate = paste(ymd(storm_start) - years(3)), 
+#                                endDate = storm_start)
+# ggplot(data = stagedischarge) + 
+#   geom_line(aes(x = gage_height_va, y = discharge_va, color = factor(site_no))) + 
+#   scale_x_log10() + scale_y_log10() + coord_flip()
+# 
+# for (i in 1:nrow(flow_cfs)) {
+#   i=9
+#   id <- flow_cfs$site_no[i]
+#   # gauges[gauges$site_no == id, c(2:5)]
+#   stagedischarge <- readNWISmeas(id, startDate = paste(ymd('2005-12-30')-years(5)), endDate = '2005-12-30')
+#   approx(stagedischarge$gage_height_va, stagedischarge$discharge_va, gauges[gauges$site_no == id, c(2:5)])
+# }
+
+## doesn't work bc the flood stages are outside the bounds of the stage-discharge record
+
+```
+
+```{r get flow_cfs & flow_gage}
+## goal here: get flows & gage heights for the 2006 storm, 
+## then use existing rating curves to compare gage heights to flood levels
+
+## convert cfs data to runoff data
+daily <- readNWISdv(siteNumbers = sites_sonoma$site_no, parameterCd = param, statCd = statcode, 
+                    startDate = '2005-12-30', endDate = '2006-01-04') %>% renameNWISColumns
+daily$GH_Avg <- rowMeans(cbind(daily$GH_Max, daily$GH_Min))
+flow_cfs <- dcast(site_no ~ Date, data = daily, value.var = 'Flow')
+flow_gage <- dcast(site_no ~ Date, data = daily, value.var = 'GH_Avg')
+
+for (i in 1:nrow(flow_cfs)) {
+  if (!complete.cases(flow_gage)[i]) {
+    rating_exsa <- readNWISrating(sites_sonoma$site_no[sites_sonoma$site_no == flow_gage$site_no[i]], type = 'exsa')
+    if (nrow(rating_exsa) > 0) {
+      flow_gage[i,-1] <- approx(rating_exsa$DEP, rating_exsa$INDEP, flow_cfs[i,-1])$y
+    }
+  }
+}
+
+gagetable <- flow_gage %>% 
+  left_join(sites_sonoma %>% st_drop_geometry %>% select(site_no, elevation), by = 'site_no') %>% 
+  mutate(elevation = elevation*3.28) %>%  #convert meters to feet
+  left_join(gauges, by = 'site_no') %>% select(1:13)
+
+gagetable[,2:7] > gagetable$ActionGH
+(gagetable[,2:7] > gagetable$FloodGH) %>% apply(2, function(x) Sum(x)/sum(!is.na(x)))
+
+cfstable <- flow_cfs %>% 
+  left_join(sites_sonoma %>% st_drop_geometry %>% select(site_no, elevation), by = 'site_no') %>%
+  mutate(elevation = elevation*3.28) %>%
+  left_join(gauges, by = 'site_no') %>% select(1:9, 14:17)
+
+```
+
+```{r get mm/day runoff}
+## copy Konrad & Dettinger (2017)
+daily <- readNWISdv(siteNumbers = sites_sonoma$site_no, parameterCd = param, startDate = '2005-12-30',
+                    endDate = '2006-01-04') %>% renameNWISColumns
+flow_cfs <- dcast(site_no ~ Date, data = daily, value.var = 'Flow')
+
+## get drainage area
+info <- dataRetrieval::readNWISsite(sites_sonoma$site_no)
+drainage <- info$drain_area_va[sites_sonoma$site_no %in% flow_cfs$site_no[-16]]
+
+flow_mmday <- diag(1/drainage) %*% as.matrix(flow_cfs[-16,-1]) / ## divide by drainage area (mi^2)
+  5280^2 * ## convert mi^2 to ft^2
+  (60*60*24) * ## multiply by seconds/day
+  (25.4*12) ## multiply by mm/ft
+
+```
+
+
+quick vignette on how to get the watersheds data: 
+
+* get california DEM 
+* use Copy Raster to convert the DEM to a raster
+* use Flow Direction to find flow direction based on the raster
+* use Watershed (ready-to-use) to determine watersheds based on flow direction
+
+notes: Watershed works both one-at-a-time and as a batch file (doesn't worry about overlaps)
+
+all files are saved in the research .gdb 
+
+```{r get drainage area extents}
+## export gauges for ArcGIS
+# write.csv(cbind(st_drop_geometry(sites_sonoma), st_coordinates(sites_sonoma)), './sites_sonoma.csv')
+
+## compare GIS watersheds to drainage areas
+watersheds <- data.frame(st_read('C:/Users/cbowers/Documents/ArcGIS/Projects/research/research.gdb', 
+                                 layer = 'feature_set'))
+for (i in 2:44) {
+  watersheds[i,] <- st_read('C:/Users/cbowers/Documents/ArcGIS/Projects/research/research.gdb',
+                            layer = paste0('feature_set', i-2))
+}
+watersheds <- watersheds %>% rename(geometry = Shape, site_no = PourPtID)
+watersheds <- st_as_sf(watersheds)
+
+# ggplot() + 
+#   geom_sf(data = sonoma, fill = NA) + 
+#   geom_sf(data = watersheds, alpha = 0.4)
+
+match(sites_sonoma$site_no, watersheds$site_no) 
+match(info$site_no, watersheds$site_no)
+
+watersheds$site_no <- paste(watersheds$site_no)
+info$site_no <- paste(info$site_no)
+watersheds <- watersheds %>%
+  full_join(data.frame(drain_area = info$drain_area_va, site_no = info$site_no))
+
+watersheds$gis_area <- toNumber(st_area(watersheds)) / 1609.34^2  #convert m^2 to mi^2
+ggplot(data = watersheds) + 
+  geom_point(aes(x = drain_area, y = gis_area)) + 
+  geom_line(aes(x = drain_area, y = drain_area), linetype = 'dashed') + 
+  scale_x_log10() + scale_y_log10() + 
+  coord_fixed(ratio = 1)
+## it matches literally perfectly wow I am so happy
+
+## next: try extracting all watersheds simultaneously, see if we can strike gold twice
+watersheds <- st_read('C:/Users/cbowers/Documents/ArcGIS/Projects/research/research.gdb',
+                      layer = 'feature_set43')
+watersheds <- watersheds %>% rename(geometry = Shape, site_no = PourPtID)
+watersheds$site_no <- paste(watersheds$site_no)
+info$site_no <- paste(info$site_no)
+watersheds <- watersheds %>%
+  full_join(data.frame(drain_area = info$drain_area_va, site_no = info$site_no))
+
+watersheds$gis_area <- toNumber(st_area(watersheds)) / 1609.34^2  #convert m^2 to mi^2
+ggplot(data = watersheds) + 
+  geom_point(aes(x = drain_area, y = gis_area)) + 
+  geom_line(aes(x = drain_area, y = drain_area), linetype = 'dashed') + 
+  scale_x_log10() + scale_y_log10() + 
+  coord_fixed(ratio = 1)
+## !!!!!!!! today is the luckiest of days
+
+## ok so on a log scale there is one guy who isn't doing so hot... don't worry about it for now
+
+```
+
+```{r}
+## try again to replicate HAND methodology
+# california_raster <- raster('./_gis/California/_geography/california_raster.tif')  #units = meters
+# california_raster <- projectRaster(california_raster, crs = st_crs(california)$proj4string)
+# california_raster_save <- california_raster
+
+# ## figure out which zoom level to use
+# require(mapview)
+# require(leaflet)
+# m <- mapview(california)
+# centroid <- california %>% st_union %>% st_centroid %>% st_coordinates
+# m@map %>% setView(centroid[1], centroid[2], zoom = 6)
+
+california_raster <- raster(resolution = 0.001, ext = extent(matrix(st_bbox(california), nrow = 2)), 
+                            crs = st_crs(california), vals = 0)
+california_raster <- elevatr::get_elev_raster(california_raster, z = 10, prj = st_crs(california)$proj4string)
+
+# plot(california_raster)
+
+runoff <- cbind(flow_cfs[-16,1], flow_mmday[,1]) %>% data.frame
+names(runoff) <- c('site_no', 'runoff')
+runoff <- runoff %>% 
+  left_join(sites_sonoma[,c('site_no', 'elevation')] %>% st_drop_geometry, by = 'site_no') %>% 
+  mutate(water_ht = toNumber(elevation) + toNumber(runoff)/1e3) %>% 
+  left_join(watersheds[,c('site_no', 'geometry')]) %>% 
+  st_as_sf %>% 
+  st_transform(st_crs(california))
+
+drainage_raster <- raster::crop(california_raster, matrix(st_bbox(runoff$geometry[1]), nrow = 2)) %>% 
+  mask(runoff[1,]) %>% 
+  as.data.frame(xy = TRUE)
+
+ggplot() + 
+  geom_raster(data = drainage_raster, aes(x = x, y = y, fill = layer)) +
+  geom_sf(data = sites_sonoma$site_no[sites_sonoma$site_no == runoff$site_no[1]], color = 'red', size = 2)
+
+crs(california_raster)
+
+## wait a second
+## I don't actually have to do any of this:
+## instead: if a given river gage exceeds the 50 mm/day threshold, then choose of the following: 
+## * the watershed that the river gage falls in is considered flooded
+## * the drainage area of the river gage is considered flooded
+## * the watershed(s) encompassed by the drainage area are considered flooded
+
+```
+
+```{r plot drainage area vs. watersheds}
+wbd_aoi <- wbd10[st_intersects(california %>% subset(NAME == 'Sonoma'), wbd10, sparse = FALSE) %>% drop,]
+for (i in 1:nrow(watersheds)) {
+  g <- ggplot() + 
+    geom_sf(data = wbd_aoi, fill = NA, color = 'black') + 
+    geom_sf(data = watersheds[i,], fill = 'red', color = 'red', alpha = 0.5)
+  print(g)
+}
+
+```
+
+```{r compare percentiles for flood stages}
+site_no <- gauges$site_no[!is.na(toNumber(gauges$site_no))]
+daily <- data.frame(matrix(ncol = 11, nrow = 0))
+names(daily) <- c('agency_cd', 'site_no', 'Date', paste('X', rep(param, each = 4), rep(statcode, 2), sep = '_'))
+
+pb <- txtProgressBar(min = 0, max = length(site_no), style = 3)
+start <- 0
+for (i in 1:length(site_no)) {
+  temp <- readNWISdv(site_no[i], param, statCd = statcode)
+  daily[(start+1):(start+nrow(temp)), names(daily) %in% names(temp)] <- temp[,names(temp) %in% names(daily)]
+  start <- start + nrow(temp)
+  setTxtProgressBar(pb, i)
+}
+names(daily) <- c('agency_cd', 'site_no', 'Date', paste(rep(c('Flow', 'GH'), each = 4), 
+                                                        rep(c('Max', 'Min', 'Mean', 'Median'), 2), sep = '_'))
+daily$GH_Mean <- ifelse(is.na(daily$GH_Mean), (daily$GH_Max + daily$GH_Min)/2, daily$GH_Mean)
+
+
+## convert flows to gage heights
+flow_cfs <- dcast(site_no ~ Date, data = daily, value.var = 'Flow_Mean')
+flow_gage <- dcast(site_no ~ Date, data = daily, value.var = 'GH_Mean')
+for (i in 1:nrow(flow_cfs)) {
+  if (!complete.cases(flow_gage)[i]) {
+    rating_exsa <- readNWISrating(flow_cfs$site_no[i], type = 'exsa')
+    if (nrow(rating_exsa) > 0) {
+      flow_gage[i,-1] <- approx(rating_exsa$DEP, rating_exsa$INDEP, flow_cfs[i,-1])$y
+    }
+  }
+}
+# site_no <- flow_cfs$site_no
+# flow_cfs <- data.frame(t(flow_cfs[,-1])); names(flow_cfs) <- site_no
+# flow_gage <- data.frame(t(flow_gage[,-1])); names(flow_gage) <- site_no
+
+# gagetable <- flow_gage %>% 
+#   left_join(sites_sonoma %>% st_drop_geometry %>% select(site_no, elevation), by = 'site_no') %>% 
+#   mutate(elevation = elevation*3.28) %>%  #convert meters to feet
+#   left_join(gauges, by = 'site_no')
+# 
+# gagetable[,2:7] > gagetable$ActionGH
+# (gagetable[,2:7] > gagetable$FloodGH) %>% apply(2, function(x) Sum(x)/sum(!is.na(x)))
+# 
+# cfstable <- flow_cfs %>% 
+#   left_join(sites_sonoma %>% st_drop_geometry %>% select(site_no, elevation), by = 'site_no') %>%
+#   mutate(elevation = elevation*3.28) %>%
+#   left_join(gauges, by = 'site_no') %>% select(1:9, 14:17)
+
+
+ECDF <- function(x, val) ecdf(approx(x, x, seq((floor(min(x)*1e3)/1e3), (ceiling(max(x)*1e3)/1e3), 1e-3))$y)(val)
+percents <- data.frame(site_no = site_no, ActionGH = NA, FloodGH = NA, ModerateGH = NA, MajorGH = NA)
+## plot exceedance curves for all sites
+for (i in 1:nrow(flow_gage)) {
+  flood <- gauges[gauges$site_no == flow_gage$site_no[i], c('ActionGH', 'FloodGH', 'ModerateGH', 'MajorGH')]
+  level <- as.numeric(sort(flow_gage[i,-1]))
+  if (length(level) > 0) {
+    percents[i,-1] <- ECDF(level, flood)
+  }
+}
+
+apply(percents, 2, function(x) sum(is.na(x)))
+percents$FloodGH <- ifelse(is.na(percents$FloodGH), (percents$ActionGH+percents$ModerateGH)/2, percents$FloodGH)
+g1 <- ggplot(data = percents) + 
+  geom_histogram(aes(x = ActionGH), color = 'black', fill = 'white', bins = sqrt(nrow(percents))) + xlim(c(0,NA))
+g2 <- ggplot(data = percents) + 
+  geom_histogram(aes(x = FloodGH), color = 'black', fill = 'white', bins = sqrt(nrow(percents))) + xlim(c(0,NA))
+g3 <- ggplot(data = percents) + 
+  geom_histogram(aes(x = ModerateGH), color = 'black', fill = 'white', bins = sqrt(nrow(percents))) + xlim(c(0,NA))
+g4 <- ggplot(data = percents) + 
+  geom_histogram(aes(x = MajorGH), color = 'black', fill = 'white', bins = sqrt(nrow(percents))) + xlim(c(0,NA))
+gridExtra::grid.arrange(g1,g2,g3,g4, nrow = 2)
+
+```
+
+```{r replicate Konrad & Dettinger}
+## get daily values for all CA gages
+site_no <- sites$site_no
+daily <- data.frame(matrix(ncol = 11, nrow = 0))
+names(daily) <- c('agency_cd', 'site_no', 'Date', paste('X', rep(param, each = 4), rep(statcode, 2), sep = '_'))
+
+pb <- txtProgressBar(min = 0, max = length(site_no), style = 3)
+start <- 0
+for (i in 1:length(site_no)) {
+  temp <- readNWISdv(site_no[i], param, startDate = '1970-01-01', statCd = statcode)
+  daily[(start+1):(start+nrow(temp)), names(daily) %in% names(temp)] <- temp[,names(temp) %in% names(daily)]
+  start <- start + nrow(temp)
+  setTxtProgressBar(pb, i)
+}
+names(daily) <- c('agency_cd', 'site_no', 'Date', 
+                  paste(rep(c('Flow', 'GH'), each = 4), rep(c('Max', 'Min', 'Mean', 'Median'), 2), sep = '_'))
+daily$Date <- ymd('1970-01-01') + days(daily$Date)
+daily$GH_Mean <- ifelse(is.na(daily$GH_Mean), (daily$GH_Max + daily$GH_Min)/2, daily$GH_Mean)
+
+
+## cast to table & subset to northern CA
+daily.cfs <- dcast(site_no ~ Date, data = daily, value.var = 'Flow_Mean')
+# names(daily.cfs)[-1] <- paste(ymd('1970-01-01') + days(names(daily.cfs)[-1]))
+daily.cfs <- daily.cfs %>% 
+  # subset(site_no %in% unlist(st_drop_geometry(sites[st_coordinates(sites)[,2] >= 36, 'site_no'])))
+  subset(site_no %in% sites[sites$dec_lat_va >= 36, 'site_no'])
+
+## convert daily.cfs to daily.mmday
+info <- readNWISsite(daily.cfs$site_no)
+drainage <- info$drain_area_va
+daily.cfs <- daily.cfs[!is.na(drainage),]
+drainage <- drainage[!is.na(drainage)]
+
+daily.mmday <- data.frame(site_no = daily.cfs$site_no)
+daily.mmday[,make.names(seq(ymd('1970-01-01'), ymd(max(names(daily.cfs)[-1])), 'days'))] <- NA
+
+index <- c(FALSE, names(daily.cfs)[-1] >= ymd('1970-01-01'))
+pb <- txtProgressBar(min = 0, max = sum(!is.na(drainage)), style = 3)
+for (i in 1:sum(!is.na(drainage))) {
+  daily.mmday[i,-1] <- daily.cfs[i, index] / drainage[i]
+  setTxtProgressBar(pb, i)
+}
+daily.mmday[,-1] <- daily.mmday[,-1] * (60*60*24) * (25.4*12) / 5280^2
+
+
+## codify Konrad & Dettinger rules
+daily.flood <- daily.mmday[,-1]*0
+daily.dif <- t(apply(daily.mmday[,-1], 1, diff))
+daily.3day <- data.frame(matrix(nrow = nrow(daily.mmday), ncol = ncol(daily.mmday)-2))
+daily.3dif <- data.frame(matrix(nrow = nrow(daily.mmday), ncol = ncol(daily.mmday)-3))
+
+pb <- txtProgressBar(min = 0, max = ncol(daily.flood), style = 3)
+for (j in 1:ncol(daily.flood)) {
+  flood <- daily.flood[,j]
+  if (j > 2) {
+    # (3) cumulative 3 day runoff, Q3d, greater than 150 mm and an increase in runoff from the prior day;
+    daily.3day[,j-2] <- rowSums(daily.mmday[,(j-1):(j+1)])
+    flood <- ifelse(daily.3day[,j-2] > 150 & daily.dif[,j-1] > 0, 3, flood)
+  }
+  if (j > 3) {
+    # (4) cumulative increase in 3 day runoff from the prior day, ΔQ3d, greater than 90 mm.
+    daily.3dif[,j-3] <- apply(daily.3day[,(j-3):(j-2)], 1, diff)
+    flood <- ifelse(daily.3dif[,j-3] > 90, ifelse(flood == 3, 3, 4), flood)
+  }
+  if (j > 1) {
+    # (2) an increase from the prior day in daily runoff, ΔQ, greater than 30 mm/d; 
+    flood <- ifelse(daily.dif[,j-1] > 30, 2, flood)
+  }
+  # (1) daily runoff, Q, greater than 50 mm/d and an increase in runoff from the previous day; 
+  flood <- ifelse(daily.mmday[,j+1] > 50, 1, flood)
+
+  daily.flood[,j] <- flood
+  setTxtProgressBar(pb, j)
+}
+
+save(daily, daily.cfs, daily.mmday, daily.flood, file = './_data/floodgages.Rdata')
+
+```
+
+Days when a gage met one of four runoff-based criteria were designated as “flood days”: 
+  (1) daily runoff, Q, greater than 50 mm/d and an increase in runoff from the previous day; 
+  (2) an increase from the prior day in daily runoff, ΔQ, greater than 30 mm/d; 
+  (3) cumulative 3 day runoff, Q3d, greater than 150 mm and an increase in runoff from the prior day; or 
+  (4) cumulative increase in 3 day runoff from the prior day, ΔQ3d, greater than 90 mm. 
+
+Cumulative 3 day runoff was assigned to the first day of each 3 day period for comparison with DVT. Overlapping 3 day periods meeting criteria 3 or 4 were filtered to retain only the period with the greatest 3 day runoff or increase in runoff, respectively.
+
+```{r}
+## convert flooded gages to flooded areas
+
+## load gages
+load('./_data/floodgages.Rdata')
+site_no <- paste(daily.mmday$site_no)
+
+## load drainage areas
+info <- dataRetrieval::readNWISsite(site_no)
+write.csv(info, file = './_data/sites.csv')
+## go to ArcGIS and calculate Watersheds
+watersheds <- st_read('C:/Users/cbowers/Documents/ArcGIS/Projects/research/research.gdb', 
+                                 layer = 'feature_set44')
+
+## compare dataRetrieval vs. ArcGIS drainage area sizes
+watersheds <- watersheds %>% rename(site_no = PourPtID)
+watersheds$site_no <- paste(watersheds$site_no)
+test <- inner_join(watersheds, info, by = 'site_no')
+test$watershed_area <- toNumber(st_area(test)) / 1609.34^2  #convert m^2 to mi^2
+
+ggplot(data = test) + 
+  geom_point(aes(x = drain_area_va, y = watershed_area)) + 
+  geom_line(aes(x = watershed_area, y = watershed_area), linetype = 'dashed') + 
+  labs(x = 'USGS Drainage Area (mi2)', y = 'ArcGIS Drainage Area (mi2)') + 
+  coord_fixed(ratio = 1)
+  
+## map drainage areas to watersheds
+ggplot() + 
+  # geom_sf(data = wbd10, fill = NA) +
+  geom_sf(data = california, fill = NA) + 
+  geom_sf(data = watersheds, fill = 'black', color = NA, alpha = 0.25)
+
+y <- (st_geometry(wbd10)-st_centroid(st_geometry(wbd10))) * 0.75 + st_centroid(st_geometry(wbd10))
+y <- st_as_sf(y, crs = st_crs(wbd10))
+wbd_match <- st_intersects(y, st_transform(watersheds, st_crs(wbd10)))
+wbd_match %>% lapply(length) %>% unlist %>% table %>% View
+
+for (i in c(1:30, 550, 886)) {
+  x <- st_transform(watersheds[i,], st_crs(wbd10))
+  test <- st_intersects(x, y)
+
+  g <- ggplot() +
+    geom_sf(data = x, fill = 'navy') +
+    geom_sf(data = wbd10, fill = NA) +
+    geom_sf(data = wbd10[unlist(test),], fill = 'gray80', alpha = 0.5, color = 'red') +
+    lims(x = st_bbox(wbd10[unlist(test),])[c(1,3)], y = st_bbox(wbd10[unlist(test),])[c(2,4)])
+    # lims(x = st_bbox(st_transform(watersheds[i,], st_crs(wbd10)))[c(1,3)],
+    #      y = st_bbox(st_transform(watersheds[i,], st_crs(wbd10)))[c(2,4)])
+  print(g)
+}
+
+## get mm/day in space and time
+datelist <- gsub('X', '', names(daily.mmday)[-1]) %>% ymd
+
+
+```
+

@@ -1,0 +1,300 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "4/20/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+## load in geometries
+USA <- states(class = 'sf') %>% subset(STATEFP < 60 & NAME != 'Alaska' & NAME != 'Hawaii')
+california <- counties(state = 'CA', class = 'sf')
+
+```
+
+```{r}
+## load in UCSD
+AR <- read.table('./_data/SIO-R1/SIO_R1_1948-2017_Comprehensive.txt')
+names(AR) <- c('ID', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'LAT', 'LON', 'IVT', 'IVW', 'WINDU', 'WINDV')
+AR$LON <- AR$LON - 360
+AR$DATE <- ymd(paste(AR$YEAR, AR$MONTH, AR$DAY, sep = '-')) + hours(AR$HOUR)
+
+## assign categories
+assign_AR_cat <- function(exceed) {
+  if (exceed[6]>0 | exceed[5]>24 | exceed[4]>48) {
+    return(5)
+  } else if (exceed[5]>0 | exceed[4]>24 | exceed[3]>48) {
+    return(4)
+  } else if (exceed[4]>0 | exceed[3]>24 | exceed[2]>48) {
+    return(3)
+  } else if (exceed[3]>0 | exceed[2]>24 | exceed[1]>48) {
+    return(2)
+  } else if (exceed[2]>0 | exceed[1]>24) {
+    return(1)
+  } else if (exceed[1]>0) {
+    return(0)
+  } else {
+    return(NA)
+  }
+}
+
+for (ar in 1:length(unique(AR$ID))) {
+  storm <- AR[AR$ID == ar,]
+  cutoff <- seq(250, 1500, 250)
+  exceed <- NA
+  for (i in 1:length(cutoff)) {
+    exceed[i] <- sum(storm$IVT > cutoff[i])
+  }
+  AR[AR$ID == ar, 'CAT'] <- assign_AR_cat(exceed*6) #each timestep is 6 hours
+}
+
+```
+
+```{r}
+## find rate of occurrence in each cell
+AR$counter <- 1
+
+# dcast(LAT ~ LON, data = AR, value.var = 'counter', fun.aggregate = sum)
+
+## compare this catalog to catalog in "ARs cause flood damages..."
+AR %>% 
+  subset(YEAR >= 1978 & LAT >= 27.5 & LAT <= 47.5 & MONTH %in% c(1:3, 10:12)) %>% 
+  select(ID) %>%
+  unique %>% unlist %>% length
+## should have 1603 events, but close enough for now (probably due to their bias correction)
+## also: I added in the wet season restriction
+
+
+## find the number of landfalling ARs/year in each grid cell
+AR %>% 
+  subset(YEAR >= 1978 & LAT >= 27.5 & LAT <= 47.5 & MONTH %in% c(1:3, 10:12)) %>% 
+  group_by(LAT, CAT) %>% 
+  summarize(stormrate = length(unique(ID))/40) %>% 
+  ggplot() + 
+    geom_line(aes(x = LAT, y = stormrate, group = factor(CAT), color = factor(CAT)), size = 1) + 
+    geom_point(aes(x = LAT, y = stormrate, group = factor(CAT), color = factor(CAT))) + 
+    scale_color_manual(values = c('#3e7100', '#7AC969', '#efca08', '#fea82f', '#ee2e31'))
+
+```
+
+
+```{r}
+## find the number of AR-days/year in each grid cell
+g1 <- AR %>%
+  subset(YEAR >= 1978 & LAT >= 32.5 & LAT <= 47.5 & MONTH %in% c(1:3, 10:12)) %>% 
+  group_by(LAT, CAT, ID) %>% 
+  summarize(stormlength = as.numeric(max(DATE)-min(DATE))) %>%
+  group_by(LAT, CAT) %>%
+  summarize(stormdays = sum(stormlength)/40) %>% 
+  ggplot() + 
+    geom_line(aes(x = LAT, y = stormdays, group = factor(CAT), color = factor(CAT))) + 
+    geom_point(aes(x = LAT, y = stormdays, group = factor(CAT), color = factor(CAT))) + 
+    scale_color_manual(values = c('#3e7100', '#7AC969', '#efca08', '#fea82f', '#ee2e31')) +
+    labs(x = 'Latitude', y = 'Number of AR Days per Wet Season') + 
+    scale_x_continuous(breaks = seq(27.5, 47.5, 2.5), minor_breaks = seq(27.5, 47.5, 2.5)) + 
+    theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(), rect = element_blank(),
+          axis.line = element_line(color = 'black'))
+
+g2 <- ggplot() + 
+  geom_sf(data = USA) + 
+  scale_y_continuous(lim = c(32.5, 47.5), breaks = seq(27.5, 47.5, 2.5)) + 
+  scale_x_continuous(lim = c(-126, -115), breaks = c(-130, -105), name = 'x axis') +
+  theme(axis.title.x = element_text(color = 'white', size = 26),
+        rect = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank())
+
+gridExtra::grid.arrange(g1 + coord_flip(), g2, ncol = 2)
+
+```
+
+
+```{r}
+## probability of any given day in the wet season being an AR day
+AR %>%
+  subset(YEAR >= 1978 & LAT >= 27.5 & LAT <= 47.5 & MONTH %in% c(1:3, 10:12)) %>% 
+  group_by(LAT, ID) %>% 
+  summarize(stormlength = as.numeric(max(DATE)-min(DATE))) %>%
+  group_by(LAT) %>%
+  summarize(stormdays = sum(stormlength)/40/(365/2)) %>% 
+  select(stormdays) %>% unlist %>% round(4) 
+
+test <- AR %>% 
+  subset(YEAR >= 1978 & LAT >= 27.5 & LAT <= 47.5 & MONTH %in% c(1:3, 10:12)) %>% 
+  group_by(LAT, MONTH, DAY, ID) %>% 
+  summarize(counter = mean(counter)) %>%
+  group_by(LAT, MONTH, DAY) %>%
+  summarize(stormdays = sum(counter)) %>% 
+  mutate(date = ymd(ifelse(MONTH %in% 1:3, paste('2016', MONTH, DAY, sep = '-'), 
+                           paste('2015', MONTH, DAY, sep = '-')))) 
+
+test2 <- expand.grid(date = seq(ymd('2015-09-20'), ymd('2016-04-10'), 'days'),
+                     LAT = seq(32.5, 47.5, 2.5))
+
+window <- 14
+for (i in (1+window/2):(length(unique(test2$date))-window/2)) {
+  for (lat in unique(test2$LAT)) {
+    d <- ymd(unique(test2$date)[i])
+    vals <- test[test$date %in% seq(d-days(window/2), d+days(window/2), 'days') 
+                 & test$LAT == lat, 'stormdays'] %>% unlist
+    test2[d == test2$date & lat == test2$LAT, 'movingavg'] <- ifelse(length(vals) > 0, sum(vals)/window, 0)
+  }
+}
+
+ggplot(data = test2) + 
+  geom_line(aes(x = date, y = movingavg/40, group = factor(LAT), color = factor(LAT)), size = 0.75) + 
+  labs(x = 'Date', y = 'Probability of AR') + 
+  scale_color_brewer(palette = 'Paired')
+
+
+```
+
+```{r}
+## find AR occurrence rate by season & category
+seasonrate <- AR %>%
+  subset(YEAR >= 1978 & LAT >= 32.5 & LAT <= 47.5 & MONTH %in% c(1:3, 10:12)) %>% 
+  group_by(LAT, CAT, MONTH, ID) %>% 
+  summarize(stormlength = as.numeric(max(DATE)-min(DATE))) %>%
+  mutate(SEASON = factor(ifelse(MONTH %in% c(10,11), 'octnov', 
+                         ifelse(MONTH %in% c(12,1), 'decjan', 'febmar')))) %>%
+  group_by(LAT, CAT, SEASON) %>%
+  summarize(stormdays = sum(stormlength)/40/60*100) %>%
+    #percent chance of any given day in the two-month period being an AR day,
+    #averaged over 40 years of data
+  dcast(LAT + CAT ~ SEASON)
+
+ggplot(data = seasonrate) + 
+  geom_line(aes(x = CAT, y = octnov, group = factor(LAT), color = factor(LAT)))
+ggplot(data = seasonrate) + 
+  geom_line(aes(x = CAT, y = decjan, group = factor(LAT), color = factor(LAT)))
+ggplot(data = seasonrate) + 
+  geom_line(aes(x = CAT, y = febmar, group = factor(LAT), color = factor(LAT)))
+
+ggplot(data = seasonrate) + 
+  geom_line(aes(x = LAT, y = octnov, group = factor(CAT), color = factor(CAT)))
+ggplot(data = seasonrate) + 
+  geom_line(aes(x = LAT, y = decjan, group = factor(CAT), color = factor(CAT)))
+ggplot(data = seasonrate) + 
+  geom_line(aes(x = LAT, y = febmar, group = factor(CAT), color = factor(CAT)))
+
+```
+
+
+```{r}
+## load in Rutz catalog
+load('./_data/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8)
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+## convert Rutz catalog to category ARs
+AR_cat <- IVT * 0
+AR_cat[IVT > 250] <- 1
+AR_cat[IVT > 500] <- 2
+AR_cat[IVT > 750] <- 3
+AR_cat[IVT > 1000] <- 4
+AR_cat[IVT > 1250] <- 5
+
+AR_cat <- AR_cat[,,month(hourlist) %in% c(1:3, 10:12)]
+
+cat1 <- apply(AR_cat, c(1,2), function(x) sum(x == 1)) /8 /38
+cat1 <- raster(cat1, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), crs = st_crs(california))
+g1 <- ggplot() +
+  geom_raster(data = as.data.frame(cat1, xy = TRUE), aes(x=x, y=y, fill = layer)) +
+  geom_sf(data = USA, color = 'black', fill = NA) + 
+  scale_fill_gradient(low = 'white', high = '#0235a1') + 
+  lims(x = c(extent(IVT_raster)@xmin, extent(IVT_raster)@xmax), 
+       y = c(extent(IVT_raster)@ymin, extent(IVT_raster)@ymax)) + 
+  ggtitle('Annual Count of Cat1 AR Days') + labs(x = '', y = '')
+
+cat2 <- apply(AR_cat, c(1,2), function(x) sum(x == 2)) /8 /38
+cat2 <- raster(cat2, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), crs = st_crs(california))
+g2 <- ggplot() +
+  geom_raster(data = as.data.frame(cat2, xy = TRUE), aes(x=x, y=y, fill = layer)) +
+  geom_sf(data = USA, color = 'black', fill = NA) + 
+  scale_fill_gradient(low = 'white', high = '#0235a1') + 
+  lims(x = c(extent(IVT_raster)@xmin, extent(IVT_raster)@xmax), 
+       y = c(extent(IVT_raster)@ymin, extent(IVT_raster)@ymax)) + 
+  ggtitle('Annual Count of Cat2 AR Days') + labs(x = '', y = '')
+
+cat3 <- apply(AR_cat, c(1,2), function(x) sum(x == 3)) /8 /38
+cat3 <- raster(cat3, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), crs = st_crs(california))
+g3 <- ggplot() +
+  geom_raster(data = as.data.frame(cat3, xy = TRUE), aes(x=x, y=y, fill = layer)) +
+  geom_sf(data = USA, color = 'black', fill = NA) + 
+  scale_fill_gradient(low = 'white', high = '#0235a1') + 
+  lims(x = c(extent(IVT_raster)@xmin, extent(IVT_raster)@xmax), 
+       y = c(extent(IVT_raster)@ymin, extent(IVT_raster)@ymax)) + 
+  ggtitle('Annual Count of Cat3 AR Days') + labs(x = '', y = '')
+
+cat4 <- apply(AR_cat, c(1,2), function(x) sum(x == 4)) /8 /38
+cat4 <- raster(cat4, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), crs = st_crs(california))
+g4 <- ggplot() +
+  geom_raster(data = as.data.frame(cat4, xy = TRUE), aes(x=x, y=y, fill = layer)) +
+  geom_sf(data = USA, color = 'black', fill = NA) + 
+  scale_fill_gradient(low = 'white', high = '#0235a1') + 
+  lims(x = c(extent(IVT_raster)@xmin, extent(IVT_raster)@xmax), 
+       y = c(extent(IVT_raster)@ymin, extent(IVT_raster)@ymax)) + 
+  ggtitle('Annual Count of Cat4 AR Days') + labs(x = '', y = '')
+
+cat5 <- apply(AR_cat, c(1,2), function(x) sum(x == 5)) /8 /38
+cat5 <- raster(cat5, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), crs = st_crs(california))
+g5 <- ggplot() +
+  geom_raster(data = as.data.frame(cat5, xy = TRUE), aes(x=x, y=y, fill = layer)) +
+  geom_sf(data = USA, color = 'black', fill = NA) + 
+  scale_fill_gradient(low = 'white', high = '#0235a1') + 
+  lims(x = c(extent(IVT_raster)@xmin, extent(IVT_raster)@xmax), 
+       y = c(extent(IVT_raster)@ymin, extent(IVT_raster)@ymax)) + 
+  ggtitle('Annual Count of Cat5 AR Days') + labs(x = '', y = '')
+
+gridExtra::grid.arrange(g1, g2, g3, g4, g5, nrow = 2)
+
+```
+

@@ -1,0 +1,829 @@
+---
+title: "switching unit of observation from CTs to watersheds"
+author: "Corinne"
+date: "2/20/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r import data}
+## import claims
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+## import census tracts
+california <- counties(state = 'CA', class = 'sf')
+california$GEOID <- toNumber(california$GEOID)
+CT <- tracts(state = 'CA', class = 'sf')
+CT <- merge(CT, data.frame(COUNTYFP = california$COUNTYFP, COUNTYNAME = california$NAME),
+            by = 'COUNTYFP', all.x = TRUE)
+CT$COUNTYID <- toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP)
+CT$GEOID <- toNumber(CT$GEOID)
+
+## import watersheds
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp')
+wbd6 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU6.shp')
+wbd8 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU8.shp')
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp')
+wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp')
+
+```
+
+```{r assign claims to watersheds}
+## intersect census tracts & latlong grid
+latlon <- st_sf(st_make_grid(california, cellsize = 0.1, what = 'polygons', offset = c(-125.05, 32.05)))
+latlon[,c('lon', 'lat')] <- round(st_coordinates(st_centroid(latlon)), 1)
+latlon <- st_transform(latlon, st_crs(CT))
+polys <- st_intersection(CT, latlon)
+
+## assign claims to intersection polygons
+polys <- polys[,c('GEOID', 'lat', 'lon')]
+names(polys) <- c('censustract', 'latitude', 'longitude', 'geometry')
+polys$polygon_id <- 1:nrow(polys)
+
+claims_poly <- inner_join(claims, st_drop_geometry(polys), by = c('censustract', 'latitude', 'longitude'))
+
+## distribute claims randomly within polygons
+claims_poly[,c('lat_jitter', 'lon_jitter')] <- NA
+pb <- txtProgressBar(min = 0, max = length(unique(claims_poly$polygon_id)), style = 3)
+for (i in 1:length(unique(claims_poly$polygon_id))) {
+  index <- unique(claims_poly$polygon_id)[i]
+  claims_index <- (claims_poly$polygon_id == index)
+  n <- sum(claims_index)
+  samp <- st_sample(st_transform(polys[polys$polygon_id == index,], albers), size = n, type = 'random')
+  claims_poly[claims_index, c('lon_jitter', 'lat_jitter')] <- st_coordinates(st_transform(samp, st_crs(CT)))
+  setTxtProgressBar(pb, i)
+}
+
+claims_poly <- st_as_sf(claims_poly, coords = c('lon_jitter', 'lat_jitter'), crs = NAD)
+ggplot() + 
+  geom_sf(data = california) + 
+  geom_sf(data = claims_poly) + 
+  lims(x = c(124, 120), y = c(37, 39))
+
+## assign claims to watersheds
+claims_poly <- st_join(claims_poly, st_transform(wbd10, st_crs(claims_poly)))
+claims <- claims_poly
+
+```
+
+```{r assign policies to watersheds}
+## assign policies to intersection polygons
+policies_poly <- inner_join(policies, st_drop_geometry(polys), by = c('censustract', 'latitude', 'longitude'))
+
+## distribute policies randomly within polygons
+policies_poly[,c('lat_jitter', 'lon_jitter')] <- NA
+pb <- txtProgressBar(min = 0, max = length(unique(policies_poly$polygon_id)), style = 3)
+for (i in 1:length(unique(policies_poly$polygon_id))) {
+  index <- unique(policies_poly$polygon_id)[i]
+  policies_index <- (policies_poly$polygon_id == index)
+  n <- sum(policies_index)
+  samp <- st_sample(st_transform(polys[polys$polygon_id == index,], albers), size = n, type = 'random')
+  policies_poly[policies_index, c('lon_jitter', 'lat_jitter')] <- st_coordinates(st_transform(samp, st_crs(CT)))
+  setTxtProgressBar(pb, i)
+}
+
+## assign policies to watersheds
+policies_poly <- st_as_sf(policies_poly, coords = c('lon_jitter', 'lat_jitter'), crs = NAD)
+policies_poly <- st_join(policies_poly, st_transform(wbd10, st_crs(policies_poly)))
+policies <- policies_poly
+
+
+```
+
+
+```{r decide AOI}
+## Sonoma watersheds
+wbd_aoi <- wbd10[st_intersects(california %>% subset(NAME == 'Sonoma'), wbd10, sparse = FALSE) %>% drop,]
+claims_aoi <- claims[claims$HUC10 %in% wbd_aoi$HUC10,]
+
+```
+
+
+```{r assign IVT to claims}
+## IVT values: from MERRA
+load('./_data/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8) #+ hours(rep(seq(0, 21, 3), length(datelist)))
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+claims$IVT <- NA
+pb <- txtProgressBar(min = 0, max = nrow(claims), style = 3)
+for (i in 1:nrow(claims)) {
+  loc <- st_coordinates(claims[i,])
+  loc[1] <- round(loc[1]/0.625)*0.625
+  loc[2] <- round(loc[2]/0.5)*0.5
+  claim_period <- claims$dateofloss[i] - days(0)
+  index <- hourlist %in% claim_period
+  claims[i, 'IVT'] <- ifelse(sum(index) > 0, max(IVT[LAT == loc[2], LON == loc[1], index]), NA)
+  setTxtProgressBar(pb, i)
+}
+
+```
+
+
+```{r read in ARs}
+## get G17 AR catalog
+AR <- read.table('./_data/SIO-R1/SIO_R1_1948-2017_Comprehensive.txt')
+names(AR) <- c('ID', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'LAT', 'LON', 'IVT', 'IVW', 'WINDU', 'WINDV')
+AR$LON <- AR$LON - 360
+AR$DATE <- ymd(paste(AR$YEAR, AR$MONTH, AR$DAY, sep = '-')) + hours(AR$HOUR)
+
+
+## convert to sf
+temp <- list()
+bad <- vector(); bad.id <- 1
+for (id in unique(AR$ID)) {
+  if (nrow(AR[AR$ID == id,]) < 2) {
+    bad[bad.id] <- id
+    bad.id <- bad.id + 1
+  }
+  temp[[id]] <- st_linestring(x = matrix(unlist(AR[AR$ID == id, c('LON','LAT')]), ncol = 2))
+}
+
+latlon <- AR %>% group_by(ID) %>%
+  summarize(LATmin = min(LAT), LONmin = min(LON), LATmax = max(LAT), LONmax = max(LON))
+AR_sf <- st_as_sf(data.frame(start = ymd(aggregate(date(DATE) ~ ID, data = AR, min)[,2]),
+                             end = ymd(aggregate(date(DATE) ~ ID, data = AR, max)[,2]), 
+                             latlon, st_sfc(temp)), crs = 4269)
+AR_sf <- AR_sf[-bad,]
+AR_sf <- st_transform(AR_sf, st_crs(california)) %>% subset(year(start) >= 1970)
+AR_sf$STORM <- interval(AR_sf$start, AR_sf$end)
+
+
+## find storms in area of interest (AOI)
+polygon_aoi <- st_union(wbd_aoi)
+AR_aoi <- st_intersection(AR_sf, polygon_aoi)  #ignore warnings because of coarse scale
+for (i in 1:nrow(AR_aoi)) {
+  index <- date(claims_aoi$dateofloss) %within% AR_aoi$STORM[i]
+  AR_aoi$num_claims[i] <- Sum(index)
+  AR_aoi$value_claims[i] <- Sum(c(claims_aoi$amountpaidonbuildingclaim[index], 
+                                  claims_aoi$amountpaidoncontentsclaim[index]))
+}
+
+## find storms landfalling in latitude band
+latmin <- st_bbox(polygon_aoi)$ymin
+latmax <- st_bbox(polygon_aoi)$ymax
+AR_lat <- AR_sf %>% subset(LATmin <= latmax & LATmax >= latmin)
+for (i in 1:nrow(AR_lat)) {
+  index <- date(claims_aoi$dateofloss) %within% AR_lat$STORM[i]
+  AR_lat$num_claims[i] <- Sum(index)
+  AR_lat$value_claims[i] <- Sum(c(claims_aoi$amountpaidonbuildingclaim[index],
+                                  claims_aoi$amountpaidoncontentsclaim[index]))
+}
+
+## plot area to check spatial extent of analysis
+ggplot() +
+  geom_rect(aes(xmin = -124.5, xmax = -114, ymin = latmin, ymax = latmax), 
+            color = 'gray80', alpha = 0.2) + 
+  geom_sf(data = wbd4, fill = NA) +
+  geom_sf(data = st_union(california), fill = NA, color = 'red') + 
+  geom_sf(data = wbd_aoi, fill = 'gray40') + 
+  scale_y_continuous(breaks = seq(30, 45, 2.5))
+
+```
+
+```{r find the watersheds that keep getting damaged}
+## filter out ARs with < 2 claims
+AR_subset <- AR_lat[AR_lat$num_claims >= 1,]
+
+wbd_aoi$HUC10 <- toNumber(wbd_aoi$HUC10)
+df <- data.frame(HUC10 = wbd_aoi$HUC10)
+for (i in 1:nrow(AR_subset)) {
+  ## find storm claims by CT
+  claims_subset <- claims[ymd(claims$dateofloss) >= ymd(AR_subset$start[i])-days(1) & 
+                            ymd(claims$dateofloss) <= ymd(AR_subset$end[i])+days(1),]
+  # claims_subset <- claims_subset %>% subset(claims_subset$COUNTYNAME %in% AOI)
+  claims_subset <- claims_subset %>% subset(toNumber(HUC10) %in% wbd_aoi$HUC10)
+  
+  df_claims <- claims_subset %>%
+    group_by(HUC10 = toNumber(HUC10)) %>%
+    summarize(claimlength = length(amountpaidonbuildingclaim)) %>%
+    st_drop_geometry
+  names(df_claims) <- c('HUC10', paste('storm', i, sep = '.'))
+  df <- merge(df, df_claims, by = 'HUC10', all.x = TRUE)
+}
+df[is.na(df)] <- 0
+df$storm.total <- rowSums(df[,-1])
+df$storm.count <- rowSums(df[,!(names(df) %in% c('FIPS','storm.total'))] != 0)
+
+```
+
+
+```{r filter out watersheds with < 2 ARs}
+df <- df[df$storm.count >= 2,]
+wbd_subset <- wbd_aoi %>% subset(HUC10 %in% df$HUC10)
+
+## plot
+wbd_plot <- merge(wbd_aoi, df, by = 'HUC10', all.x = TRUE)
+ggplot() + 
+  geom_sf(data = wbd_plot, fill = NA, color = 'gray50') +
+  geom_sf(data = wbd_plot, aes(fill = storm.count), color = NA) + 
+  # geom_sf(data = california %>% subset(NAME %in% AOI), fill = NA) +
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), color = 'red', fill = NA) +
+  # geom_sf(data = floodplain %>% filter(FLOODPLAIN == 'YES'), color = NA, fill = 'red', alpha = 0.8) +
+  # geom_sf(data = CT_sonoma, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) +
+  ggtitle('Number of Storms Affecting Each Watershed (1970-2018)') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank())
+
+# note: this graph does NOT include all storms
+
+```
+
+```{r get rid of storms before the PRISM record}
+AR_subset$year <- year(AR_subset$start)
+AR_subset$wateryear <- ifelse(month(AR_subset$start) %in% 10:12, 
+                              year(AR_subset$start) + 1, year(AR_subset$start))
+AR_subset <- AR_subset %>% subset(wateryear >= 1982)
+
+```
+
+
+
+```{r get hazard array}
+variables <- c('HUC10', 'rain_storm', 'rain_prevweek', 'rain_prevmonth', 'rain_season', 'rain_max', 'days_max',
+               'soilmoisture', 'discharge_storm_avg', 'discharge_storm_max', 'discharge_storm_total',
+               'discharge_prevweek_avg', 'discharge_prevweek_total', 'num_claims', 'value_claims', 'IVT')
+
+## initialize matrices
+wbd_centroid <- wbd_subset %>%
+  st_transform(crs = albers) %>%
+  st_centroid() %>%
+  st_transform(crs = NAD) %>%
+  select(HUC10, geometry)
+hazard <- array(data = 0, dim = c(nrow(wbd_subset), length(variables), nrow(AR_subset)),
+                dimnames = list(paste('WBD', 1:nrow(wbd_subset), sep = '.'), variables,
+                                paste('AR', 1:nrow(AR_subset), sep = '.')))
+
+## open soil moisture file
+soil_nc <- nc_open('./_data/soilmoisture/soilw.mon.mean.v2.nc')
+soil_lat <- ncvar_get(soil_nc, 'lat')
+soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+soil <- ncvar_get(soil_nc, 'soilw')
+nc_close(soil_nc)
+
+timer <- Sys.time()
+pb <- txtProgressBar(min = 0, max = nrow(AR_subset), style = 3)
+setTxtProgressBar(pb, 0)
+for (ar in 1:nrow(AR_subset)) {
+  ## define input variables
+  start <- AR_subset$start[ar] - days(1)
+  end <- AR_subset$end[ar] + days(1)
+  yr <- AR_subset$year[ar]
+  wy <- AR_subset$wateryear[ar]
+  
+  ## load rain raster files for storm in question
+  ## PRISM data: http://www.prism.oregonstate.edu/recent/
+  storm <- gsub('-', '', seq(start, end, 'days'))
+  raster_name <- paste0('./_data/PRISM/', year(ymd(storm)), '/PRISM_ppt_stable_4kmD2_', storm, '_bil.bil')
+  rain_stack <- raster::stack(raster_name)
+  rain_storm <- sum(rain_stack)  # cumulative rainfall over storm duration
+  rain_max <- max(rain_stack)  # max value of daily rainfall
+
+  ## max storm length (consecutive days of rainfall)
+  empty <- raster::subset(rain_stack, 1) * 0
+  days_sofar <- empty; days_max <- empty
+  for (i in 1:length(raster_name)) {
+    today <- rain_stack[[i]] > 0
+    days_sofar <- (days_sofar + today) * today
+    days_max <- max(days_sofar, days_max)
+  }
+    
+  ## cumulative rainfall to date in rainy season
+  season <- str_remove_all(seq(ymd(paste(wy-1, 9, 30)), start, 'days'), '-')
+  raster_name <- paste0('./_data/PRISM/', year(ymd(season)), '/PRISM_ppt_stable_4kmD2_', season, '_bil.bil')
+  rain_stack <- raster::stack(raster_name)
+  rain_season <- sum(rain_stack)
+  
+  ## cumulative rainfall in previous week
+  prevweek <- str_remove_all(seq(start - days(7), start - days(1), 'days'), '-')
+  raster_name <- paste0('./_data/PRISM/', year(ymd(prevweek)), '/PRISM_ppt_stable_4kmD2_', prevweek, '_bil.bil')
+  rain_stack <- raster::stack(raster_name)
+  rain_prevweek <- sum(rain_stack)
+  
+  ## cumulative rainfall in previous month
+  prevmonth <-  str_remove_all(seq(start - days(31), start - days(1), 'days'), '-')
+  raster_name <- paste0('./_data/PRISM/', year(ymd(prevmonth)), '/PRISM_ppt_stable_4kmD2_', prevmonth, '_bil.bil')
+  rain_stack <- raster::stack(raster_name)
+  rain_prevmonth <- sum(rain_stack)
+  
+  
+  ## soil moisture
+  ## data source: https://www.esrl.noaa.gov/psd/data/gridded/data.cpcsoil.html (simulated product)
+  SM_stack <- raster::stack()
+  monthrecord <- ifelse(month(start) <= month(end),
+                        length(month(start):month(end)),
+                        length((month(start)-12):month(end))) - 1
+  startmonth <- ymd(paste(year(start), month(start), '1', sep = '-'))
+  for (i in 0:monthrecord) {
+    mo <- month(startmonth + months(i))
+    yr <- year(startmonth + months(i))
+    index <- (1:nrow(soil_time))[soil_time$month == mo & soil_time$year == yr]
+    SM_raster <- raster(t(soil[,,index]), xmn = min(soil_lon), xmx = max(soil_lon), 
+                        ymn = min(soil_lat), ymx = max(soil_lat))
+    SM_stack <- raster::stack(SM_stack, SM_raster)
+  }
+  SM_avg <- mean(SM_stack)
+  crs(SM_avg) <- projection(california)
+
+  
+  ## river discharge during storm
+  ## data source: https://cds.climate.copernicus.eu/cdsapp#!/dataset/cems-glofas-historical?tab=overview
+  discharge_stack <- raster::stack()
+  for (i in 0:toNumber(end-start)) {
+    d <- start + days(i)
+    filename <- paste('./_data/streamflow/CEMS_ECMWF_dis24', gsub('-', '', d), 'glofas_v2.1.nc', sep = '_')
+    ncfile <- nc_open(filename)
+    discharge <- t(ncvar_get(ncfile, 'dis24'))
+    lat <- ncvar_get(ncfile, 'lat')
+    lon <- ncvar_get(ncfile, 'lon')
+    nc_close(ncfile)
+    discharge_raster <- raster(discharge, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+    discharge_stack <- raster::stack(discharge_stack, discharge_raster)
+  }
+  discharge_storm_avg <- mean(discharge_stack)
+  discharge_storm_max <- max(discharge_stack)
+  discharge_storm_total <- sum(discharge_stack)
+  
+  ## river discharge in the previous week
+  discharge_stack <- raster::stack()
+  for (i in 7:1) {
+    d <- start - days(i)
+    filename <- paste('./_data/streamflow/CEMS_ECMWF_dis24', gsub('-', '', d), 'glofas_v2.1.nc', sep = '_')
+    ncfile <- nc_open(filename)
+    discharge <- t(ncvar_get(ncfile, 'dis24'))
+    lat <- ncvar_get(ncfile, 'lat')
+    lon <- ncvar_get(ncfile, 'lon')
+    nc_close(ncfile)
+    discharge_raster <- raster(discharge, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+    discharge_stack <- raster::stack(discharge_stack, discharge_raster)
+  }
+  discharge_prevweek_avg <- mean(discharge_stack)
+  discharge_prevweek_total <- sum(discharge_stack)
+  
+  ## save raster values as an average by CT
+  Extract <- function(x) raster::extract(x, wbd_subset, small = TRUE, 
+                                         weights = TRUE, normalizeWeights = TRUE, fun = mean)
+  df_aoi <- data.frame(HUC10 = st_drop_geometry(wbd_subset)$HUC10,
+                       rain_storm = Extract(rain_storm),
+                       rain_prevweek = Extract(rain_prevweek),
+                       rain_prevmonth = Extract(rain_prevmonth),
+                       rain_season = Extract(rain_season),
+                       rain_max = Extract(rain_max),
+                       days_max = Extract(days_max), 
+                       soilmoisture = Extract(SM_avg),
+                       discharge_storm_avg = Extract(discharge_storm_avg),
+                       discharge_storm_max = Extract(discharge_storm_max),
+                       discharge_storm_total = Extract(discharge_storm_total),
+                       discharge_prevweek_avg = Extract(discharge_prevweek_avg),
+                       discharge_prevweek_total = Extract(discharge_prevweek_total))
+                       
+  ## add damage data
+  df_claims <- claims %>%
+    st_drop_geometry %>%
+    filter(date(dateofloss) >= start & date(dateofloss) <= end) %>%
+    group_by(HUC10) %>%
+    summarize(num_claims = Sum(counter), 
+              value_claims = Sum(c(amountpaidonbuildingclaim, amountpaidoncontentsclaim)),
+              IVT = Mean(IVT))
+  df_aoi <- merge(df_aoi, df_claims, by = 'HUC10', all.x = TRUE)
+  for (column in c('num_claims', 'value_claims')) {
+    df_aoi[[column]][is.na(df_aoi[[column]])] <- 0
+  }
+  
+  ## write out to larger array
+  hazard[,,ar] <- data.matrix(df_aoi)
+  
+  ## update progress bar
+  setTxtProgressBar(pb, ar)
+}
+close(pb)
+Sys.time() - timer
+
+```
+
+
+## LOCATION VARIABLES
+
+```{r land use/land cover}
+## import raster
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img')
+
+## export % of each land cover by CT
+lulc_att <- lulc@data@attributes[[1]]
+rbind.fill <- function(x) {
+  name <- sapply(x, names)
+  uname <- unique(unlist(name))
+  lulc_name <- lulc_att[toNumber(uname)+1, 'NLCD.Land.Cover.Class']
+  len <- sapply(x, length)
+  out <- vector("list", length(len))
+    for (i in seq_along(len)) {
+      out[[i]] <- unname(x[[i]])[match(uname, name[[i]])]
+    }
+  setNames(as.data.frame(do.call(rbind, out), stringsAsFactors=FALSE), make.names(lulc_name))
+}
+
+aoi_crop <- st_transform(st_transform(wbd_aoi, albers), proj4string(lulc))
+temp <- extract(lulc, aoi_crop)
+temp <- lapply(temp, function(x) prop.table(table(x)))
+lulc_df <- rbind.fill(temp)
+
+## convert land covers to % developed
+temp <- data.frame(HUC10 = wbd_aoi$HUC10, developed = apply(lulc_df[,2:5], 1, Sum))
+wbd_centroid <- merge(wbd_centroid, temp, by = 'HUC10', all.x = TRUE)
+
+```
+
+```{r imperviousness}
+imperv <- raster('./_gis/USA/_landcover/NLCD_2016_Impervious_L48_20190405/NLCD_2016_Impervious_L48_20190405.img')
+temp <- data.frame(HUC10 = wbd_aoi$HUC10, impervious = extract(imperv, aoi_crop, mean)/100)
+wbd_centroid <- merge(wbd_centroid, temp, by = 'HUC10', all.x = TRUE)
+
+```
+
+```{r percent within floodplain}
+NFHL <- st_read('./_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp')
+NFHL <- st_transform(NFHL, albers)
+
+## add a floodplain column to NFHL
+floodzone <- function(x) {
+  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO', 'V', 'VE')) {
+    return('YES') 
+  } else if (x %in% c('D', 'X')) {
+    return('NO')
+  } else if (x == 'OPEN WATER') {
+    return('WATER')
+  } else {
+    return(NA)
+  }
+}
+NFHL$FLOODPLAIN <- factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))
+
+## divide area within floodplain by total area
+floodplain <- st_intersection(st_transform(wbd_aoi, albers), NFHL) 
+floodplain <- floodplain %>%
+  mutate(part_area = st_area(floodplain)) %>%
+  group_by(FLOODPLAIN, HUC10) %>%
+  st_buffer(dist = 0) %>%
+  summarize(part_area = Sum(part_area))
+
+temp <- merge(data.frame(HUC10 = wbd_aoi$HUC10, total_area = st_area(wbd_aoi)), 
+              st_drop_geometry(floodplain), by = 'HUC10', all.x = TRUE)
+temp <- temp %>%
+  filter(FLOODPLAIN == 'YES') %>%
+  mutate(pct_floodplain = toNumber(part_area/total_area))
+
+wbd_centroid <- merge(wbd_centroid, temp[,c('HUC10', 'pct_floodplain')], all.x = TRUE)
+wbd_centroid$pct_floodplain[is.na(wbd_centroid$pct_floodplain)] <- 0
+
+```
+
+```{r distance from the river}
+## river data: https://data.cnra.ca.gov/dataset/national-hydrography-dataset-nhd
+rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp')
+rivers <- st_zm(st_transform(rivers, albers))  # find out what Z&M are (flowrates?? idk?)
+
+## find the minimum distance to any major river for each CT
+wbd_centroid$DIST <- apply(drop_units(st_distance(x = st_transform(wbd_centroid, albers), y = rivers)),
+                          1, min) / 1609.34  #converting meters to miles
+
+```
+
+```{r elevation}
+## data source: see documentation for elevatr package
+wbd_centroid <- get_elev_point(wbd_centroid) #elevation data
+
+```
+
+```{r SFH}
+## American Community Survey data: ACS Table ID DP04 (2017 estimates)
+housing <- read.csv('./_data/ACS_housing.csv', strip.white = TRUE)
+housing_metadata <- read.csv('./_data/ACS_housing_metadata.csv')
+
+## assign housing values to watersheds
+temp <- CT %>%
+  merge(housing, by.x = 'GEOID', by.y = 'GEO.id2') %>% 
+  select(HOUSES = HC01_VC03, SFH = HC01_VC14) %>%
+  st_interpolate_aw(wbd_subset, extensive = TRUE)
+temp$HUC10 <- wbd_subset$HUC10[st_equals(temp, wbd_subset) %>% unlist]
+wbd_centroid <- left_join(wbd_centroid, st_drop_geometry(temp)[,-1], by = 'HUC10')
+
+## calculate insurance penetration
+temp <- policies %>%
+  st_drop_geometry %>%
+  group_by(HUC10 = toNumber(HUC10)) %>%
+  summarize(years = length(unique(year((policyeffectivedate)))),
+            num_policies = Sum(counter)/years, 
+            value_policies = (Sum(totalbuildinginsurancecoverage) + Sum(totalcontentsinsurancecoverage))/years)
+
+wbd_centroid <- left_join(wbd_centroid, temp[,-2], by = 'HUC10')
+wbd_centroid$penetration = wbd_centroid$num_policies/wbd_centroid$HOUSES
+
+```
+
+```{r population }
+## American Community Survey data: ACS Table ID DP05 (2018 estimates)
+population <- read.csv('./_data/ACS_population.csv', strip.white = TRUE)
+population <- population[-(1:2),]
+population$GEO.id2 <- toNumber(population$GEO.id2)
+population$HC01_VC03 <- toNumber(population$HC01_VC03)
+population_metadata <- read.csv('./_data/ACS_population_metadata.csv')
+
+temp <- CT %>%
+  merge(population, by.x = 'GEOID', by.y = 'GEO.id2') %>% 
+  select(pop = HC01_VC03) %>%
+  st_interpolate_aw(wbd_subset, extensive = TRUE)
+temp$HUC10 <- wbd_subset$HUC10[st_equals(temp, wbd_subset) %>% unlist]
+wbd_centroid <- left_join(wbd_centroid, st_drop_geometry(temp)[,-1], by = 'HUC10')
+
+```
+
+```{r river discharge in aggregate}
+discharge_mean <- raster('./_data/streamflow/summary/discharge_mean.nc')
+discharge_max <- raster('./_data/streamflow/summary/discharge_max.nc')
+
+wbd_centroid$discharge_mean <- Extract(discharge_mean)
+wbd_centroid$discharge_max <- Extract(discharge_max)
+
+```
+
+
+## TIME VARIABLES
+
+```{r set up dataframe}
+df_time <- data.frame(DATE = seq(ymd('1975-01-01'), ymd('2018-12-31'), 'days'))
+df_time$YEAR <- year(df_time$DATE)
+df_time$MONTH <- month(df_time$DATE)
+
+```
+
+```{r PDO & ENSO}
+## to download again: run this
+# PDO <- read.table('http://research.jisao.washington.edu/pdo/PDO.latest.txt', 
+#                   header = TRUE, skip = 29, fill = TRUE,  blank.lines.skip = TRUE)
+# PDO <- PDO[1:119,]
+# PDO$YEAR <- gsub(x = paste(PDO$YEAR), pattern = '**', replacement = '', fixed = TRUE)
+# PDO <- melt(PDO, id.vars = 'YEAR', variable.name = 'MONTH', value.name = 'PDO')
+# PDO$MONTH <- as.numeric(PDO$MONTH)
+# 
+# ENSO <- read.table('https://www.esrl.noaa.gov/psd/enso/mei/data/meiv2.data', 
+#                    header = FALSE, skip = 1, fill = TRUE)
+# ENSO <- ENSO[1:41,]
+# names(ENSO) <- c('YEAR', 'DJ', 'JF', 'FM', 'MA', 'AM', 'MJ', 'JJ', 'JA', 'AS', 'SO', 'ON', 'ND')
+# 
+# ENSO <- melt(ENSO, id.vars = 'YEAR', variable.name = 'MONTH', value.name = 'ENSO')
+# ENSO$MONTH <- as.numeric(ENSO$MONTH)
+
+## or upload from saved file
+load('./_data/PDO_ENSO.Rdata')
+
+df_time <- merge(df_time, PDO, by = c('YEAR', 'MONTH'), all.x = TRUE)
+df_time <- merge(df_time, ENSO, by = c('YEAR', 'MONTH'), all.x = TRUE)
+
+```
+
+```{r days since start of rainy season}
+df_time$WATERYEAR <- ifelse(df_time$MONTH %in% 10:12, df_time$YEAR + 1, df_time$YEAR)
+df_time$rainyseason <- toNumber(df_time$DATE - ymd(paste(df_time$WATERYEAR-1, '-10-1', sep = '')) )
+  
+```
+
+```{r days since landfall}
+df_time$landfall <- NA
+index <- 1
+datelist <- c(AR_lat$start, today())
+for (i in 1:nrow(df_time)) {
+  if (df_time$DATE[i] < datelist[index+1]) {
+    df_time$landfall[i] <- toNumber(df_time$DATE[i] - AR_lat$start[index])
+  } else {
+    df_time$landfall[i] <- 0
+    index <- index + 1
+  }
+}
+df_time$landfall[df_time$landfall < 0] <- NA
+
+```
+
+```{r transfer time information to ARs}
+time_subset <- data.frame(number = paste('AR', 1:nrow(AR_subset), sep = '.'))
+
+for (ar in 1:nrow(AR_subset)) {
+  ## define input variables
+  start <- AR_subset$start[ar] - days(1)
+  end <- AR_subset$end[ar] + days(1)
+  yr <- AR_subset$wateryear[ar]
+  
+  ## get time variables
+  df_time_start <- df_time %>% subset(DATE == start)
+  df_time_subset <- df_time %>% subset(DATE >= start & DATE <= end)
+  
+  time_subset$PDO[ar] <- Mean(toNumber(df_time_subset$PDO))
+  time_subset$ENSO[ar] <- Mean(toNumber(df_time_subset$ENSO))
+  time_subset$rainyseason[ar] <- df_time_start$rainyseason
+  time_subset$landfall[ar] <- df_time_start$landfall
+}
+
+```
+
+```{r reshape into dataframe}
+hazard.df <- dcast(data = melt(hazard), Var1 + Var3 ~ Var2)
+hazard.df <- merge(hazard.df, st_drop_geometry(wbd_centroid), by = 'HUC10', all.x = TRUE)
+hazard.df <- merge(hazard.df, time_subset, by.x = 'Var3', by.y = 'number', all.x = TRUE)
+
+## clean up dataframe
+hazard.df <- hazard.df %>%
+  rename(AR = Var3) %>%
+  select(-Var1) 
+
+## add independent variables
+hazard.df$payout <- hazard.df$value_claims/hazard.df$value_policies
+hazard.df$damage <- hazard.df$value_claims/hazard.df$penetration
+hazard.df$damage_cap <- toNumber(hazard.df$damage)/toNumber(hazard.df$pop)
+
+```
+
+```{r save}
+hazard.df.save <- hazard.df
+save(hazard.df.save, file = './_scripts/hazard_wbd_sonoma.Rdata')
+
+```
+
+plot HU4 precipitation histograms
+```{r}
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp')
+# 
+# precip_HU4_mean <- array(data = NA, dim = c(37, 182, 10))
+# precip_HU4_med <- array(data = NA, dim = c(37, 182, 10))
+# precip_HU4_max <- array(data = NA, dim = c(37, 182, 10))
+# for (wateryear in 1982:2018) {
+#   print(wateryear)
+#   wy <- seq(ymd(paste(wateryear-1, 10, 1, sep = '-')),
+#             ymd(paste(wateryear, 3, 31, sep = '-')), 'days')
+#   wy <- wy[!(month(wy) == 2 & day(wy) == 29)]
+# 
+#   pb <- txtProgressBar(min = 0, max = length(wy), style = 3)
+#   for (i in 1:length(wy)) {
+#     ## get precipitation at point
+#     filename <- paste0('./_data/PRISM/', year(wy[i]), '/PRISM_ppt_stable_4kmD2_',
+#                        gsub('-', '', wy[i]), '_bil.bil')
+#     precip_velox <- velox(raster(filename))$extract(wbd4)
+#     precip_HU4_mean[wateryear-1981,i,] <- precip_velox %>% lapply(Mean) %>% unlist
+#     precip_HU4_med[wateryear-1981,i,] <- precip_velox %>% lapply(function(x) median(x, na.rm = TRUE)) %>% unlist
+#     precip_HU4_max[wateryear-1981,i,] <- precip_velox %>% lapply(Max) %>% unlist
+# 
+#     setTxtProgressBar(pb, i)
+#   }
+#   
+# }
+
+load('./_data/precip_HU4_0309.Rdata')
+
+## mean precipitation within a watershed
+precip_HU4_mean_df <- dcast(data = melt(precip_HU4_mean), Var1 + Var2 ~ Var3)
+precip_HU4_mean_df$Var1 <- precip_HU4_mean_df$Var1 + 1981
+names(precip_HU4_mean_df)[1:2] <- c('Year', 'Day')
+names(precip_HU4_mean_df)[-(1:2)] <- paste0('HUC', wbd4$HUC4)
+
+ggplot(data =  melt(precip_HU4_mean_df, id.vars = c('Year', 'Day'), variable.name = 'HU4', value.name = 'precip') %>%
+         subset(precip > 0)) + 
+  geom_density(aes(x = precip/25.4, y = ..count.., color = HU4), fill = NA, size = 1) + 
+  scale_color_brewer(palette = 'Paired') + 
+  geom_hline(yintercept = 0, size = 1) + 
+  scale_x_log10(minor_breaks = log_breaks(-8, 2)) + 
+  ggtitle('Mean Daily Precipitation by Watershed') + 
+  labs(x = 'Precipitation (inches)', y = 'Frequency of Occurrence')
+
+precip_HU4_mean_df$RP <- seq(1, 37, length.out = length(precip_HU4))
+ggplot() + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1801 > 0), aes(x = sort(HUC1801/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[1], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1802 > 0), aes(x = sort(HUC1802/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[2], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1803 > 0), aes(x = sort(HUC1803/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[3], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1804 > 0), aes(x = sort(HUC1804/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[4], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1805 > 0), aes(x = sort(HUC1805/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[5], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1806 > 0), aes(x = sort(HUC1806/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[6], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1807 > 0), aes(x = sort(HUC1807/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[7], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1808 > 0), aes(x = sort(HUC1808/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[8], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1809 > 0), aes(x = sort(HUC1809/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[9], size = 1) + 
+  geom_line(data = precip_HU4_mean_df %>% subset(HUC1810 > 0), aes(x = sort(HUC1810/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[10], size = 1) + 
+  ggtitle('Mean Daily Precipitation by Watershed') + 
+  labs(x = 'Precipitation (inches)', y = 'Return Period (years)') + 
+  coord_fixed(ratio = 0.2) + 
+  scale_x_log10(minor_breaks = log_breaks(-10, 1))
+
+
+## max precipitation within a watershed
+precip_HU4_max_df <- dcast(data = melt(precip_HU4_max), Var1 + Var2 ~ Var3)
+precip_HU4_max_df$Var1 <- precip_HU4_max_df$Var1 + 1981
+names(precip_HU4_max_df)[1:2] <- c('Year', 'Day')
+names(precip_HU4_max_df)[-(1:2)] <- paste0('HUC', wbd4$HUC4)
+
+ggplot(data =  melt(precip_HU4_max_df, id.vars = c('Year', 'Day'), variable.name = 'HU4', value.name = 'precip') %>%
+         subset(precip > 0)) + 
+  geom_density(aes(x = precip/25.4, y = ..count.., color = HU4), fill = NA, size = 1) + 
+  scale_color_brewer(palette = 'Paired') + 
+  geom_hline(yintercept = 0, size = 1) + 
+  scale_x_log10(minor_breaks = log_breaks(-8, 2)) + 
+  ggtitle('Max Daily Precipitation by Watershed') + 
+  labs(x = 'Precipitation (inches)', y = 'Frequency of Occurrence')
+
+precip_HU4_max_df$RP <- seq(1, 37, length.out = length(precip_HU4))
+ggplot() + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1801 > 0), aes(x = sort(HUC1801/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[1], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1802 > 0), aes(x = sort(HUC1802/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[2], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1803 > 0), aes(x = sort(HUC1803/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[3], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1804 > 0), aes(x = sort(HUC1804/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[4], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1805 > 0), aes(x = sort(HUC1805/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[5], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1806 > 0), aes(x = sort(HUC1806/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[6], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1807 > 0), aes(x = sort(HUC1807/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[7], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1808 > 0), aes(x = sort(HUC1808/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[8], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1809 > 0), aes(x = sort(HUC1809/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[9], size = 1) + 
+  geom_line(data = precip_HU4_max_df %>% subset(HUC1810 > 0), aes(x = sort(HUC1810/25.4), y = RP), 
+            color = brewer.pal(10, 'Paired')[10], size = 1) + 
+  ggtitle('Max Daily Precipitation by Watershed') + 
+  labs(x = 'Precipitation (inches)', y = 'Return Period (years)') + 
+  coord_fixed(ratio = 0.13) + 
+  scale_x_log10(minor_breaks = log_breaks(-10, 1))
+
+ggplot() + 
+  geom_sf(data = wbd4, color = NA, aes(fill = HUC4)) + 
+  scale_fill_brewer(palette = 'Paired') + 
+  geom_sf(data = california, fill = NA) + 
+  theme_void()
+
+
+```
+

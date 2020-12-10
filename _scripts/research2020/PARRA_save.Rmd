@@ -1,0 +1,432 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "8/5/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(lubridate)
+require(velox)
+require(RColorBrewer)
+require(rnoaa); rnoaa_options(cache_messages = FALSE)
+require(quantreg)
+require(dataRetrieval)
+require(mvtnorm)
+require(evd)
+require(triangle)
+require(mapview)
+require(abind)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) ifelse(nrow(x)>0, sum(x, na.rm = TRUE), NA)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+## meters to feet conversion factor
+mft <- 3.28084
+
+```
+
+```{r geography}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+## useful geographies
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class= 'sf')
+sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME != 9901)
+
+## useful features
+russian <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) %>% 
+  subset(grepl('Russian', GNIS_Name))
+cities <- matrix(c(38.507930, -122.985860, 'Guerneville',
+         38.616588, -122.858989, 'Healdsburg'), byrow = TRUE, nrow = 2) %>%
+  data.frame %>%
+  setNames(c('lat', 'long', 'city')) %>%
+  mutate(lat = toNumber(lat), long = toNumber(long)) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = NAD)
+
+## import watersheds
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp', quiet = TRUE)
+wbd6 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU6.shp', quiet = TRUE)
+wbd8 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU8.shp', quiet = TRUE)
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp', quiet = TRUE)
+wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp', quiet = TRUE)
+
+```
+
+## step 1: decide on an area of interest
+```{r}
+## define inlet watershed using USGS StreamStats
+inlet <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershed.shp')
+inlet.point <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershedpoint.shp')
+
+## define outlet watershed using USGS StreamStats
+outlet <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershed.shp')
+outlet.point <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershedpoint.shp')
+
+## define area of interest (aoi)
+dem <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy.tif')
+topobathy <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy_save.tif')
+dem <- crop(dem, topobathy)
+aoi <- extent(dem) %>% 
+  as('SpatialPolygons') %>% 
+  as('sf') %>% 
+  st_set_crs(proj4string(dem)) %>% 
+  st_transform(st_crs(sonoma))  #the area under consideration, in sf format
+
+
+## plot for visual check
+ggplot() + 
+  geom_sf(data = sonoma, fill = NA, color = 'grey80') + 
+  geom_sf(data = st_union(sonoma), fill = NA, color = 'black') + 
+  # geom_sf(data = cities) + 
+  # geom_sf_text(data = cities, aes(label = city), nudge_x = -0.11) +
+  geom_sf(data = inlet, fill = 'orangered', color = NA, alpha = 0.5) +
+  geom_sf(data = outlet, fill = 'orange', color = NA, alpha = 0.5) + 
+  geom_sf(data = russian) + 
+  geom_sf(data = russian %>% st_intersection(aoi), color = 'blue', size = 1) +
+  geom_sf(data = inlet.point) + geom_sf(data = outlet.point) + 
+  geom_sf(data = aoi, alpha = 0.25) + 
+  theme_void()
+
+```
+
+
+```{r}
+## decide which USGS gauges are most representative of flows in the study area
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv') %>%
+  subset(str_length(paste(site_no)) == 8) %>%
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california)) %>%
+  st_intersection(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))) %>%
+  subset(grepl('RUSSIAN', station_nm)) %>%
+  st_intersection(california %>% subset(NAME == 'Sonoma')) %>%  #subset to gauges below reservoirs
+  subset(!(site_no %in% c(11463980, 11465390)))  #keep gauges with long records only
+
+## plot average runoff response
+site.runoff <- readNWISdv(sites$site_no, parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>%
+  renameNWISColumns() %>%
+  group_by(month = month(Date), day = day(Date), site_no) %>%
+  summarize(Date = ymd(paste(ifelse(month[1] %in% 10:12, '2019', '2020'), month[1], day[1], sep = '-')),
+            Flow = mean(Flow)) %>%
+  full_join(readNWISsite(sites$site_no), by = 'site_no')
+g1 <- ggplot() +
+  geom_sf(data = california %>% subset(NAME == 'Sonoma')) +
+  geom_sf(data = russian %>% st_intersection(california %>% subset(NAME == 'Sonoma'))) +
+  geom_sf(data = sites, aes(color = site_no), size = 2, show.legend = FALSE) +
+  geom_sf(data = aoi, alpha = 0.25) +
+  theme_void()
+g2 <- ggplot(data = site.runoff) +
+  geom_line(aes(x = ymd(Date), y = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12),
+                group = site_no, color = site_no)) +
+  ggtitle('Average Daily Runoff') +
+  labs(x = '', y = 'Gage Runoff (mm/day)') +
+  theme_classic() + theme(legend.position = c(0.8, 0.8), legend.background = element_blank())
+gridExtra::grid.arrange(g1, g2, ncol = 2, widths = c(2,5))
+
+sites <- sites %>% subset(site_no %in% c(11464000, 11467000))
+site.runoff <- readNWISdv(sites$site_no, parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>% 
+  renameNWISColumns() %>% 
+  full_join(readNWISsite(sites$site_no), by = 'site_no') %>% 
+  mutate(Runoff_mmday = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) %>% 
+  group_by(Date) %>% 
+  summarize(Runoff_mmday = Mean(Runoff_mmday))
+
+```
+
+## step 2: generate ARs
+```{r}
+source('./_scripts/research2020/functions/AR.R')
+catalog.aoi <- generate_AR_catalog(aoi)
+catalog.outlet <- generate_AR_catalog(outlet)
+
+## compare two catalogs
+ggplot() + 
+  geom_density(data = catalog.aoi, aes(x = IVT_max), fill = 'blue', color = 'blue', alpha = 0.5) + 
+  geom_density(data = catalog.outlet, aes(x = IVT_max), fill = 'orange', color = 'orange', alpha = 0.5) + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+ggplot() + 
+  geom_density(data = catalog.aoi, aes(x = duration), fill = 'blue', color = 'blue', alpha = 0.5) + 
+  geom_density(data = catalog.outlet, aes(x = duration), fill = 'orange', color = 'orange', alpha = 0.5) + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+ggplot() + 
+  geom_density(data = catalog.aoi, aes(x = precip), fill = 'blue', color = 'blue', alpha = 0.5) + 
+  geom_density(data = catalog.outlet, aes(x = precip), fill = 'orange', color = 'orange', alpha = 0.5) + 
+  scale_x_log10(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  annotation_logticks() + 
+  theme_classic()
+ggplot() + 
+  geom_density(data = catalog.aoi, aes(x = runoff), fill = 'blue', color = 'blue', alpha = 0.5) + 
+  geom_density(data = catalog.outlet, aes(x = runoff), fill = 'orange', color = 'orange', alpha = 0.5) + 
+  scale_x_log10(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  annotation_logticks() + 
+  theme_classic()
+
+overlap <- data.frame(date = seq(ymd('1980-01-01'), ymd('2019-12-31'), 'days'), aoi = FALSE, outlet = FALSE)
+aoi.counter <- 1
+outlet.counter <- 1
+pb <- txtProgressBar(min = 0, max = nrow(overlap), style = 3)
+for (i in 1:nrow(overlap)) {
+  d <- overlap$date[i]
+  if (d %in% seq(ymd(catalog.aoi[aoi.counter, 'start_day']), 
+                 ymd(catalog.aoi[aoi.counter, 'end_day']), 'days')) {
+    overlap[i, 'aoi'] <- TRUE
+    if (d == ymd(catalog.aoi[aoi.counter, 'end_day'])) {
+      aoi.counter <- aoi.counter + 1
+    }
+  }
+  if (d %in% seq(ymd(catalog.outlet[outlet.counter, 'start_day']), 
+                 ymd(catalog.outlet[outlet.counter, 'end_day']), 'days')) {
+    overlap[i, 'outlet'] <- TRUE
+    if (d == ymd(catalog.outlet[outlet.counter, 'end_day'])) {
+      outlet.counter <- outlet.counter + 1
+    }
+  }
+  setTxtProgressBar(pb, i)
+}
+overlap <- overlap %>% 
+  mutate(year = year(date), day = yday(date),
+         plot.date = ifelse(month(date) %in% 10:12, paste(ymd(ymd('2019-01-01') + days(day))), 
+                            paste(ymd(ymd('2020-01-01') + days(day)))))
+ggplot() + 
+  geom_raster(data = overlap %>% subset(aoi), aes(x = ymd(plot.date), y = year), fill = 'blue', alpha = 0.5) + 
+  geom_raster(data = overlap %>% subset(outlet), aes(x = ymd(plot.date), y = year), fill = 'orange', alpha = 0.5) + 
+  scale_x_date(breaks = 'months', date_labels = '%b') + 
+  scale_y_reverse() + 
+  theme_classic()
+
+
+## if you want to use a historic AR: fill in the values below
+AR <- data.frame(n.AR = 1,
+                 IVT_max = catalog[399, 'IVT_max'],
+                 duration = catalog[399, 'duration'])
+
+# ## if you want to generate synthetic ARs: 
+AR <- generate_AR(catalog, n.AR = 2)
+
+catalog <- catalog.outlet
+plot_AR_copula(catalog, 
+               add.historic = catalog %>% 
+                 mutate(wateryear = ifelse(month(start_day) %in% 10:12, year(start_day)+1, year(start_day))) %>%
+                 group_by(wateryear) %>% 
+                 summarize(IVT_max = max(IVT_max), duration = max(duration)), 
+               add.synthetic = AR)
+# plot_AR_copula(catalog, add.historic = catalog, add.synthetic = AR)
+
+```
+
+
+## step 3: generate precipitation outcomes
+```{r}
+source('./_scripts/research2020/functions/PRCP.R')
+precip <- generate_precip(AR, catalog, n.precip = 1e2, dx = 0.01, precip.threshold = 0, plot = TRUE)
+
+# g.precip + 
+#   ggtitle('Precipitation Empirical CDF') + 
+#   geom_hline(yintercept = catalog[399, 'precip'], linetype = 'dashed') + 
+#   coord_fixed(ratio = 1/250)
+
+```
+
+
+## step 4: generate runoff outcomes
+```{r}
+source('./_scripts/research2020/functions/RNFF.R')
+runoff <- generate_runoff(precip, catalog, n.runoff = 1e2)
+
+# g.runoff + 
+#   geom_vline(xintercept = catalog[399, 'precip']/25.4, linetype = 'dashed') + 
+#   geom_hline(yintercept = catalog[399, 'runoff']/25.4, linetype = 'dashed')
+
+## compare recorded vs. calculated discharge
+site.discharge <- readNWISdv(sites$site_no, parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>% 
+  renameNWISColumns() %>% 
+  group_by(Date) %>% 
+  summarize(discharge_m3s = Mean(Flow)/(mft^3))
+
+catalog$CN <- CN
+catalog$precip_in <- catalog$precip/25.4
+catalog$S <- 1000/catalog$CN - 10
+catalog$runoff_in <- ifelse(catalog$precip_in < 0.2*catalog$S, 0, 
+                            (catalog$precip_in - 0.2*catalog$S)^2/(catalog$precip_in + 0.8*catalog$S))
+catalog$discharge_m3s <- catalog$runoff_in*25.4/1e3 * inlet$DRNAREA*(5280/mft)^2 / catalog$duration/3600
+catalog.discharge <- catalog %>% subset(runoff_in > 0)
+
+for (i in 1:nrow(catalog.discharge)) {
+  test <- site.discharge %>% 
+    subset(ymd(Date) %in% seq(ymd(catalog$start_day[i])-days(1), ymd(catalog$end_day[i])+days(1), 'days')) %>% 
+    mutate(estimated = catalog.discharge$discharge_m3s[i])
+  # g <- ggplot(test) +
+  #   geom_line(aes(x = Date, y = discharge_m3s)) +
+  #   geom_point(aes(x = Date, y = discharge_m3s)) +
+  #   geom_hline(yintercept = mean(test$discharge_m3s), linetype = 'dashed') +
+  #   geom_hline(yintercept = catalog.discharge$discharge_m3s[i], color = 'red')
+  # print(g)
+  catalog.discharge$delta_mean[i] <- mean(test$discharge_m3s)/catalog.discharge$discharge_m3s[i]
+  catalog.discharge$delta_max[i] <- max(test$discharge_m3s)/catalog.discharge$discharge_m3s[i]
+}
+ggplot(catalog.discharge) + 
+  geom_histogram(aes(x = delta_max), color = 'black', fill = 'white', bins = 30) + 
+  scale_x_log10() + annotation_logticks(sides = 'b')
+
+
+```
+
+
+## step 5: generate inundation maps and flood depths
+```{r}
+source('./_scripts/research2020/functions/INUN.R')
+
+## generate files for LISFLOOD
+dem <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy.tif')
+topobathy <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy_save.tif')
+dem <- crop(dem, topobathy)
+
+hydropoly <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+                     layer = 'NHDArea', quiet = TRUE)
+fcode <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+                 layer = 'NHDFCode', quiet = TRUE)
+hydropoly_rr <- hydropoly %>% 
+  left_join(fcode %>% select('FCODE', 'DESCRIPTION'), by = c('FCode' = 'FCODE')) %>% 
+  subset(grepl('Stream/River', DESCRIPTION)) %>% 
+  subset(row.names(.) == '2104') %>%  #get Russian River only
+  st_intersection(st_transform(wbd12, st_crs(.))) %>% 
+  mutate(feature_id = row.names(.)) %>% 
+  subset(!(feature_id %in% c('2104', '2104.12', '2104.20'))) %>% 
+  st_transform(albers) %>% 
+  select(feature_id, Shape) %>% 
+  mutate(AREA = st_area(.), 
+         PERIMETER = lwgeom::st_perimeter(.),
+         WIDTH = 2*AREA/PERIMETER) %>%  
+  st_transform(proj4string(dem)) %>% 
+  st_crop(extent(dem))
+
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img') 
+lulc.att <- lulc@data@attributes[[1]]
+lulc.n <- crop(lulc, sonoma %>% st_union %>% st_transform(proj4string(lulc)) %>% as('Spatial') %>% extent)
+vals <- unique(lulc.n[])
+manning <- data.frame(lulc = c(21:24, 31, 41:43, 52, 71, 81, 90, 95), 
+                      n = c(0.0404, 0.0678, 0.0678, 0.0404, 0.0113, 0.36, 0.32, 0.4, 0.4, 0.368, 0.325, 
+                            0.086, 0.1825))
+for (i in 1:length(vals)) {
+  if (vals[i] %in% manning$lulc) {
+    lulc.n[lulc.n == vals[i]] <- manning[manning$lulc == vals[i], 'n']
+  } else {
+    lulc.n[lulc.n == vals[i]] <- 0.05
+  }
+}
+
+# create_lisflood_files(fileloc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/',
+#                       dem = dem, river = hydropoly_rr, lulc = lulc.n,
+#                       parname = 'russian', bciname = 'russian')
+
+
+## run LISFLOOD for every runoff outcome
+# inundation <- generate_inundation(fileloc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/', 
+#                                   parname = 'russian', runoff, drainarea)
+inundation <- 
+  generate_inundation(
+    fileloc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/',
+    dem = dem, river = hydropoly_rr, lulc = lulc.n,
+    parname = 'russian', bciname = 'russian',
+    runoff = runoff, 
+    drainarea = inlet$DRNAREA
+  )
+
+# inundation_save <- inundation
+# crs(inundation) <- crs(dem)
+plot_inundation(inundation, aoi)
+# (inundation[[1]] %>% 
+#   as.data.frame(xy = TRUE) %>% 
+#   setNames(c('x', 'y', 'layer')) %>% 
+#   subset(layer > 0) == 
+# inundation[[2]] %>% 
+#   as.data.frame(xy = TRUE) %>% 
+#   setNames(c('x', 'y', 'layer')) %>% 
+#   subset(layer > 0)) %>% 
+#   apply(2, function(x) sum(x) == length(x))
+
+
+## load building densities & housing counts
+housing <- st_read('./_gis/California/_structures/SimplyAnalytics_SonomaHousing/SimplyAnalytics_Shapefiles_2020-08-05_17_52_48_84f11ceb99dafe222dde3767eb4fe663.shp', quiet = TRUE) %>%
+  st_transform(st_crs(sonoma)) %>%
+  subset(c(st_intersects(., aoi, sparse = FALSE)))
+names(housing)[3:4] <- c('Households', 'HousingUnits')
+housing$GEOID <- toNumber(housing$spatial_id)
+
+struct <- st_read('./_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
+                  layer = 'CartographicBuildingFootprints', quiet = TRUE) %>% 
+  st_transform(st_crs(sonoma)) %>% 
+  st_centroid() %>% 
+  st_crop(housing)
+
+## find flood depths at each building
+depth <- generate_flood_depth(inundation, runoff, river = hydropoly_rr, struct, housing, 
+                              buffer = 50, grid.size = 0.02, n.depth = 5)
+
+
+```
+
+
+## step 6: generate building damage ratios
+```{r}
+source('./_scripts/research2020/functions/DM.R')
+damage <- generate_flood_damage(depth, curve = 'average', n.damage = 5)
+
+```
+
+## step 7: generate loss values by census tract
+```{r}
+source('./_scripts/research2020/functions/DV.R')
+medval <- 657244/1.31 #median 2019 home value from Zillow, adjusted to 2006 inflation
+loss <- generate_loss_estimates(damage, value_mean = medval, value_sd = 1e5, n.loss = 5)
+
+plot_loss_distribution(loss)
+
+loss[,-(1:6)] %>% apply(1, sum) %>% max
+
+```
+
+## step 8: save out
+```{r}
+# save(AR, precip, runoff, inundation, depth, damage, loss, file = './PARRA_quals.Rdata')
+load('./PARRA_quals.Rdata')
+
+```
+

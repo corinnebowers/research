@@ -1,0 +1,472 @@
+
+```{r}
+## setup
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r}
+## load packages
+require(tidyverse)
+require(tigris)
+
+```
+
+```{r}
+## load data
+load('D:/Research/_data/grid_catalog.Rdata')
+california <- counties(state = 'CA')
+
+```
+
+```{r}
+## sonoma
+ggplot() + 
+  geom_sf(data = california, color = 'grey50', fill = 'grey90') + 
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), color = 'grey25', size = 1, fill = 'grey50') + 
+  theme_void()
+ggsave('D:/Research/_plots/sonoma.jpg', height = 6)
+
+```
+
+```{r}
+## stochastic AR catalog
+IVT_seq <- seq(0, max(catalog$IVT_max)+50, 10)
+dur_seq <- seq(0, max(catalog$duration)+5, 1)
+exceed <- matrix(nrow = length(IVT_seq), ncol = length(dur_seq))
+for (i in 1:length(IVT_seq)) {
+  for (j in 1:length(dur_seq)) {
+    exceed[i,j] <- catalog[catalog$IVT_max >= IVT_seq[i] & 
+                             catalog$duration >= dur_seq[j],] %>% nrow
+  }
+}
+exceed <- data.frame(exceed)
+names(exceed) <- dur_seq
+exceed <- cbind(IVT = IVT_seq, exceed)
+exceed <- melt(exceed, id.vars = 'IVT', variable.name = 'duration', value.name = 'freq')
+exceed$duration <- toNumber(exceed$duration)
+
+g <- ggplot() + 
+  geom_raster(data = exceed %>% subset(freq > 0), aes(x = IVT, y = duration, fill = freq/40)) +
+  scale_fill_viridis_c(name = 'ARs/year', option = 'magma', direction = -1) + 
+  ggnewscale::new_scale_fill() + 
+  geom_raster(data = exceed %>% mutate(edge = apply(cbind(0.5, freq/40), 1, min)), 
+              aes(x = IVT, y = duration, fill = edge), show.legend = FALSE) + 
+  scale_fill_gradient(low = 'white', high = NA) + 
+  ggtitle('AR Exceedance Rate') +
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)') +
+  coord_fixed(ratio = 7) +
+  scale_x_continuous(limits = c(250, max(catalog$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(limits = c(0, max(catalog$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  theme_classic()
+
+g
+ggsave('D:/Research/_plots/2006AR.jpg', width = 6, height = 6)
+
+# g + geom_point(data = catalog, aes(x = IVT_max, y = duration), color = 'black')
+g + geom_point(data = wateryear.df, aes(x = IVT_max, y = duration), color = 'black')
+ggsave('D:/Research/_plots/stochasticAR.jpg', width = 6, height = 6)
+
+IVT_breaks <- seq(250, 1250, 250) + 125
+duration_breaks <- seq(0, 144, 24) + 12
+df <- expand.grid(IVT = IVT_breaks, duration = duration_breaks)
+ARcat <- function(IVT, duration) {
+  if (duration >= 48) {
+    return(ifelse(IVT >= 1000, 5, 
+                  ifelse(IVT >= 750, 4, 
+                         ifelse(IVT >= 500, 3, 2))))
+  } else if (duration >= 24) {
+    return(ifelse(IVT >= 1250, 5, 
+                  ifelse(IVT >= 1000, 4, 
+                         ifelse(IVT >= 750, 3, 
+                                ifelse(IVT >= 500, 2, 1)))))
+  } else {
+    return(ifelse(IVT >= 1250, 4, 
+                  ifelse(IVT >= 1000, 3, 
+                         ifelse(IVT >= 750, 2, 
+                                ifelse(IVT >= 500, 1, 0)))))
+  }
+}
+for (i in 1:nrow(df)) {df$cat[i] <- ARcat(df$IVT[i], df$duration[i])}
+g + 
+  geom_hline(yintercept = duration_breaks[1:2] + 12, color = 'gray50', linetype = 'dashed') + 
+  geom_vline(xintercept = IVT_breaks[1:4] + 125, color = 'gray50', linetype = 'dashed') + 
+  ggnewscale::new_scale('fill') + 
+  geom_label(data = df %>% subset(duration <= 60), aes(x = IVT, y = duration, 
+                            label = paste0('Cat ', cat), fill = factor(cat)),
+             fontface = 'bold', show.legend = FALSE) +
+  scale_fill_brewer(palette = 'Spectral', direction = -1)
+ggsave('D:/Research/_plots/scaleAR.jpg', width = 6, height = 6)
+
+
+```
+
+```{r}
+## 2006 event
+require(ncdf4)
+setwd('D:/Research')
+
+start <- ymd('2005-12-28') + hours(3)
+end <- ymd('2006-01-03') + hours(21)
+timeline <- seq(start - hours(3), end, by = difftime(start + hours(3), start, units = 'hours'))
+
+footprint_stack <- raster::stack()
+for (i in 1:length(timeline)) {
+  d <- timeline[i]
+  IVT_filename <- paste('./_data/MERRA/IVT/IVT_', gsub('-', '', floor_date(d, unit = 'days')), '_', 
+                        formatC(hour(d)*100, width = 4, format = 'd', flag = '0'), '.nc', sep = '')
+  IVT_ncfile <- nc_open(IVT_filename)
+  AR_filename <- paste('./_data/MERRA/AR/AR_', gsub('-', '', floor_date(d, unit = 'days')), '_', 
+                       formatC(hour(d)*100, width = 4, format = 'd', flag = '0'), '.nc', sep = '')
+  AR_ncfile <- nc_open(AR_filename)
+  lat <- ncvar_get(IVT_ncfile, 'latitude')
+  lon <- ncvar_get(IVT_ncfile, 'longitude')
+  
+  footprint <- raster(ncvar_get(IVT_ncfile, 'layer') * ncvar_get(AR_ncfile, 'layer'), 
+                      xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+  footprint[footprint <= 0] <- NA
+  footprint_stack <- raster::stack(footprint_stack, footprint)
+  nc_close(IVT_ncfile)
+  nc_close(AR_ncfile)
+}
+
+plotdf <- as.data.frame(footprint_stack[[22]], xy = TRUE); names(plotdf)[3] <- 'layer'
+buffer <- 0
+ggplot() + 
+  geom_sf(data = USA) + 
+  geom_raster(data = plotdf, aes(x=x, y=y, fill = layer)) + 
+  geom_rect(aes(xmin = min(lon), xmax = max(lon), ymin = min(lat)+0.25, ymax = max(lat)), 
+            color = 'gray50', linetype = 'dashed', fill = 'gray70', alpha = 0.1) + 
+  scale_fill_viridis_c(direction = -1, na.value = NA) +
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), color = 'grey25', fill = 'grey50') + 
+  geom_sf(data = USA, fill = NA) + 
+  # lims(x = c(-150, -105), y = c(27, 53)) + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) +
+  lims(x = c(min(lon)-buffer, max(lon)+buffer), y = c(min(lat)-buffer, max(lat)+buffer)) +
+  ggtitle("2006 New Year's Day AR Storm") + 
+  labs(fill = 'IVT (kg/m/s)') + 
+  theme_void()
+ggsave('D:/Research/_plots/IARC_2006storm.jpg', height = 3)
+
+ggplot(data.frame(depth = 1:11)) + 
+  geom_point(aes(x = depth, y = depth, color = depth/mft*1e3)) + 
+  scale_color_distiller(palette = 'Blues', direction = 1, name = 'Water \nDepth')
+ggsave('D:/Research/_plots/depth_legend.jpg', height = 5)
+
+```
+
+```{r}
+## 2006 losses
+load('D:/Research/_data/PARRA_results_quals.Rdata')
+loss.dist <- cbind(loss[,1:6], total_loss = apply(loss[,-(1:6)], 1, sum))
+ggplot() + 
+  # geom_histogram(data = loss.dist, 
+  #                aes(x = total_loss/1e6, y = ..density..), 
+  #                color = 'black', fill = 'grey90', alpha = 0.75, bins = sqrt(nrow(loss.dist))) + 
+  geom_vline(xintercept = 104*0.81*0.85, linetype = 'dashed') + 
+  ggtitle('Distribution of Total Loss') + 
+  labs(x = 'Total Loss ($millions)', y = 'Frequency of Occurrence') + 
+  scale_x_continuous(limits = c(0, 120), expand = c(0,0)) + 
+  scale_y_continuous(limits = c(0, 0.048), expand = c(0,0)) + 
+  theme_classic() + theme(plot.margin = margin(1,10,1,1))
+ggsave('D:/Research/_plots/IARC_2006loss2.jpg', height = 4, width = 5)
+
+
+```
+
+```{r}
+## PARRA icons
+
+## G(AR)
+ggplot() + 
+  geom_raster(data = exceed %>% subset(freq > 0), 
+              aes(x = IVT, y = duration, fill = freq/40), show.legend = FALSE) +
+  scale_fill_viridis_c(name = 'ARs/year', option = 'magma', direction = -1) + 
+  ggnewscale::new_scale_fill() + 
+  geom_raster(data = exceed %>% mutate(edge = apply(cbind(0.5, freq/40), 1, min)), 
+              aes(x = IVT, y = duration, fill = edge), show.legend = FALSE) + 
+  scale_fill_gradient(low = 'white', high = NA) + 
+  # ggtitle('AR Exceedance Rate') +
+  geom_point(data = catalog, aes(x = IVT_max, y = duration), size = 0.5) + 
+  labs(x = 'Max IVT', y = 'Duration') +
+  # coord_fixed(ratio = 7) +
+  scale_x_continuous(limits = c(250, max(AR$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(limits = c(0, max(AR$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  theme_classic()
+ggsave('D:/Research/_plots/PARRA1.jpg', width = 3, height = 3)
+
+
+## G(PRCP), option 1
+quant.model <- list()
+dx <- 0.01
+tau <- seq(dx, 1-dx, dx)
+for (i in 1:length(tau)) {
+  quant.model[[i]] <- rq(precip ~ IVT_max + duration, data = catalog, tau = tau[i])
+}
+quant.result <- data.frame(tau = tau, fit = NA, lower = NA, higher = NA)
+for (i in 1:length(tau)) {
+  quant.boot <- predict(quant.model[[i]], newdata = AR[1,], 
+                        type = 'percentile', interval = 'confidence', se = 'boot')
+  quant.result[i, 2:4] <- quant.boot
+}
+
+g <- ggplot()
+n.AR <- 10
+n.precip <- 10
+dx <- 0.01
+precip.threshold <- dx
+pb <- txtProgressBar(min = 0, max = 20, style = 3)
+for (n in 1:20) {
+  precip.stochastic <- expand.grid(n.AR = 1:n.AR, n.precip = 1:n.precip)
+  precip.stochastic$q <- sample(seq(precip.threshold, 1-dx, dx), size = n.AR * n.precip, replace = TRUE)
+  for (i in 1:nrow(precip.stochastic)) {
+    index <- which(round(quant.result$tau, 2) == round(precip.stochastic$q[i], 2))
+    precip.stochastic$precip_mm[i] <- rltriangle(n = 1, a = quant.result[index, 'lower'], 
+                                      b = quant.result[index, 'higher'], 
+                                      c = quant.result[index, 'fit'])
+  }
+  g <- g + geom_density(data = precip.stochastic, aes(x = precip_mm, y = ..count..), color = 'grey80', adjust = 0.9)
+  setTxtProgressBar(pb, n)
+}
+g + 
+  geom_density(data = quant.result, aes(x = fit, y = ..count..), size = 1, adjust = 0.75) + 
+  # ggtitle('Precipitation PDF') + 
+  labs(x = 'Precipitation', y = 'Frequency of Occurrence') + 
+  # geom_rug(data = precip, aes(x = precip_mm/25.4), size = 1, color = '#8c1515') + 
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() 
+ggsave('D:/Research/_plots/PARRA2.jpg', width = 3, height = 3)
+
+# ## G(PRCP), option 2
+# dx <- 0.05
+# tau <- seq(dx, 1-dx, dx)
+# qr <- rq(precip ~ IVT_max + duration, data = catalog, tau = tau)
+# coef_IVT <- lapply(summary(qr), function(x) x$coefficients[2,]) %>% do.call('rbind', .) %>% as.data.frame
+# coef_duration <- lapply(summary(qr), function(x) x$coefficients[3,]) %>% do.call('rbind', .) %>% as.data.frame
+# 
+# reg <- lm(precip ~ IVT_max + duration, data = catalog)
+# temp <- summary(reg)
+# temp$coefficients
+# 
+# g1 <- ggplot(data = coef_IVT) + 
+#   geom_ribbon(aes(x = tau, ymin = `lower bd`, ymax = `upper bd`), fill = 'grey90') + 
+#   geom_point(aes(x = tau, y = coefficients)) + 
+#   geom_line(aes(x = tau, y = coefficients)) + 
+#   geom_hline(yintercept = summary(reg)$coefficients[2,1], color = 'red') + 
+#   geom_hline(yintercept = summary(reg)$coefficients[2,1] + summary(reg)$coefficients[2,2], 
+#              color = 'red', linetype = 'dashed') + 
+#   geom_hline(yintercept = summary(reg)$coefficients[2,1] - summary(reg)$coefficients[2,2], 
+#              color = 'red', linetype = 'dashed') + 
+#   theme_classic()
+# g2 <- ggplot(data = coef_duration) + 
+#   geom_ribbon(aes(x = tau, ymin = `lower bd`, ymax = `upper bd`), fill = 'grey90') + 
+#   geom_point(aes(x = tau, y = coefficients)) + 
+#   geom_line(aes(x = tau, y = coefficients)) + 
+#   geom_hline(yintercept = summary(reg)$coefficients[3,1], color = 'red') + 
+#   geom_hline(yintercept = summary(reg)$coefficients[3,1] + summary(reg)$coefficients[3,2], 
+#              color = 'red', linetype = 'dashed') + 
+#   geom_hline(yintercept = summary(reg)$coefficients[3,1] - summary(reg)$coefficients[3,2], 
+#              color = 'red', linetype = 'dashed') + 
+#   theme_classic()
+# gridExtra::grid.arrange(g1, g2, nrow = 2)
+# plot(summary(qr))
+
+
+## G(R)
+catalog$wateryear <- ifelse(month(catalog$start) %in% 10:12, year(catalog$start)+1, year(catalog$start))
+wateryear.df <- data.frame(wateryear = unique(catalog$wateryear), precip = NA, runoff = NA)
+for (wy in 1:nrow(wateryear.df)) {
+  index <- catalog %>% 
+    subset(wateryear == unique(wateryear)[wy]) %>% 
+    select(precip) %>% unlist %>% which.max
+  index.value <- catalog %>% 
+    subset(wateryear == unique(wateryear)[wy]) %>% 
+    subset(1:nrow(.) == index)
+  wateryear.df[wy, 'precip'] <- index.value$precip / 25.4
+  wateryear.df[wy, 'runoff'] <- index.value$runoff / 25.4
+  wateryear.df[wy, 'IVT_max'] <- index.value$IVT_max
+  wateryear.df[wy, 'duration'] <- index.value$duration
+}
+P <- wateryear.df$precip
+Q <- wateryear.df$runoff
+S <- 5 * (P + 2*Q - sqrt(5*P*Q + 4*Q^2))
+S <- ifelse(P > 0 & Q > 0, S, NA)
+S.best <- Mean(log(S))
+S.std <- sd(log(S), na.rm = TRUE)
+S.lower <- S.best + 1.282*S.std
+S.upper <- S.best - 1.282*S.std
+CN <- 1000/(10+exp(S.best))
+CN.lower <- 1000/(10 + exp(S.lower))
+CN.upper <- 1000/(10 + exp(S.upper))
+
+dx <- seq(0, 20, 0.1)
+ggplot() + 
+  geom_ribbon(aes(x = 25.4*dx, 
+                  ymin = 25.4*ifelse(dx < 0.2*exp(S.lower), 0, (dx - 0.2*exp(S.lower))^2/(dx + 0.8*exp(S.lower))), 
+                  ymax = 25.4*ifelse(dx < 0.2*exp(S.upper), 0, (dx - 0.2*exp(S.upper))^2/(dx + 0.8*exp(S.upper)))),
+              fill = 'grey80', alpha = 0.5) +
+  geom_line(aes(x = 25.4*dx, 
+                y = 25.4*ifelse(dx < 0.2*exp(S.best), 0, (dx - 0.2*exp(S.best))^2/(dx + 0.8*exp(S.best)))), 
+            color = ggcolor(1), size = 1) +
+  geom_point(data = wateryear.df, aes(x = 25.4*precip, y = 25.4*runoff)) + 
+  labs(x = 'Precipitation', y = 'Runoff') + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  # coord_fixed(ratio = 1) + 
+  theme_classic()
+ggsave('D:/Research/_plots/PARRA3.jpg', width = 3, height = 3)
+
+
+## G(INUN)
+
+## G(DM)
+load('D:/Research/_data/depthdamage/depthdamage.Rdata')
+
+ggplot() + 
+  geom_ribbon(data = beta.dist, aes(x = water_ft/mft*1e3, ymin = mu-sd, max = mu+sd),
+              fill = 'grey95') +  
+  geom_line(data = beta.dist, aes(x = water_ft/mft*1e3, y = mu), linetype = 'dotted') +
+  geom_line(data = hazus, aes(x = ft/mft*1e3, y = x1/100), linetype = 'dashed') + 
+  geom_step(data = flemo, aes(x = cm*10, y = PQ_SFH/100)) + 
+  labs(x = 'Water Depth', y = 'Damage Ratio') + 
+  scale_x_continuous(expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0), labels = scales::percent) + 
+  coord_cartesian(xlim = c(0,5000)) + 
+  theme_classic() + theme(plot.margin = margin(10, 10, 10, 10))
+ggsave('D:/Research/_plots/PARRA5.jpg', width = 3, height = 3)
+
+```
+
+```{r}
+## plot stochastic catalog
+g1 <- ggplot() + 
+  geom_histogram(data = catalog, aes(x = IVT_max), color = 'black', fill = 'grey90', 
+                 binwidth = 50, boundary = 250) + 
+  geom_line(aes(x = IVT_seq, 
+                y = nrow(catalog)*50*dgumbel(x = IVT_seq, loc = param_IVT[1], scale = param_IVT[2])),
+            color = 'black', size = 1) + 
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Probability of Occurrence') + 
+  scale_x_continuous(limits = c(250, max(catalog$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.title.y = element_blank())
+g2 <- ggplot() + 
+  geom_histogram(data = catalog, aes(x = duration), color = 'black', fill = 'grey90', 
+                 binwidth = 8, boundary = 0) + 
+  geom_line(aes(x = dur_seq, 
+                y = nrow(catalog)*8*dlnorm(x = dur_seq, meanlog = param_duration[1], sdlog = param_duration[2])),
+            color = 'black', size = 1) + 
+  labs(x = 'Storm Duration (hrs)', y = 'Probability of Occurrence') + 
+  scale_x_continuous(limits = c(0, max(catalog$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.title.y = element_blank())
+jpeg(filename = 'D:/Research/_plots/stochasticPDF.jpg', width = 25/6, height = 5, units = 'in', res = 1024)
+gridExtra::grid.arrange(g1, g2, nrow = 2,
+                        left = grid::textGrob('Number of Occurrences', rot = 90, vjust = 0.5))
+  
+
+ggplot() + 
+  geom_point(data = catalog, aes(x = IVT_max, y = duration), color = 'black') + 
+  ggtitle('AR Historic Catalog (n = 468)', subtitle = 'Sonoma County') + 
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)') +
+  scale_x_continuous(limits = c(250, max(AR$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(limits = c(0, max(AR$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  coord_fixed(ratio = 6.5) +
+  theme_classic()
+ggsave('D:/Research/_plots/stochastic_left.jpg', width = 5, height = 5)
+ggplot() + 
+  geom_point(data = AR, aes(x = IVT_max, y = duration), color = 'black') + 
+  # geom_point(data = AR_max, aes(x = IVT_max, y = duration), color = ggcolor(2)[1]) + 
+  ggtitle('AR Stochastic Catalog (n = 1000)', subtitle = 'Sonoma County') + 
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)') +
+  scale_x_continuous(limits = c(250, max(AR$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(limits = c(0, max(AR$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  coord_fixed(ratio = 6.5) +
+  theme_classic()
+ggsave('D:/Research/_plots/stochastic_right.jpg', width = 5, height = 5)
+
+ggplot() + 
+  geom_point(data = catalog, aes(x = IVT_max, y = duration, color = 'Historic \n(1979-2018)'),
+             show.legend = FALSE) +
+  geom_point(data = AR, aes(x = IVT_max, y = duration, color = 'Stochastic'), 
+             show.legend = FALSE) + 
+  ggtitle('AR Stochastic Catalog (n = 1000)', subtitle = 'Sonoma County') +
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)') +
+  scale_color_manual(name = 'Catalog', values = c('black', 'red')) + 
+  scale_x_continuous(limits = c(250, max(AR$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(limits = c(0, max(AR$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  coord_fixed(ratio = 6.5) +
+  theme_classic()
+ggsave('D:/Research/_plots/stochastic_layered_nolegend.jpg', width = 5, height = 5)
+
+g1 <- ggplot() + 
+  stat_ecdf(data = catalog, aes(x = IVT_max)) + 
+  geom_line(aes(x = IVT_seq, y = pgumbel(IVT_seq, loc = param_IVT[1], scale = param_IVT[2])),
+            color = 'red') + 
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Cumulative Probability') + 
+  scale_x_continuous(limits = c(250, max(catalog$IVT_max)), 
+                     breaks = seq(250, 2000, 250), minor_breaks = seq(250, 2000, 250),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.title.y = element_blank())
+g2 <- ggplot() + 
+  stat_ecdf(data = catalog, aes(x = duration)) + 
+  geom_line(aes(x = dur_seq, plnorm(dur_seq, meanlog = param_duration[1], sdlog = param_duration[2])),
+            color = 'red') + 
+  labs(x = 'Storm Duration (hrs)', y = 'Probability of Occurrence') + 
+  scale_x_continuous(limits = c(0, max(catalog$duration)), 
+                     breaks = seq(0, 240, 24), minor_breaks = seq(0, 240, 24),
+                     expand = expansion(mult = c(0, .025))) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic() + 
+  theme(axis.title.y = element_blank())
+jpeg(filename = 'D:/Research/_plots/stochasticCDF.jpg', width = 25/6, height = 5, units = 'in', res = 1024)
+gridExtra::grid.arrange(g1, g2, nrow = 2,
+                        left = grid::textGrob('Cumulative Frequency', rot = 90, vjust = 0.5))
+  
+
+ecdf(catalog$IVT_max)
+  
+
+AR$V1 <- rank(pgumbel(q = AR$IVT_max, loc = param_IVT[1], scale = param_IVT[2]))
+AR$V2 <- rank(plnorm(q = AR$duration, meanlog = param_duration[1], sdlog = param_duration[2]))
+AR$rank <- rowMeans(cbind(AR$V1, AR$V2))
+# dz <- 1/0.25
+# AR$group <- rep(1:(nrow(AR)/dz), each = dz)
+# AR_max <- AR %>%
+#   group_by(group) %>%
+#   summarize(index = which.max(rank), IVT_max = IVT_max[index], duration = duration[index])
+AR_max <- AR %>%
+  filter(rank >= 0.9*nrow(.))
+
+```
+

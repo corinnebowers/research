@@ -1,0 +1,311 @@
+---
+title: "comparing NFIP vs. SHELDUS"
+author: "Corinne"
+date: "3/13/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+root <- 'D:/Research'
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+# require(reshape2)
+# require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+# require(stringr)
+# require(ncdf4)
+require(lubridate)
+# require(velox)
+# require(units)
+require(rnoaa)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r import NFIP data}
+## NFIP data
+## redacted claims: https://www.fema.gov/media-library/assets/documents/180374
+## redacted policies: https://www.fema.gov/media-library/assets/documents/180376
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+```
+
+```{r convert claims to damages}
+## start with old penetration numbers
+penetration <- policies %>%
+  group_by(censustract) %>%
+  rename(GEOID = censustract) %>%
+  subset(year(policyeffectivedate) <= 2018) %>%
+  summarize(years = length(unique(year(policyeffectivedate))),
+            num_policies = Sum(counter)/years, 
+            value_policies = (Sum(totalbuildinginsurancecoverage) + Sum(totalcontentsinsurancecoverage))/years)
+
+housing <- read.csv('./_data/ACS/ACS_housing.csv', strip.white = TRUE)
+penetration <- right_join(penetration, data.frame(GEOID = housing$GEO.id2, HOUSES = housing$HC01_VC03, SFH = housing$HC01_VC14), 
+                          by = 'GEOID')
+penetration$num_policies[is.na(penetration$num_policies)] <- 0
+penetration$value_policies[is.na(penetration$value_policies)] <- 0
+
+penetration$penetration <- penetration$num_policies/penetration$HOUSES
+penetration$penetration[is.nan(penetration$penetration)] <- 0
+penetration$penetration[is.infinite(penetration$penetration)] <- 1
+
+claims <- inner_join(claims, data.frame(censustract = penetration$GEOID, penetration = penetration$penetration), 
+                     by = 'censustract')
+claims$damage <- apply(cbind(claims$amountpaidonbuildingclaim, claims$amountpaidoncontentsclaim), 1, Sum) / claims$penetration
+claims$damage[is.nan(claims$damage)] <- 0
+
+```
+
+```{r read in SHELDUS raw data}
+sheldus <- read.csv('./_data/SHELDUS/SHELDUS Sonoma.csv')
+
+## keep only flooding events
+# sheldus <- sheldus %>%
+#   subset(1:nrow(sheldus) %in% grep('flood', sheldus$Hazard, ignore.case = TRUE) | 
+#            1:nrow(sheldus) %in% grep('rain', Remarks, ignore.case = TRUE))
+sheldus <- sheldus %>%
+  subset(Hazard_Simple == 'Flooding' | Hazard_Simple == 'Flash Flood')
+
+## combine events into one row
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+sheldus_events <- sheldus %>%
+  group_by(StartDate) %>%
+  summarize(duration = mean(Duration_Days), 
+            loss = Sum(PropertyDmg), 
+            hazard = getmode(paste(Hazard_Simple)))
+sheldus_events$StartDate <- mdy(paste(sheldus_events$StartDate))
+sheldus_events$EndDate <- sheldus_events$StartDate + days(sheldus_events$duration) - 1
+sheldus_events <- sheldus_events[order(sheldus_events$StartDate),]
+sheldus_events$id <- 1
+
+eventid <- 1
+for (i in 2:(nrow(sheldus_events))) {
+  if (sheldus_events$EndDate[i-1]+1 < sheldus_events$StartDate[i]) {
+    eventid <- eventid + 1
+  }
+  sheldus_events$id[i] <- eventid
+}
+sheldus_events <- sheldus_events %>%
+  group_by(id) %>%
+  summarize(StartDate = min(StartDate), 
+            EndDate = max(EndDate), 
+            duration = toNumber(EndDate - StartDate + 1), 
+            loss = Sum(loss), 
+            hazard = getmode(paste(hazard)))
+
+```
+
+```{r match claims to raw SHELDUS events}
+claims_sonoma <- claims %>% subset(countycode == 6097) %>% subset(is.finite(damage))
+
+sheldus_events$claims_loss <- 0
+for (i in 1:nrow(sheldus_events)) {
+  sheldus_events$claims_loss[i] <- claims_sonoma %>% 
+    subset(dateofloss >= sheldus_events$StartDate[i] & dateofloss <= sheldus_events$EndDate[i]) %>% 
+    summarize(claims_loss = Sum(damage)) %>% toNumber
+}
+
+sheldus_events$loss <- sheldus_events$loss + 1
+sheldus_events$claims_loss <- sheldus_events$claims_loss + 1
+g <- ggplot() + 
+  geom_point(data = sheldus_events, aes(x = loss/1e6, y = claims_loss/1e6)) + 
+  geom_line(data = data.frame(index = c(seq(0,0.9,0.1), 1:(max(sheldus_events$claims_loss)/1e6))), 
+            aes(x = index, y = index), linetype = 'dashed') + 
+  labs(x = 'SHELDUS Loss ($millions)', y = 'NFIP Loss ($millions)') + 
+  coord_fixed(ratio = 1)
+# bound <- 0.5
+# g + geom_rect(aes(xmin = 0, xmax = 10, ymin = 0, ymax = 10), color = 'red', fill = NA)
+# g + geom_rect(aes(xmin = 0, xmax = bound, ymin = 0, ymax = bound), color = 'red', fill = NA) + 
+#   lims(x = c(0, 10), y = c(0, 10))
+# g + lims(x = c(0, bound), y = c(0, bound))
+
+ggplot() + 
+  geom_point(data = sheldus_events, aes(x = loss/1e6, y = claims_loss/1e6, color = hazard)) + 
+  geom_line(data = data.frame(index = c(seq(0,0.9,0.1), 1:(max(sheldus_events$claims_loss)/1e6))), 
+            aes(x = index, y = index), linetype = 'dashed') + 
+  labs(x = 'SHELDUS Loss ($millions)', y = 'NFIP Loss ($millions)') + 
+  coord_fixed(ratio = 1) + 
+  scale_x_log10() + scale_y_log10()
+
+g1 <- ggplot(data = sheldus_events) + 
+  geom_histogram(aes(x = loss/1e6), color = 'black', fill = 'white') + 
+  ggtitle('SHELDUS Losses ($millions)') + 
+  theme(axis.title.x = element_blank()) +
+  scale_x_log10(limits = c(NA, 1e3), breaks = 10^(-7:3), minor_breaks = 10^(-7:3)) + 
+  scale_y_continuous(name = 'Count', limits = c(0,25))
+g2 <- ggplot(data = sheldus_events) + 
+  geom_histogram(aes(x = claims_loss/1e6), color = 'black', fill = 'white') + 
+  ggtitle('NFIP Losses ($millions)') + 
+  theme(axis.title.x = element_blank()) +
+  scale_x_log10(limits = c(NA, 1e3), breaks = 10^(-7:3), minor_breaks = 10^(-7:3)) + 
+  scale_y_continuous(name = 'Count', limits = c(0,25))
+gridExtra::grid.arrange(g1, g2, nrow = 2)
+
+```
+
+```{r look at SHELDUS events with no NFIP loss}
+sheldus_events %>% subset(loss > 1 & claims_loss == 1)
+
+## get precipitation for all events
+sheldus_events$precip <- 0
+pb <- txtProgressBar(min = 0, max = nrow(sheldus_events), style = 3)
+for (i in 1:nrow(sheldus_events)) {
+  ## define input variables
+  start <- sheldus_events$StartDate[i] - days(1)
+  end <- sheldus_events$EndDate[i] + days(1)
+  storm <- gsub('-', '', seq(start, end, 'days'))
+  
+  if (year(start) < 1982) {
+    ## pre-1982: use rNOAA data
+    rain_stack <- raster::stack()
+    for (d in storm) {
+      precip <- cpc_prcp(date = start, us = TRUE)
+      precip$lon <- precip$lon - 360
+      precip <- rasterFromXYZ(precip, crs = st_crs(california))
+      rain_stack <- raster::stack(rain_stack, precip)
+      # rain_total <- rain_total + raster::extract(precip, sonoma, fun = mean)
+    }
+  } else {
+    raster_name <- paste0('./_data/PRISM/', year(ymd(storm)), '/PRISM_ppt_stable_4kmD2_', storm, '_bil.bil')
+    rain_stack <- raster::stack(raster_name)
+    # rain_total <- raster::extract(sum(rain_stack), sonoma, weights = TRUE, normalizeWeights = TRUE) %>%
+    #   as.data.frame %>% mutate(portion = value*weight) %>% summarize(x = Sum(portion)) %>% as.numeric
+  }
+  rain_total <- raster::extract(sum(rain_stack), sonoma, weights = TRUE, normalizeWeights = TRUE) %>%
+    as.data.frame %>%
+    subset(value >= 0) %>%
+    mutate(portion = value*weight) %>%
+    summarize(x = Sum(portion)) %>%
+    as.numeric
+  
+  sheldus_events$precip[i] <- rain_total    
+  setTxtProgressBar(pb, i)
+}
+sheldus_events$precip <- sheldus_events$precip / 25.4  #convert to inches
+
+# precip_compare <- sheldus_events$precip
+# cbind(precip_compare, sheldus_events$precip)
+
+ggplot() + 
+  geom_point(data = sheldus_events, aes(x = loss, y = claims_loss, color = precip)) + 
+  geom_line(data = data.frame(index = c(seq(0,0.9,0.1), 1:(max(sheldus_events$claims_loss)/1e6))*1e6), 
+            aes(x = index, y = index), linetype = 'dashed') + 
+  labs(x = 'SHELDUS Loss ($millions)', y = 'NFIP Loss ($millions)') + 
+  scale_x_log10() + scale_y_log10() + 
+  coord_fixed(ratio = 1)
+
+g1 <- ggplot(data = sheldus_events) + 
+  geom_point(aes(x = precip, y = loss)) + 
+  scale_y_log10() + 
+  ggtitle('') + 
+  labs(x = 'Storm Precipitation Total (inches)', y = 'SHELDUS Loss')
+g2 <- ggplot(data = sheldus_events) + 
+  geom_point(aes(x = precip, y = claims_loss)) + 
+  scale_y_log10() + 
+  ggtitle('') + 
+  labs(x = 'Storm Precipitation Total (inches)', y = ' NFIP Loss')
+gridExtra::grid.arrange(g1, g2, ncol = 2)
+
+g1 <- ggplot(data = sheldus_events) + 
+  geom_point(aes(x = StartDate, y = loss)) + 
+  scale_y_log10() + 
+  ggtitle('') + 
+  labs(x = 'Date', y = 'SHELDUS Loss')
+g2 <- ggplot(data = sheldus_events) + 
+  geom_point(aes(x = StartDate, y = claims_loss)) + 
+  scale_y_log10() + 
+  ggtitle('') + 
+  labs(x = 'Date', y = ' NFIP Loss')
+gridExtra::grid.arrange(g1, g2, ncol = 2)
+
+
+```
+
+
+```{r read in SHELDUS aggregated data}
+agg <- read.csv('C:/Users/cbowers/Desktop/SHELDUS Sonoma aggregate.csv')
+agg <- agg %>% 
+  subset(Hazard %in% c('Flooding', 'Winter Weather', 'Severe Storm/Thunder Storm')) %>% 
+  group_by(Year, Month) %>%
+  summarize(loss = Sum(PropertyDmg))
+
+sheldus_agg <- claims_sonoma %>%
+  group_by(Year = year(dateofloss), Month = month(dateofloss)) %>%
+  summarize(claims_loss = Sum(damage)) %>%
+  full_join(agg, by = c('Year', 'Month'))
+sheldus_agg$loss[is.na(sheldus_agg$loss)] <- 0
+sheldus_agg$claims_loss[is.na(sheldus_agg$claims_loss)] <- 0
+sheldus_agg <- sheldus_agg %>% subset(loss + claims_loss > 0)
+
+sheldus_agg$loss <- sheldus_agg$loss + 1
+sheldus_agg$claims_loss <- sheldus_agg$claims_loss + 1
+g <- ggplot() + 
+  geom_point(data = sheldus_agg, aes(x = loss/1e6, y = claims_loss/1e6)) + 
+  geom_line(data = data.frame(index = c(seq(0,0.9,0.1), 1:(max(sheldus_agg$claims_loss)/1e6))), 
+            aes(x = index, y = index), linetype = 'dashed') + 
+  labs(x = 'SHELDUS Loss ($millions)', y = 'NFIP Loss ($millions)') + 
+  coord_fixed(ratio = 1)
+
+bound <- 1
+g + geom_rect(aes(xmin = 0, xmax = 10, ymin = 0, ymax = 10), color = 'red', fill = NA)
+g + geom_rect(aes(xmin = 0, xmax = bound, ymin = 0, ymax = bound), color = 'red', fill = NA) + 
+  lims(x = c(0, 10), y = c(0, 10))
+g + lims(x = c(0, bound), y = c(0, bound))
+
+g + scale_x_log10() + scale_y_log10()
+
+g1 <- ggplot(data = sheldus_agg) + 
+  geom_histogram(aes(x = loss/1e6), color = 'black', fill = 'white') + 
+  ggtitle('SHELDUS Losses ($millions)') + 
+  theme(axis.title.x = element_blank()) +
+  scale_x_log10(limits = c(NA, 1e3), breaks = 10^(-7:3), minor_breaks = 10^(-7:3)) + 
+  scale_y_continuous(name = 'Count', limits = c(0,60))
+g2 <- ggplot(data = sheldus_agg) + 
+  geom_histogram(aes(x = claims_loss/1e6), color = 'black', fill = 'white') + 
+  ggtitle('NFIP Losses ($millions)') + 
+  theme(axis.title.x = element_blank()) +
+  scale_x_log10(limits = c(NA, 1e3), breaks = 10^(-7:3), minor_breaks = 10^(-7:3)) + 
+  scale_y_continuous(name = 'Count', limits = c(0,60))
+gridExtra::grid.arrange(g1, g2, nrow = 2)
+
+```
+

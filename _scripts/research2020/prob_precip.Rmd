@@ -1,0 +1,1418 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "4/23/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+require(rnoaa)
+require(quantreg)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## common geometries
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class = 'sf')
+
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r}
+## start with NOAA precipitation b/c it's easier
+
+## plot IVT vs. precipitation
+load('./_data/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8)
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+## instead of resampling the rasters, do the analysis at a watershed level
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp')
+
+df <- array(data = NA, dim = c(nrow(wbd10), length(datelist), 2))
+Mean <- function(x) ifelse(is.nan(mean(x, na.rm = TRUE)), NA, mean(x, na.rm = TRUE))
+pb <- txtProgressBar(min = 0, max = length(datelist), style = 3)
+for (i in 1:length(datelist)) {
+  d <- datelist[i]
+  
+  # precipitation
+  precip <- cpc_prcp(date = paste(d), us = TRUE)
+  precip[precip$precip < 0, 'precip'] <- NA
+  precip$lon <- precip$lon-360
+  precip_raster <- rasterFromXYZ(precip, crs = st_crs(california)$proj4string)
+  
+  # IVT
+  IVT_raster <- apply(IVT[,,hourlist==d], c(1,2), Max)
+  IVT_raster <- raster(IVT_raster, xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT), 
+                       crs = st_crs(california)$proj4string)
+  
+  df[,i,1] <- velox(precip_raster)$extract(wbd10, small = TRUE) %>% lapply(Mean) %>% unlist
+  df[,i,2] <- velox(IVT_raster)$extract(wbd10, small = TRUE) %>% lapply(Mean) %>% unlist
+  
+  setTxtProgressBar(pb, i)
+}
+
+precip.df <- data.frame(t(df[,,1]))
+names(precip.df) <- wbd10$HUC10
+precip.df <- cbind(precip.df, DATE = datelist)
+precip.df <- melt(precip.df, id.vars = 'DATE', variable.name = 'HUC10', value.name = 'precip')
+
+IVT.df <- data.frame(t(df[,,2]))
+names(IVT.df) <- wbd10$HUC10
+IVT.df <- cbind(IVT.df, DATE = datelist)
+IVT.df <- melt(IVT.df, id.vars = 'DATE', variable.name = 'HUC10', value.name = 'IVT')
+
+df <- full_join(precip.df, IVT.df, by = c('DATE', 'HUC10'))
+pb <- txtProgressBar(min = 0, max = nrow(wbd10), style = 3)
+for (i in 1:nrow(wbd10)) {
+  df_subset <- df[df$HUC10 == wbd10$HUC10[i],]
+  df[df$HUC10 == wbd10$HUC10[i], 'precip.q'] <-
+    order(df_subset$precip)/(nrow(df_subset)+1)
+  df[df$HUC10 == wbd10$HUC10[i], 'IVT.q'] <-
+    order(df_subset$IVT)/(nrow(df_subset)+1)
+  setTxtProgressBar(pb, i)
+}
+
+ggplot(data = df) + 
+  geom_point(aes(x = IVT, y = precip, color = IVT.q)) + 
+  scale_color_viridis_c()
+
+ggplot(data = df) + 
+  geom_point(aes(x = IVT.q, y = precip.q))
+
+ggplot(data = aggregate(precip ~ IVT.q + precip.q, data = df, length)) + 
+  geom_raster(aes(x = IVT.q, y = precip.q, fill = precip)) + 
+  scale_fill_viridis_c(direction = -1) + 
+  coord_fixed(ratio = 1)
+
+```
+
+```{r}
+## plot wbd10 vs. MERRA grid cells 
+wbd_aoi <- wbd10[st_intersects(california %>% subset(NAME == 'Sonoma'), wbd10, sparse = FALSE) %>% drop,]
+ggplot() + 
+  geom_sf(data = california, color = 'gray70', fill = NA) + 
+  geom_sf(data = USA %>% subset(NAME == 'California'), color = 'grey40', fill = NA) +
+  geom_sf(data = california %>% subset(NAME == 'Sonoma'), fill = 'gray75', alpha = 0.25) +
+  geom_sf(data = wbd_aoi, color = 'gray30', fill = NA) + 
+  scale_x_continuous(breaks = LON, limits = c(-124, -121)) +
+  scale_y_continuous(breaks = LAT, limits = c(37, 40)) + 
+  theme(panel.grid = element_line(color = ggcolor(2)[2]))
+
+```
+
+
+```{r}
+# ## try out HEC-HMS
+# 
+# ## start with a gage
+# siteNumber <- '11467000'
+# startDate <- '1980-01-01'
+# endDate <- ''
+# 
+# param <- c('00060', '00065')
+# names(param) <- c('discharge_cfs', 'gageht_ft')
+# statcode <- c('00001', '00002', '00003', '00008')
+# names(statcode) <- c('max', 'min', 'mean', 'median')
+# 
+# ## get raw daily streamflow data
+# daily <- readNWISdv(siteNumbers = siteNumber, parameterCd = param, statCd = statcode,
+#                     startDate = startDate, endDate = endDate)
+# daily <- renameNWISColumns(daily)
+# 
+# monthlist <- 1:12
+# names(monthlist) <- c('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+# daily$HECdate <- paste0(formatC(day(daily$Date), width = 2, flag = '0'), 
+#                         names(monthlist)[month(daily$Date)],
+#                         year(daily$Date))
+
+```
+
+```{r}
+## restart
+
+## 1. find a record of ARs by grid cell
+# datelist <- seq(ymd('1980-01-01'), ymd('2019-12-31'), 'days')
+# hourlist <- rep(datelist, each = 8)
+# LON <- seq(-110, -125, -0.625)
+# LAT <- seq(32.5, 42, 0.5)
+# 
+# ar_grid <- list()
+# step <- 1
+# threshold <- 20 #lower bound for number of ARs
+# tracker <- data.frame(lat = NA, lon = NA, step = NA, AR = NA)
+# timer <- Sys.time()
+# pb <- txtProgressBar(min = 0, max = length(LON)*length(LAT), style = 3)
+# setTxtProgressBar(pb, 0)
+# for (lon in 1:length(LON)) {
+#   for (lat in 1:length(LAT)) {
+#     ## read data
+#     filename <- paste('http://www.inscc.utah.edu/~rutz/ar_catalogs/merra_0.5/timeseries/ivt_ar_',
+#                       format(round(LON[lon], 3), nsmall = 3), 'E_',
+#                       format(round(LAT[lat], 3), nsmall = 3), 'N.txt', sep = '')
+#     file <- read.table(filename, skip = 1, header = FALSE)
+#     names(file) <- c('YEAR', 'MONTH', 'DAY', 'HOUR', 'IVT', 'AR', 'AR_new',
+#                      'AR_duration', 'IVT_total')
+# 
+#     if (sum(file$AR_new) > threshold) {
+#       ## get a list of all ARs within the given grid cell
+#       ar_list <- data.frame(start_date = NA, start_hour = NA, end_date = NA,
+#                             end_hour = NA, IVT_max = NA, IVT_total = NA)
+#       ar_index <- which(file$AR_new == 1)
+#       for (id in 1:length(ar_index)) {
+#         id_start <- ar_index[id]
+#         id_end <- which(file$IVT_total[id_start:nrow(file)] == 0)[1] + id_start - 2
+#         ar_list[id, 'start_date'] <- paste(file$YEAR[id_start],
+#                                            file$MONTH[id_start],
+#                                            file$DAY[id_start], sep = '-')
+#         ar_list[id, 'end_date'] <- paste(file$YEAR[id_end], file$MONTH[id_end],
+#                                          file$DAY[id_end], sep = '-')
+#         ar_list[id, 'start_hour'] <- file$HOUR[id_start]
+#         ar_list[id, 'end_hour'] <- file$HOUR[id_end]
+#         ar_list[id, 'IVT_max'] <- max(file$IVT[id_start:id_end])
+#         ar_list[id, 'IVT_total'] <- file$IVT_total[id_end]
+#       }
+#       ## add duration column (hours)
+#       ar_list$duration <- (ymd_h(paste(ar_list$end_date, ar_list$end_hour)) -
+#         ymd_h(paste(ar_list$start_date, ar_list$start_hour))) %>% as.numeric(units = 'hours')
+# 
+#       ## get rid of weak, short-duration ARs
+#       ar_list <- ar_list[ar_list$IVT_total >= 1.08,]
+# 
+#       ## get rid of grid cells with few ARs
+#       if(nrow(ar_list) >= threshold) {
+#         ar_grid[[step]] <- ar_list
+#       } else {
+#         ar_grid[[step]] <- NA
+#       }
+#     } else {
+#       ar_grid[[step]] <- NA
+#     }
+# 
+#     ## update tracker
+#     tracker[step,] <- c(LAT[lat], LON[lon], step, nrow(ar_list))
+#     step <- step + 1
+#     setTxtProgressBar(pb, step)
+#   }
+# }
+# Sys.time() - timer
+# close(pb)
+# 
+# save(ar_grid, ar_list, tracker, file = './_data/prob_precip.Rdata')
+
+load('./_data/prob_precip.Rdata')
+
+```
+
+```{r lambda(AR)}
+# ## check extent of what the loop was able to cover
+# ggplot(data = tracker) + 
+#   geom_raster(aes(x = lon, y = lat)) + 
+#   geom_sf(data = USA, fill = 'pink', alpha = 0.5) + 
+#   lims(x = c(min(tracker$lon), max(tracker$lon)), y = c(min(tracker$lat), max(tracker$lat)))
+
+## clip tracker to california
+tracker.raster <- tracker[,c(2,1,3,4)]
+tracker.raster <- rasterFromXYZ(tracker.raster, crs = st_crs(california)$proj4string) 
+tracker.id <- rasterize(california, tracker.raster, getCover = TRUE) %>% 
+  as.data.frame(xy = TRUE) %>% 
+  subset(layer > 0) %>% 
+  left_join(tracker, by = c('x'='lon', 'y'='lat')) %>% 
+  select(step) %>% 
+  unlist %>% unname %>% sort
+tracker.id <- tracker.id[!(tracker.id %in% c(827,1185))]  ## these ones cause issues
+ggplot(data = tracker[tracker$step %in% tracker.id,]) + 
+  geom_raster(aes(x = lon, y = lat)) + 
+  geom_sf(data = USA, fill = 'pink', alpha = 0.5) + 
+  lims(x = c(min(tracker$lon), max(tracker$lon)), y = c(min(tracker$lat), max(tracker$lat)))
+
+## create graph of lambda(AR)
+ggplot(data = tracker[tracker$step %in% tracker.id,]) + 
+  geom_raster(aes(x = lon, y = lat, fill = AR/40)) +
+  geom_sf(data = california, fill = NA) + 
+  scale_fill_viridis_c(na.value = NA) + 
+  ggtitle('AR Frequency in California') + 
+  labs(x = '', y = '', fill = 'ARs/year') + 
+  lims(x = c(-125,-113), y = c(31,43)) + 
+  theme_void()
+
+tracker[tracker$lat == 32.5 & tracker$lon == -115,]
+
+## pick a grid cell
+ggplot(data = tracker[tracker$step %in% tracker.id,]) + 
+  geom_raster(aes(x = lon, y = lat, fill = step==827), show.legend = FALSE) +
+  geom_sf(data = california, fill = NA) + 
+  lims(x = c(-125,-113), y = c(31,43)) +
+  scale_fill_manual(values = c('gray95', ggcolor(2)[1])) + 
+  theme_void()
+
+ggplot() + 
+  geom_sf(data = wbd6, color = 'gray95', fill = 'gray95') +
+  geom_sf(data = wbd8 %>% subset(OBJECTID %in% c(11:13)), 
+          color = NA, fill = ggcolor(2)[1]) + 
+  geom_sf(data = california, fill = NA) + 
+  theme_void()
+
+mapview::mapview(tracker.raster$step)
+
+tracker[tracker$step %in% tracker.id,] %>% select(lat, lon) %>% summary
+
+```
+
+
+```{r}
+## create an IDF curve for AR intensity & duration
+ar_list <- ar_grid[[1503]]
+
+## plot histograms of IVT & duration
+ggplot(data = ar_list) + 
+  geom_histogram(aes(x = IVT_max), color = 'black', fill = 'white', 
+                 bins = sqrt(nrow(ar_list))) + 
+  ggtitle('Max IVT') + theme(axis.title = element_blank())
+ggplot(data = ar_list) + 
+  geom_histogram(aes(x = duration), color = 'black', fill = 'white', 
+                 bins = sqrt(nrow(ar_list))) + 
+  ggtitle('Duration') + theme(axis.title = element_blank())
+
+```
+
+
+```{r P(AR)}
+## plot storm exceedance totals
+IVT_seq <- seq(0, max(ar_list$IVT_max)+50, 10)
+dur_seq <- seq(0, max(ar_list$duration)+5, 1)
+exceed <- matrix(nrow = length(IVT_seq), ncol = length(dur_seq))
+for (i in 1:length(IVT_seq)) {
+  for (j in 1:length(dur_seq)) {
+    exceed[i,j] <- ar_list[ar_list$IVT_max >= IVT_seq[i] & 
+                             ar_list$duration >= dur_seq[j],] %>% nrow
+  }
+}
+exceed <- data.frame(exceed)
+names(exceed) <- dur_seq
+exceed <- cbind(IVT = IVT_seq, exceed)
+exceed <- melt(exceed, id.vars = 'IVT', variable.name = 'duration', 
+               value.name = 'freq')
+exceed$duration <- toNumber(exceed$duration)
+
+ggplot() + 
+  geom_raster(data = exceed, aes(x = IVT, y = duration, fill = freq/40)) +
+  ggtitle('Storm Exceedance Totals') +
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)', 
+       fill = 'Storms/year') +
+  coord_fixed(ratio = 8) +
+  scale_fill_viridis_c()
+
+
+## add rugs on the edges
+g1 <- ggplot(data = ar_list) +
+  geom_histogram(aes(x = duration), color = 'black', fill = 'white', 
+                 bins = sqrt(nrow(ar_list))) +
+  theme_classic() + 
+  labs(x = 'Storm Duration (hrs)') + 
+  theme(axis.text.x = element_text(color = 'white'), axis.ticks.x = element_blank(), 
+        axis.line.x = element_line(color = 'white'), axis.title.x = element_blank()) + 
+  coord_flip()
+g2 <- ggplot() + 
+  geom_raster(data = exceed, aes(x = IVT, y = duration, fill = freq/40)) +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), 
+        axis.title.x = element_blank(), axis.text.x = element_blank()) + 
+  labs(fill = 'Storms/year') +
+  scale_fill_viridis_c()
+g3 <- ggplot() + theme_void()
+g4 <- ggplot(data = ar_list) +
+  geom_histogram(aes(x = IVT_max, alpha = '0'), color = 'black', fill = 'white', 
+                 bins = sqrt(nrow(ar_list)), show.legend = TRUE) +
+  theme_classic() + 
+  theme(axis.text.y = element_text(color = 'white'), axis.ticks.y = element_blank(), 
+        axis.line.y = element_line(color = 'white'), axis.title.y = element_blank()) + 
+  labs(x = 'Max IVT (kg/m/s)', alpha = 'Storms/year')
+
+gridExtra::grid.arrange(g1, g2, g3, g4, heights = c(3.5,1), widths = c(1,4),
+                        top = grid::textGrob('Storm Exceedance Totals'))
+
+
+## add category lines to the plot
+IVT_breaks <- seq(250, 1250, 250) + 125
+duration_breaks <- seq(0, 48, 24) + 12
+df <- expand.grid(IVT = IVT_breaks, duration = duration_breaks)
+ARcat <- function(IVT, duration) {
+  if (duration >= 48) {
+    return(ifelse(IVT >= 1000, 5, 
+                  ifelse(IVT >= 750, 4, 
+                         ifelse(IVT >= 500, 3, 2))))
+  } else if (duration >= 24) {
+    return(ifelse(IVT >= 1250, 5, 
+                  ifelse(IVT >= 1000, 4, 
+                         ifelse(IVT >= 750, 3, 
+                                ifelse(IVT >= 500, 2, 1)))))
+  } else {
+    return(ifelse(IVT >= 1250, 4, 
+                  ifelse(IVT >= 1000, 3, 
+                         ifelse(IVT >= 750, 2, 
+                                ifelse(IVT >= 500, 1, 0)))))
+  }
+}
+for (i in 1:nrow(df)) {df$cat[i] <- ARcat(df$IVT[i], df$duration[i])}
+# ggplot(data = df) + 
+#   geom_raster(aes(x = duration, y = IVT, fill = factor(cat))) + 
+#   geom_text(aes(x = duration, y = IVT, label = paste0('Cat ', cat))) + 
+#   scale_x_continuous(breaks = duration_breaks - 12) + 
+#   scale_y_continuous(breaks = IVT_breaks - 125) + 
+#   scale_fill_brewer(palette = 'Spectral', direction = -1)
+
+ggplot() + 
+  geom_raster(data = exceed, aes(x = IVT, y = duration, fill = freq/40)) +
+  ggtitle('Storm Exceedance Totals') +
+  labs(x = 'Max Storm IVT (kg/m/s)', y = 'Storm Duration (hrs)', fill = 'Storms/year') +
+  coord_fixed(ratio = 8) +
+  scale_fill_viridis_c() + 
+  geom_hline(yintercept = duration_breaks + 12, linetype = 'dashed') + 
+  geom_vline(xintercept = IVT_breaks + 125, linetype = 'dashed') + 
+  ggnewscale::new_scale('fill') + 
+  geom_label(data = df, aes(x = IVT, y = duration, 
+                            label = paste0('Cat ', cat), fill = factor(cat)),
+             fontface = 'bold', show.legend = FALSE) +
+  scale_fill_brewer(palette = 'Spectral', direction = -1) +
+  lims(x = range(ar_list$IVT_max), y = c(0, 84))
+
+```
+
+```{r empirical copulas}
+# ## explore copulas
+# z <- rnorm(1e6)
+# u <- pnorm(z)
+# hist(u)
+# 
+# x <- qgamma(u, shape = 2, rate = 1)
+# hist(x)
+
+## generate an empirical copula for IVT and duration
+
+## find inverse CDFs
+ggplot(data = ar_list) + 
+  geom_step(aes(x = (1:nrow(ar_list))/nrow(ar_list), y = sort(IVT_max), 
+                color = 'Max IVT'), size = 1, show.legend = FALSE) + 
+  geom_step(aes(x = (1:nrow(ar_list))/nrow(ar_list), y = sort(duration*10)+250, 
+                color = 'Duration'), size = 1, show.legend = FALSE) + 
+  labs(x = 'Cumulative Probability') +
+  scale_y_continuous(name = 'Max IVT (kg/m/s)', 
+                     sec.axis = sec_axis(~(.-250)/10, name = 'Duration (hrs)')) + 
+  theme(axis.text.y.left = element_text(color = ggcolor(2)[2]), 
+        axis.title.y.left = element_text(color = ggcolor(2)[2]), 
+        axis.text.y.right = element_text(color = ggcolor(2)[1]),
+        axis.title.y.right = element_text(color = ggcolor(2)[1]))
+
+## find spearman rank coefficient
+rho_s <- cor.test(ar_list$IVT_max, ar_list$duration, method = 'spearman')$estimate
+
+## convert spearman rank coefficient to linear correlation
+rho = 2*sin(pi*rho_s/6)
+RHO <- matrix(c(1, rho, rho, 1), nrow = 2, ncol = 2)
+
+## generate bivariate normal with R = rho_s
+z <- mvtnorm::rmvnorm(1000, mean = c(0,0), sigma = RHO)
+
+## generate Gaussian copula
+u <- pnorm(z)
+
+## take the inverse empirical CDF of each variable
+IVT_new <- sort(ar_list$IVT_max)[ceiling(u[,1]*nrow(ar_list))]
+duration_new <- sort(ar_list$duration)[ceiling(u[,2]*nrow(ar_list))]
+
+## compare old vs. new distribution
+ggplot(data = ar_list) + 
+  geom_point(aes(x = IVT_max, y = duration)) + 
+  lims(x = c(min(IVT_new), max(ar_list$IVT_max)), y = range(duration_new)) + 
+  ggtitle('Duration vs. Max IVT') + 
+  labs(x = 'Max IVT (kg/m/s)', y = 'Duration (hrs)') + 
+  coord_fixed(ratio = 8)
+
+ggplot(data = data.frame(IVT_new = IVT_new, duration_new = duration_new)) + 
+  geom_point(aes(x = IVT_new, y = duration_new)) + 
+  lims(x = c(min(IVT_new), max(ar_list$IVT_max)), y = range(duration_new)) + 
+  ggtitle('Empirical Distribution') + 
+  labs(x = 'Max IVT (kg/m/s)', y = 'Duration (hrs)') + 
+  coord_fixed(ratio = 8)
+
+car::vif(lm(precip ~ duration + IVT_max, data = ar_list))
+
+cor(ar_list$duration, ar_list$IVT_max)
+```
+
+```{r IVT dist}
+## build another copula, but this time fit distributions 
+
+## fit a distribution to IVT
+x <- ar_list$IVT_max
+dx <- seq(250, 1500, 10)
+i <- (1:nrow(ar_list)-0.5)/nrow(ar_list)
+
+## try lognormal
+sd_lnx <- sqrt(log((sd(x)/mean(x))^2 + 1))
+mu_lnx <- log(mean(x)) - sd_lnx^2/2
+y_lognormal <- dlnorm(dx, meanlog = mu_lnx, sdlog = sd_lnx)
+cdf_lognormal <- plnorm(dx, meanlog = mu_lnx, sdlog = sd_lnx)
+q_lognormal <- qlnorm(i, meanlog = mu_lnx, sdlog = sd_lnx)
+
+## try Gumbel (type I largest)
+require(evd)
+alpha <- pi/(sd(x)*sqrt(6))
+u <- mean(x) - 0.5772/alpha
+y_gumbel <- dgumbel(dx, loc = u, scale = 1/alpha)
+cdf_gumbel <- pgumbel(dx, loc = u, scale = 1/alpha)
+q_gumbel <- qgumbel(i, loc = u, scale = 1/alpha)
+
+## try gamma
+lambda <- mean(x)/sd(x)^2
+k <- lambda*mean(x)
+y_gamma <- dgamma(dx, shape = k, rate = lambda)
+cdf_gamma <- pgamma(dx, shape = k, rate = lambda)
+q_gamma <- qgamma(i, shape = k, rate = lambda)
+
+## try Weibull (type III largest)
+require(fitdistrplus)
+param <- fitdist(x, "weibull")
+kappa <- param$estimate[1]
+lambda <- param$estimate[2]
+y_weibull <- dweibull(dx, shape = kappa, scale = lambda)
+cdf_weibull <- pweibull(dx, shape = kappa, scale = lambda)
+q_weibull <- qweibull(i, shape = kappa, scale = lambda)
+
+## plot PDFs
+ggplot(data = data.frame(dx = dx, lognormal = y_lognormal, gumbel = y_gumbel, 
+                         gamma = y_gamma, weibull = y_weibull)) + 
+  geom_histogram(data = data.frame(x = x), aes(x = x, y = ..density..), 
+                 color = 'black', fill = 'white', bins = sqrt(nrow(ar_list))) + 
+  geom_line(aes(x = dx, y = lognormal, color = 'lognormal'), size = 1) + 
+  geom_line(aes(x = dx, y = gumbel, color = 'gumbel'), size = 1) + 
+  geom_line(aes(x = dx, y = gamma, color = 'gamma'), size = 1) + 
+  geom_line(aes(x = dx, y = weibull, color = 'weibull'), size = 1)
+
+## plot CDFs
+ggplot(data = data.frame(dx = dx, lognormal = cdf_lognormal, gumbel = cdf_gumbel, 
+                         gamma = cdf_gamma, weibull = cdf_weibull)) + 
+  geom_step(data = data.frame(x = x), aes(x = sort(x), y = (1:nrow(ar_list))/nrow(ar_list))) + 
+  geom_line(aes(x = dx, y = lognormal, color = 'lognormal')) + 
+  geom_line(aes(x = dx, y = gumbel, color = 'gumbel')) + 
+  geom_line(aes(x = dx, y = gamma, color = 'gamma')) + 
+  geom_line(aes(x = dx, y = weibull, color = 'weibull'))
+
+## plot Q-Q plots
+g1 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = gamma), color = ggcolor(4)[1]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = gamma, y = gamma), color = 'black', linetype = 'dotted') + 
+  ggtitle('Gamma') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+g2 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = gumbel), color = ggcolor(4)[2]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = gumbel, y = gumbel), color = 'black', linetype = 'dotted') + 
+  ggtitle('Gumbel') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+g3 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = lognormal), color = ggcolor(4)[3]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = lognormal, y = lognormal), color = 'black', linetype = 'dotted') + 
+  ggtitle('Lognormal') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+g4 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = weibull), color = ggcolor(4)[4]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = weibull, y = weibull), color = 'black', linetype = 'dotted') + 
+  ggtitle('Weibull') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+
+gridExtra::grid.arrange(g1, g2, g3, g4, nrow = 2)
+
+
+```
+
+```{r duration dist}
+## fit a distribution to duration 
+
+## fit a distribution to IVT
+x <- ar_list$duration
+dx <- seq(0, 84, 1)
+i <- (1:nrow(ar_list)-0.5)/nrow(ar_list)
+
+## try lognormal
+sd_lnx <- sqrt(log((sd(x)/mean(x))^2 + 1))
+mu_lnx <- log(mean(x)) - sd_lnx^2/2
+y_lognormal <- dlnorm(dx, meanlog = mu_lnx, sdlog = sd_lnx)
+cdf_lognormal <- plnorm(dx, meanlog = mu_lnx, sdlog = sd_lnx)
+q_lognormal <- qlnorm(i, meanlog = mu_lnx, sdlog = sd_lnx)
+
+## try Gumbel (type I largest)
+require(evd)
+alpha <- pi/(sd(x)*sqrt(6))
+u <- mean(x) - 0.5772/alpha
+y_gumbel <- dgumbel(dx, loc = u, scale = 1/alpha)
+cdf_gumbel <- pgumbel(dx, loc = u, scale = 1/alpha)
+q_gumbel <- qgumbel(i, loc = u, scale = 1/alpha)
+
+## try gamma
+lambda <- mean(x)/sd(x)^2
+k <- lambda*mean(x)
+y_gamma <- dgamma(dx, shape = k, rate = lambda)
+cdf_gamma <- pgamma(dx, shape = k, rate = lambda)
+q_gamma <- qgamma(i, shape = k, rate = lambda)
+
+## try Weibull (type III largest)
+library(fitdistrplus)
+param <- fitdist(x, "weibull")
+kappa <- param$estimate[1]
+lambda <- param$estimate[2]
+y_weibull <- dweibull(dx, shape = kappa, scale = lambda)
+cdf_weibull <- pweibull(dx, shape = kappa, scale = lambda)
+q_weibull <- qweibull(i, shape = kappa, scale = lambda)
+
+## plot PDFs
+ggplot(data = data.frame(dx = dx, lognormal = y_lognormal, gumbel = y_gumbel, 
+                         gamma = y_gamma, weibull = y_weibull)) + 
+  geom_histogram(data = data.frame(x = x), aes(x = x, y = ..density..), 
+                 color = 'black', fill = 'white', bins = sqrt(nrow(ar_list))) + 
+  geom_line(aes(x = dx, y = lognormal, color = 'lognormal'), size = 1) + 
+  geom_line(aes(x = dx, y = gumbel, color = 'gumbel'), size = 1) + 
+  geom_line(aes(x = dx, y = gamma, color = 'gamma'), size = 1) + 
+  geom_line(aes(x = dx, y = weibull, color = 'weibull'), size = 1)
+
+## plot CDFs
+ggplot(data = data.frame(dx = dx, lognormal = cdf_lognormal, gumbel = cdf_gumbel, 
+                         gamma = cdf_gamma, weibull = cdf_weibull)) + 
+  geom_step(data = data.frame(x = x), aes(x = sort(x), y = (1:nrow(ar_list))/nrow(ar_list))) + 
+  geom_line(aes(x = dx, y = lognormal, color = 'lognormal')) + 
+  geom_line(aes(x = dx, y = gumbel, color = 'gumbel')) + 
+  geom_line(aes(x = dx, y = gamma, color = 'gamma')) + 
+  geom_line(aes(x = dx, y = weibull, color = 'weibull'))
+
+## plot Q-Q plots
+g1 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = gamma), color = ggcolor(4)[1]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = gamma, y = gamma), color = 'black', linetype = 'dotted') + 
+  ggtitle('Gamma') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+g2 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = gumbel), color = ggcolor(4)[2]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = gumbel, y = gumbel), color = 'black', linetype = 'dotted') + 
+  ggtitle('Gumbel') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+g3 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = lognormal), color = ggcolor(4)[3]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = lognormal, y = lognormal), color = 'black', linetype = 'dotted') + 
+  ggtitle('Lognormal') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+g4 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                               gamma = q_gamma, weibull = q_weibull)) + 
+  geom_point(aes(x = sort(x), y = weibull), color = ggcolor(4)[4]) + 
+  geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+  geom_line(aes(x = weibull, y = weibull), color = 'black', linetype = 'dotted') + 
+  ggtitle('Weibull') + 
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed(ratio = 1)
+
+gridExtra::grid.arrange(g1, g2, g3, g4, nrow = 2)
+
+```
+
+```{r parametric copulas}
+## try them both with Gumbel
+
+## find spearman rank coefficient
+rho_s <- cor.test(ar_list$IVT_max, ar_list$duration, method = 'spearman')$estimate
+
+## convert spearman rank coefficient to linear correlation
+rho = 2*sin(pi*rho_s/6)
+RHO <- matrix(c(1, rho, rho, 1), nrow = 2, ncol = 2)
+
+## generate bivariate normal with R = rho_s
+z <- mvtnorm::rmvnorm(1000, mean = c(0,0), sigma = RHO)
+
+## generate Gaussian copula
+u <- pnorm(z)
+
+## take the inverse Gumbel CDF of each variable
+alpha_IVT <- pi/(sd(ar_list$IVT_max)*sqrt(6))
+u_IVT <- mean(ar_list$IVT_max) - 0.5772/alpha
+alpha_dur <- pi/(sd(ar_list$duration)*sqrt(6))
+u_dur <- mean(ar_list$duration) - 0.5772/alpha
+
+IVT_new <- qgumbel(u[,1], loc = u_IVT, scale = 1/alpha_IVT)
+duration_new <- qgumbel(u[,2], loc = u_dur, scale = 1/alpha_dur)
+
+## compare old vs. new distribution
+ggplot(data = ar_list) + 
+  geom_point(aes(x = IVT_max, y = duration)) + 
+  lims(x = c(min(IVT_new), max(ar_list$IVT_max)), y = range(duration_new))
+
+ggplot(data = data.frame(IVT_new = IVT_new, duration_new = duration_new)) + 
+  geom_point(aes(x = IVT_new, y = duration_new)) + 
+  lims(x = c(min(IVT_new), max(ar_list$IVT_max)), y = range(duration_new)) + 
+  ggtitle('Gumbel Distribution') + 
+  labs(x = 'Max IVT (kg/m/s)', y = 'Duration (hrs)') + 
+  coord_fixed(ratio = 8)
+
+
+```
+
+
+```{r statewide gumbel}
+## fit parameters for gumbel across the entire state
+dist.fit <- data.frame(id = tracker.id, IVT_beta = NA, IVT_u = NA, dur_muln = NA, dur_sdln = NA)
+step <- 1
+pb <- txtProgressBar(min = 0, max = length(tracker.id), style = 3)
+for (i in tracker.id) {
+  ar_list <- ar_grid[[i]]
+  dist.fit[step, 'IVT_beta'] <- (sd(ar_list$IVT_max)*sqrt(6))/pi
+  dist.fit[step, 'IVT_u'] <- mean(ar_list$IVT_max) - 0.5772*dist.fit[step, 'IVT_beta']
+  dist.fit[step, 'dur_sdln'] <- sqrt(log((sd(ar_list$duration)/mean(ar_list$duration))^2 + 1))
+  dist.fit[step, 'dur_muln'] <- log(mean(ar_list$duration)/exp(dist.fit[step, 'dur_sdln']^2/2))
+  step <- step + 1
+  setTxtProgressBar(pb, step)
+}
+tracker.dist <- tracker %>% right_join(dist.fit, by = c('step' = 'id')) 
+  
+g1 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = IVT_u)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g2 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = IVT_beta)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g3 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = dur_muln)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g4 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = dur_sdln)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+gridExtra::grid.arrange(g1, g2, g3, g4, nrow = 2)
+
+## pull gumbel parameters by watershed
+dist.raster <- rasterFromXYZ(tracker.dist[,c(2,1,3:ncol(tracker.dist))], crs = st_crs(wbd6)$proj4string)
+wbd6$IVT_beta <- velox(dist.raster$IVT_beta)$extract(wbd6, small = TRUE) %>% lapply(Mean) %>% unlist
+wbd6$IVT_u <- velox(dist.raster$IVT_u)$extract(wbd6, small = TRUE) %>% lapply(Mean) %>% unlist
+wbd6$dur_muln <- velox(dist.raster$dur_muln)$extract(wbd6, small = TRUE) %>% lapply(Mean) %>% unlist
+wbd6$dur_sdln <- velox(dist.raster$dur_sdln)$extract(wbd6, small = TRUE) %>% lapply(Mean) %>% unlist
+
+g1 <- ggplot() + 
+  geom_sf(data = wbd6, aes(fill = IVT_u)) +
+  geom_sf(data = USA %>% subset(NAME == 'California'), color = 'black', fill = NA) + 
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g2 <- ggplot() + 
+  geom_sf(data = wbd6, aes(fill = IVT_beta)) +
+  geom_sf(data = USA %>% subset(NAME == 'California'), color = 'black', fill = NA) + 
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g3 <- ggplot() + 
+  geom_sf(data = wbd6, aes(fill = dur_muln)) +
+  geom_sf(data = USA %>% subset(NAME == 'California'), color = 'black', fill = NA) + 
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g4 <- ggplot() + 
+  geom_sf(data = wbd6, aes(fill = dur_sdln)) +
+  geom_sf(data = USA %>% subset(NAME == 'California'), color = 'black', fill = NA) + 
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+gridExtra::grid.arrange(g1, g2, g3, g4, nrow = 2)
+
+```
+
+```{r}
+## gumbel goodness of fit: try the Kolmogorov-Smirnov test
+require(evd)
+
+step <- 1
+pb <- txtProgressBar(min = 0, max = length(tracker.id), style = 3)
+fit <- data.frame(id = tracker.id, IVT = NA, duration = NA)
+for (i in tracker.id) {
+  ar_list <- ar_grid[[i]]
+  d_crit <- 1.36/sqrt(nrow(ar_list))
+  
+  x <- sort(ar_list$duration + rnorm(length(x), sd = 2))
+  cdf_x <- (1:length(x))/(length(x)+1)
+  sd_lnx <- sqrt(log((sd(x)/mean(x))^2 + 1))
+  mu_lnx <- log(mean(x)) - sd_lnx^2/2
+  cdf_lognormal <- plnorm(x, meanlog = mu_lnx, sdlog = sd_lnx)
+  fit[step, 'duration'] <- max(abs(cdf_lognormal - cdf_x)) / d_crit
+  # lambda <- mean(x)/sd(x)^2
+  # k <- lambda*mean(x)
+  # cdf_gamma <- pgamma(x, shape = k, rate = lambda)
+  # fit[step, 'duration'] <- max(abs(cdf_gamma - cdf_x)) / d_crit
+  # alpha <- pi/(sd(x)*sqrt(6))
+  # u <- mean(x) - 0.5772/alpha
+  # cdf_gumbel <- pgumbel(dx, loc = u, scale = 1/alpha)
+  # fit[step, 'duration'] <- max(abs(cdf_gumbel - cdf_x)) / d_crit
+
+  x <- sort(ar_list$IVT_max)
+  cdf_x <- (1:length(x))/(length(x)+1)
+  alpha <- pi/(sd(x)*sqrt(6))
+  u <- mean(x) - 0.5772/alpha
+  cdf_gumbel <- pgumbel(x, loc = u, scale = 1/alpha)
+  fit[step, 'IVT'] <- max(abs(cdf_gumbel - cdf_x)) / d_crit
+
+  step <- step + 1
+  setTxtProgressBar(pb, step)
+}
+
+fit.raster <- fit %>% left_join(tracker, by = c('id' = 'step')) 
+ggplot(data = fit.raster) + 
+  geom_raster(aes(x = lon, y = lat, fill = duration > 1), show.legend = FALSE) + 
+  geom_sf(data = california, fill = NA) +
+  scale_fill_manual(values = c('grey94', ggcolor(1))) + 
+  theme_void()
+ggplot(data = fit.raster) + 
+  geom_raster(aes(x = lon, y = lat, fill = IVT > 1), show.legend = FALSE) + 
+  geom_sf(data = california, fill = NA) +
+  scale_fill_manual(values = c('grey94', ggcolor(1))) + 
+  theme_void()
+
+```
+
+
+```{r}
+pb <- txtProgressBar(min = 0, max = length(tracker.id), style = 3)
+step <- 1 
+for (i in tracker.id) {
+  ar_list <- ar_grid[[i]]
+  x <- sort(ar_list$duration)
+  dx <- 0:(ceiling(max(x)/10)*10)
+  i <- (1:nrow(ar_list)-0.5)/nrow(ar_list)
+
+  ## try lognormal
+  sd_lnx <- sqrt(log((sd(x)/mean(x))^2 + 1))
+  mu_lnx <- log(mean(x)) - sd_lnx^2/2
+  y_lognormal <- dlnorm(dx, meanlog = mu_lnx, sdlog = sd_lnx)
+  cdf_lognormal <- plnorm(dx, meanlog = mu_lnx, sdlog = sd_lnx)
+  q_lognormal <- qlnorm(i, meanlog = mu_lnx, sdlog = sd_lnx)
+  
+  ## try Gumbel (type I largest)
+  alpha <- pi/(sd(x)*sqrt(6))
+  u <- mean(x) - 0.5772/alpha
+  y_gumbel <- dgumbel(dx, loc = u, scale = 1/alpha)
+  cdf_gumbel <- pgumbel(dx, loc = u, scale = 1/alpha)
+  q_gumbel <- qgumbel(i, loc = u, scale = 1/alpha)
+  
+  ## try gamma
+  lambda <- mean(x)/sd(x)^2
+  k <- lambda*mean(x)
+  y_gamma <- dgamma(dx, shape = k, rate = lambda)
+  cdf_gamma <- pgamma(dx, shape = k, rate = lambda)
+  q_gamma <- qgamma(i, shape = k, rate = lambda)
+  
+  ## try Weibull (type III largest)
+  param <- fitdist(x, "weibull")
+  kappa <- param$estimate[1]
+  lambda <- param$estimate[2]
+  y_weibull <- dweibull(dx, shape = kappa, scale = lambda)
+  cdf_weibull <- pweibull(dx, shape = kappa, scale = lambda)
+  q_weibull <- qweibull(i, shape = kappa, scale = lambda)
+  
+  # ## plot PDFs
+  # ggplot(data = data.frame(dx = dx, lognormal = y_lognormal, gumbel = y_gumbel, 
+  #                          gamma = y_gamma, weibull = y_weibull)) + 
+  #   geom_histogram(data = data.frame(x = x), aes(x = x, y = ..density..), 
+  #                  color = 'black', fill = 'white', bins = sqrt(nrow(ar_list))) + 
+  #   geom_line(aes(x = dx, y = lognormal, color = 'lognormal'), size = 1) + 
+  #   geom_line(aes(x = dx, y = gumbel, color = 'gumbel'), size = 1) + 
+  #   geom_line(aes(x = dx, y = gamma, color = 'gamma'), size = 1) + 
+  #   geom_line(aes(x = dx, y = weibull, color = 'weibull'), size = 1)
+  # 
+  # ## plot CDFs
+  # ggplot(data = data.frame(dx = dx, lognormal = cdf_lognormal, gumbel = cdf_gumbel, 
+  #                          gamma = cdf_gamma, weibull = cdf_weibull)) + 
+  #   geom_step(data = data.frame(x = x), aes(x = sort(x), y = (1:nrow(ar_list))/nrow(ar_list))) + 
+  #   geom_line(aes(x = dx, y = lognormal, color = 'lognormal')) + 
+  #   geom_line(aes(x = dx, y = gumbel, color = 'gumbel')) + 
+  #   geom_line(aes(x = dx, y = gamma, color = 'gamma')) + 
+  #   geom_line(aes(x = dx, y = weibull, color = 'weibull'))
+  
+  ## plot Q-Q plots
+  g1 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                                 gamma = q_gamma, weibull = q_weibull)) + 
+    geom_point(aes(x = sort(x), y = gamma), color = ggcolor(4)[1]) + 
+    geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+    geom_line(aes(x = gamma, y = gamma), color = 'black', linetype = 'dotted') + 
+    ggtitle('Gamma') + 
+    theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+    coord_fixed(ratio = 1)
+  g2 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                                 gamma = q_gamma, weibull = q_weibull)) + 
+    geom_point(aes(x = sort(x), y = gumbel), color = ggcolor(4)[2]) + 
+    geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+    geom_line(aes(x = gumbel, y = gumbel), color = 'black', linetype = 'dotted') + 
+    ggtitle('Gumbel') + 
+    theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+    coord_fixed(ratio = 1)
+  g3 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                                 gamma = q_gamma, weibull = q_weibull)) + 
+    geom_point(aes(x = sort(x), y = lognormal), color = ggcolor(4)[3]) + 
+    geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+    geom_line(aes(x = lognormal, y = lognormal), color = 'black', linetype = 'dotted') + 
+    ggtitle('Lognormal') + 
+    theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+    coord_fixed(ratio = 1)
+  g4 <- ggplot(data = data.frame(lognormal = q_lognormal, gumbel = q_gumbel, 
+                                 gamma = q_gamma, weibull = q_weibull)) + 
+    geom_point(aes(x = sort(x), y = weibull), color = ggcolor(4)[4]) + 
+    geom_line(aes(x = sort(x), y = sort(x)), color = 'black', linetype = 'dotted') + 
+    geom_line(aes(x = weibull, y = weibull), color = 'black', linetype = 'dotted') + 
+    ggtitle('Weibull') + 
+    theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+    coord_fixed(ratio = 1)
+  g <- gridExtra::grid.arrange(g1, g2, g3, g4, nrow = 2)
+  print(g)
+  
+  step <- step + 1
+  setTxtProgressBar(pb, step)
+
+}
+
+```
+
+
+
+```{r}
+## try precip|AR with a random subset of the df from above
+
+# df.qr <- df %>% subset(HUC10 %in% unique(df$HUC10)[1:10])
+# df.qr <- df.qr[order(df.qr$precip),]
+# 
+# t90 <- rq(precip ~ IVT, df.qr, tau = 0.9)
+# t50 <- rq(precip ~ IVT, df.qr, tau = 0.5)
+# t10 <- rq(precip ~ IVT, df.qr, tau = 0.1)
+# 
+# df.qr$precip.q <- (1:nrow(df.qr))/(nrow(df.qr)+1)
+# ggplot(data = df.qr) + 
+#   geom_point(aes(x = IVT, y = precip, color = precip.q)) + 
+#   scale_color_distiller(palette = 'RdYlBu', guide = 'colorbar') + 
+#   geom_line(aes(x = IVT, y = t90$fitted.values), color = 'red') + 
+#   geom_line(aes(x = IVT, y = t50$fitted.values), color = 'goldenrod') + 
+#   geom_line(aes(x = IVT, y = t10$fitted.values), color = 'blue') +
+#   ggtitle('IVT vs. Precipitation Quantile Regresssion') + 
+#   labs(x = 'Daily Precipitation (mm)', y = 'Daily Max IVT (kg/m/s)',
+#        color = 'Precip Quantile')
+  
+```
+
+```{r P(precip|AR)}
+## try precip|AR with a random grid cell
+# lat = 25
+# lon = 28
+# 
+# x <- which(unique(cpc_prcp('2020-01-01', us = TRUE)$lon)-360 > LON[lon])[1]
+# y <- which(unique(cpc_prcp('2020-01-01', us = TRUE)$lat) > LAT[lat])[1]
+
+ar_list <- ar_grid[[1503]]
+
+x <- which(unique(cpc_prcp('2020-01-01', us = TRUE)$lon)-360 >
+             tracker$lon[1503])[1]
+y <- which(unique(cpc_prcp('2020-01-01', us = TRUE)$lat) >
+             tracker$lat[1503])[1]
+x <- unique(cpc_prcp('2020-01-01', us = TRUE)$lon)[c(x-1,x)]
+y <- unique(cpc_prcp('2020-01-01', us = TRUE)$lat)[c(y-1,y)]
+
+## get total precipitation for each recorded AR event
+for (ar in 1:nrow(ar_list)) {
+  datelist <- seq(ymd(ar_list$start_date[ar]), ymd(ar_list$end_date[ar]), 'days')
+  precip <- 0
+  for (i in 1:length(datelist)) {
+    d <- datelist[i]
+    cpc_precip <- cpc_prcp(d, us = TRUE)
+    precip <- precip + Mean(cpc_precip[cpc_precip$lon %in% x & 
+                                         cpc_precip$lat %in% y, 'precip'] %>% subset(precip > 0) %>% unlist)
+  }
+  ar_list[ar, 'precip'] <- precip
+}
+
+ggplot(data = expand.grid(x=x, y=y)) + 
+  geom_sf(data = california) + 
+  geom_point(aes(x = x-360, y = y))
+
+## run quantile regression
+ar_list[is.na(ar_list$precip), 'precip'] <- 0
+ar_list <- ar_list[order(ar_list$precip),]
+ar_list$cut <- cut(ar_list$IVT_max, 20)
+ar_list$precip.q <- NA
+for (c in unique(ar_list$cut)) {
+  index <- ar_list$cut == c
+  ar_list[index, 'precip.q'] <- (1:sum(index))/(sum(index)+1)
+}
+
+t90 <- rq(precip ~ IVT_max, ar_list, tau = 0.9)
+t50 <- rq(precip ~ IVT_max, ar_list, tau = 0.5)
+t10 <- rq(precip ~ IVT_max, ar_list, tau = 0.1)
+
+# ar_list$precip.q <- (1:nrow(ar_list))/(nrow(ar_list)+1)
+ggplot(data = ar_list) + 
+  geom_point(aes(x = IVT_max, y = precip, color = precip.q)) + 
+  scale_color_distiller(palette = 'RdYlBu', guide = 'colorbar') + 
+  geom_line(aes(x = IVT_max, y = t90$fitted.values), color = 'red') + 
+  geom_line(aes(x = IVT_max, y = t50$fitted.values), color = 'goldenrod') + 
+  geom_line(aes(x = IVT_max, y = t10$fitted.values), color = 'blue') +
+  ggtitle('IVT vs. Precipitation Quantile Regression') + 
+  labs(y = 'Storm Total Precipitation (mm)', x = 'Storm Max IVT (kg/m/s)',
+       color = 'Precip Quantile')
+
+ggplot(data = ar_list) + 
+  geom_point(aes(x = IVT_max, y = precip, color = precip.q)) + 
+  scale_color_distiller(palette = 'BrBG', guide = 'colorbar') + 
+  geom_line(aes(x = IVT_max, y = t90$fitted.values), color = brewer.pal(5, 'BrBG')[1]) + 
+  geom_line(aes(x = IVT_max, y = t50$fitted.values), color = 'grey') + 
+  geom_line(aes(x = IVT_max, y = t10$fitted.values), color = brewer.pal(5, 'BrBG')[5]) +
+  ggtitle('IVT vs. Precipitation') + 
+  labs(y = 'Storm Total Precipitation (mm)', x = 'Storm Max IVT (kg/m/s)',
+       color = 'Quantile') + 
+  theme_classic()
+ggsave(filename = './_plots/prob_precip.jpg', width = 4, height = 3)
+
+RColorBrewer::display.brewer.all()
+RColorBrewer::brewer.pal(5, 'BrBG')
+
+t90 <- rq(precip ~ duration, ar_list, tau = 0.9)
+t50 <- rq(precip ~ duration, ar_list, tau = 0.5)
+t10 <- rq(precip ~ duration, ar_list, tau = 0.1)
+
+ar_list$precip.q <- (1:nrow(ar_list))/(nrow(ar_list)+1)
+ggplot(data = ar_list) + 
+  geom_point(aes(x = duration, y = precip, color = precip.q)) + 
+  scale_color_distiller(palette = 'RdYlBu', guide = 'colorbar') + 
+  geom_line(aes(x = duration, y = t90$fitted.values), color = 'red') + 
+  geom_line(aes(x = duration, y = t50$fitted.values), color = 'goldenrod') + 
+  geom_line(aes(x = duration, y = t10$fitted.values), color = 'blue') +
+  ggtitle('IVT vs. Duration Quantile Regression') + 
+  labs(y = 'Storm Total Precipitation (mm)', x = 'Storm Duration (hours)',
+       color = 'Precip Quantile')
+
+```
+
+```{r}
+## examine quantile regression
+summary(t90)
+
+t90$coefficients
+t90$rho
+t90$model
+sum(complete.cases(ar_list$duration))/nrow(ar_list)
+
+## bootstrapped confidence interval
+t90 <- rq(precip ~ IVT_max + duration, ar_list, tau = 0.9)
+t90.boot <- boot.rq(x = ar_list[,c('IVT_max', 'duration')], y = ar_list$precip, 
+                    tau = 0.9, R = 1e4)
+
+ggplot(data = data.frame(IVT_max = t90.boot$B[,1], duration = t90.boot$B[,2])) + 
+  geom_histogram(aes(x = IVT_max), bins = sqrt(nrow(t90.boot$B)), 
+                 color = 'black', fill = 'white') + 
+  geom_vline(xintercept = t90$coefficients['IVT_max'], color = 'red', linetype = 'dashed')
+ggplot(data = data.frame(IVT_max = t90.boot$B[,1], duration = t90.boot$B[,2])) + 
+  geom_histogram(aes(x = duration), bins = sqrt(nrow(t90.boot$B)), 
+                 color = 'black', fill = 'white') + 
+  geom_vline(xintercept = t90$coefficients['duration'], color = 'red', linetype = 'dashed')
+# these don't feel like I'm doing it right
+
+## coefficient standard errors
+print(t90)
+print(summary(t90, se = 'boot'))
+# print(summary(t.all, se = 'boot')) #do NOT run this, the tower doesn't like it
+
+t.three <- rq(precip ~ IVT_max + duration, ar_list, tau = c(0.1, 0.5, 0.9))
+print(summary(t.three, se = 'boot'))
+
+t.all <- rq(precip ~ IVT_max + duration, ar_list, tau = seq(0.05, 0.95, 0.05))
+plot(t.all)
+plot(summary(t.all))
+
+```
+
+```{r}
+## plot quantiles with confidence intervals
+t90 <- rq(precip ~ IVT_max, ar_list, tau = 0.9)
+t90.boot <- predict(t90, newdata = data.frame(IVT_max = ar_list$IVT_max), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t50 <- rq(precip ~ IVT_max, ar_list, tau = 0.5)
+t50.boot <- predict(t50, newdata = data.frame(IVT_max = ar_list$IVT_max), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t10 <- rq(precip ~ IVT_max, ar_list, tau = 0.1)
+t10.boot <- predict(t10, newdata = data.frame(IVT_max = ar_list$IVT_max), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+
+ar_list$precip.q <- (1:nrow(ar_list))/(nrow(ar_list)+1)
+ggplot(data = ar_list) + 
+  geom_point(aes(x = IVT_max, y = precip, color = precip.q)) + 
+  scale_color_distiller(palette = 'RdYlBu', guide = 'colorbar') + 
+  geom_line(aes(x = IVT_max, y = t90$fitted.values), color = 'red') + 
+  geom_ribbon(aes(x = IVT_max, ymin = t90.boot$lower, ymax = t90.boot$higher), 
+              fill = 'red', alpha = 0.25) + 
+  geom_line(aes(x = IVT_max, y = t50$fitted.values), color = 'goldenrod') + 
+  geom_ribbon(aes(x = IVT_max, ymin = t50.boot$lower, ymax = t50.boot$higher), 
+              fill = 'goldenrod', alpha = 0.25) + 
+  geom_line(aes(x = IVT_max, y = t10$fitted.values), color = 'blue') +
+  geom_ribbon(aes(x = IVT_max, ymin = t10.boot$lower, ymax = t10.boot$higher), 
+              fill = 'blue', alpha = 0.25) + 
+  ggtitle('IVT vs. Precipitation Quantile Regression') + 
+  labs(y = 'Storm Total Precipitation (mm)', x = 'Storm Max IVT (kg/m/s)',
+       color = 'Precip Quantile') + 
+  coord_fixed(ratio = max(ar_list$IVT_max)/max(ar_list$precip)/1.4)
+
+t90 <- rq(precip ~ duration, ar_list, tau = 0.9)
+t90.boot <- predict(t90, newdata = data.frame(duration = ar_list$duration), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t50 <- rq(precip ~ duration, ar_list, tau = 0.5)
+t50.boot <- predict(t50, newdata = data.frame(duration = ar_list$duration), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+t10 <- rq(precip ~ duration, ar_list, tau = 0.1)
+t10.boot <- predict(t10, newdata = data.frame(duration = ar_list$duration), 
+                type = 'percentile', interval = 'confidence', se = 'boot') %>% data.frame
+
+ar_list$precip.q <- (1:nrow(ar_list))/(nrow(ar_list)+1)
+ggplot(data = ar_list) + 
+  geom_point(aes(x = duration, y = precip, color = precip.q)) + 
+  scale_color_distiller(palette = 'RdYlBu', guide = 'colorbar') + 
+  geom_line(aes(x = duration, y = t90$fitted.values), color = 'red') + 
+  geom_ribbon(aes(x = duration, ymin = t90.boot$lower, ymax = t90.boot$higher), 
+              fill = 'red', alpha = 0.25) + 
+  geom_line(aes(x = duration, y = t50$fitted.values), color = 'goldenrod') + 
+  geom_ribbon(aes(x = duration, ymin = t50.boot$lower, ymax = t50.boot$higher), 
+              fill = 'goldenrod', alpha = 0.25) + 
+  geom_line(aes(x = duration, y = t10$fitted.values), color = 'blue') +
+  geom_ribbon(aes(x = duration, ymin = t10.boot$lower, ymax = t10.boot$higher), 
+              fill = 'blue', alpha = 0.25) + 
+  ggtitle('IVT vs. Duration Quantile Regression') + 
+  labs(y = 'Storm Total Precipitation (mm)', x = 'Storm Duration (hours)',
+       color = 'Precip Quantile') + 
+  coord_fixed(ratio = max(ar_list$duration)/max(ar_list$precip)/1.2)
+  
+
+```
+
+```{r}
+## add precipitation to every dataframe in ar_grid
+## (only have to do this once)
+
+timer <- Sys.time()
+pb <- txtProgressBar(min = 0, max = length(tracker.id), style = 3)
+for (id in tracker.id) {
+  x <- which(unique(cpc_prcp('2020-01-01')$lon)-360 > tracker$lon[id])[1]
+  x <- unique(cpc_prcp('2020-01-01')$lon)[c(x-1,x)]
+  y <- which(unique(cpc_prcp('2020-01-01')$lat) > tracker$lat[id])[1]
+  y <- unique(cpc_prcp('2020-01-01')$lat)[c(y-1,y)]
+  for (ar in 1:nrow(ar_grid[[id]])) {
+    datelist <- seq(ymd(ar_grid[[id]]$start_date[ar]), ymd(ar_grid[[id]]$end_date[ar]), 'days')
+    precip <- 0
+    for (i in 1:length(datelist)) {
+      d <- datelist[i]
+      cpc_precip <- cpc_prcp(d)
+      precip <- precip + Mean(cpc_precip[cpc_precip$lon %in% x & cpc_precip$lat %in% y, 'precip'] %>% 
+                                subset(precip >= 0) %>% unlist)
+    }
+    ar_grid[[id]][ar, 'precip'] <- precip
+  }
+  setTxtProgressBar(pb, id)
+}
+Sys.time() - timer
+
+save(ar_grid, file ='./prob_precip_updated.Rdata')
+
+```
+
+
+```{r statewide quantile regression}
+## plot fit metrics for the whole state
+
+quant.fit.10 <- data.frame(id = tracker.id, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.25 <- data.frame(id = tracker.id, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.50 <- data.frame(id = tracker.id, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.75 <- data.frame(id = tracker.id, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.90 <- data.frame(id = tracker.id, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+
+step <- 1
+pb <- txtProgressBar(min = 0, max = length(tracker.id), style = 3)
+for (id in tracker.id) {
+  # ar_list <- ar_grid[[id]]
+  ar_list <- ar_grid[[tracker.id[step]]]
+  qr.fit <- rq(precip ~ IVT_max + duration, ar_list, tau = c(0.1, 0.25, 0.5, 0.75, 0.9))
+  qr.param <- summary(qr.fit, se = 'boot')
+  
+  quant.fit.10[step, 'IVT_coef'] <- qr.param[[1]]$coefficients[2,1]
+  quant.fit.10[step, 'IVT_sig'] <- ifelse(qr.param[[1]]$coefficients[2,1] - 2*qr.param[[1]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.10[step, 'dur_coef'] <- qr.param[[1]]$coefficients[3,1]
+  quant.fit.10[step, 'dur_sig'] <- ifelse(qr.param[[1]]$coefficients[3,1] - 2*qr.param[[1]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.25[step, 'IVT_coef'] <- qr.param[[2]]$coefficients[2,1]
+  quant.fit.25[step, 'IVT_sig'] <- ifelse(qr.param[[2]]$coefficients[2,1] - 2*qr.param[[2]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.25[step, 'dur_coef'] <- qr.param[[2]]$coefficients[3,1]
+  quant.fit.25[step, 'dur_sig'] <- ifelse(qr.param[[2]]$coefficients[3,1] - 2*qr.param[[2]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.50[step, 'IVT_coef'] <- qr.param[[3]]$coefficients[2,1]
+  quant.fit.50[step, 'IVT_sig'] <- ifelse(qr.param[[3]]$coefficients[2,1] - 2*qr.param[[3]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.50[step, 'dur_coef'] <- qr.param[[3]]$coefficients[3,1]
+  quant.fit.50[step, 'dur_sig'] <- ifelse(qr.param[[3]]$coefficients[3,1] - 2*qr.param[[3]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.75[step, 'IVT_coef'] <- qr.param[[4]]$coefficients[2,1]
+  quant.fit.75[step, 'IVT_sig'] <- ifelse(qr.param[[4]]$coefficients[2,1] - 2*qr.param[[4]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.75[step, 'dur_coef'] <- qr.param[[4]]$coefficients[3,1]
+  quant.fit.75[step, 'dur_sig'] <- ifelse(qr.param[[4]]$coefficients[3,1] - 2*qr.param[[4]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.90[step, 'IVT_coef'] <- qr.param[[5]]$coefficients[2,1]
+  quant.fit.90[step, 'IVT_sig'] <- ifelse(qr.param[[5]]$coefficients[2,1] - 2*qr.param[[5]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.90[step, 'dur_coef'] <- qr.param[[5]]$coefficients[3,1]
+  quant.fit.90[step, 'dur_sig'] <- ifelse(qr.param[[5]]$coefficients[3,1] - 2*qr.param[[5]]$coefficients[3,2] > 0, 1, 0)
+  
+  step <- step + 1
+  setTxtProgressBar(pb, step)
+}
+
+```
+
+
+```{r statewide quantile regression}
+tracker.quant.10 <- tracker %>% right_join(quant.fit.10, by = c('step' = 'id'))
+tracker.quant.25 <- tracker %>% right_join(quant.fit.25, by = c('step' = 'id'))
+tracker.quant.50 <- tracker %>% right_join(quant.fit.50, by = c('step' = 'id'))
+tracker.quant.75 <- tracker %>% right_join(quant.fit.75, by = c('step' = 'id'))
+tracker.quant.90 <- tracker %>% right_join(quant.fit.90, by = c('step' = 'id'))
+
+g.10 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.10, aes(x = lon, y = lat, fill = IVT_coef)) + 
+  geom_tile(data = tracker.quant.10 %>% subset(IVT_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.25 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.25, aes(x = lon, y = lat, fill = IVT_coef)) + 
+  geom_tile(data = tracker.quant.25 %>% subset(IVT_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.50 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.50, aes(x = lon, y = lat, fill = IVT_coef)) + 
+  geom_tile(data = tracker.quant.50 %>% subset(IVT_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.75 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.75, aes(x = lon, y = lat, fill = IVT_coef)) + 
+  geom_tile(data = tracker.quant.75 %>% subset(IVT_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.90 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.90, aes(x = lon, y = lat, fill = IVT_coef)) + 
+  geom_tile(data = tracker.quant.90 %>% subset(IVT_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+gridExtra::grid.arrange(g.10, g.25, g.50, g.75, g.90, nrow = 2)
+
+g.10 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.10, aes(x = lon, y = lat, fill = dur_coef)) + 
+  geom_tile(data = tracker.quant.10 %>% subset(dur_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.25 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.25, aes(x = lon, y = lat, fill = dur_coef)) + 
+  geom_tile(data = tracker.quant.25 %>% subset(dur_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.50 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.50, aes(x = lon, y = lat, fill = dur_coef)) + 
+  geom_tile(data = tracker.quant.50 %>% subset(dur_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.75 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.75, aes(x = lon, y = lat, fill = dur_coef)) + 
+  geom_tile(data = tracker.quant.75 %>% subset(dur_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+g.90 <- ggplot() +
+  geom_sf(data = california, color = NA, fill = 'white') + 
+  geom_tile(data = tracker.quant.90, aes(x = lon, y = lat, fill = dur_coef)) + 
+  geom_tile(data = tracker.quant.90 %>% subset(dur_sig > 0), aes(x = lon, y = lat), 
+            fill = NA, color = 'black', size = 1) + 
+  scale_fill_viridis_c() + theme_void()
+gridExtra::grid.arrange(g.10, g.25, g.50, g.75, g.90, nrow = 2)
+
+```
+
+```{r watershed quantile regression}
+quant.fit.10 <- data.frame(id = wbd6$HUC6, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.25 <- data.frame(id = wbd6$HUC6, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.50 <- data.frame(id = wbd6$HUC6, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.75 <- data.frame(id = wbd6$HUC6, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+quant.fit.90 <- data.frame(id = wbd6$HUC6, IVT_coef = NA, IVT_sig = NA, dur_coef = NA, dur_sig = NA)
+
+step <- 1
+pb <- txtProgressBar(min = 0, max = length(wbd6$HUC6), style = 3)
+for (id in wbd6$HUC6) {
+  # ar_list <- ar_grid[[id]]
+  ar_list <- ar_grid[[tracker.id[step]]]
+  qr.fit <- rq(precip ~ IVT_max + duration, ar_list, tau = c(0.1, 0.25, 0.5, 0.75, 0.9))
+  qr.param <- summary(qr.fit, se = 'boot')
+  
+  quant.fit.10[step, 'IVT_coef'] <- qr.param[[1]]$coefficients[2,1]
+  quant.fit.10[step, 'IVT_sig'] <- ifelse(qr.param[[1]]$coefficients[2,1] - 2*qr.param[[1]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.10[step, 'dur_coef'] <- qr.param[[1]]$coefficients[3,1]
+  quant.fit.10[step, 'dur_sig'] <- ifelse(qr.param[[1]]$coefficients[3,1] - 2*qr.param[[1]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.25[step, 'IVT_coef'] <- qr.param[[2]]$coefficients[2,1]
+  quant.fit.25[step, 'IVT_sig'] <- ifelse(qr.param[[2]]$coefficients[2,1] - 2*qr.param[[2]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.25[step, 'dur_coef'] <- qr.param[[2]]$coefficients[3,1]
+  quant.fit.25[step, 'dur_sig'] <- ifelse(qr.param[[2]]$coefficients[3,1] - 2*qr.param[[2]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.50[step, 'IVT_coef'] <- qr.param[[3]]$coefficients[2,1]
+  quant.fit.50[step, 'IVT_sig'] <- ifelse(qr.param[[3]]$coefficients[2,1] - 2*qr.param[[3]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.50[step, 'dur_coef'] <- qr.param[[3]]$coefficients[3,1]
+  quant.fit.50[step, 'dur_sig'] <- ifelse(qr.param[[3]]$coefficients[3,1] - 2*qr.param[[3]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.75[step, 'IVT_coef'] <- qr.param[[4]]$coefficients[2,1]
+  quant.fit.75[step, 'IVT_sig'] <- ifelse(qr.param[[4]]$coefficients[2,1] - 2*qr.param[[4]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.75[step, 'dur_coef'] <- qr.param[[4]]$coefficients[3,1]
+  quant.fit.75[step, 'dur_sig'] <- ifelse(qr.param[[4]]$coefficients[3,1] - 2*qr.param[[4]]$coefficients[3,2] > 0, 1, 0)
+
+  quant.fit.90[step, 'IVT_coef'] <- qr.param[[5]]$coefficients[2,1]
+  quant.fit.90[step, 'IVT_sig'] <- ifelse(qr.param[[5]]$coefficients[2,1] - 2*qr.param[[5]]$coefficients[2,2] > 0, 1, 0)
+  quant.fit.90[step, 'dur_coef'] <- qr.param[[5]]$coefficients[3,1]
+  quant.fit.90[step, 'dur_sig'] <- ifelse(qr.param[[5]]$coefficients[3,1] - 2*qr.param[[5]]$coefficients[3,2] > 0, 1, 0)
+  
+  step <- step + 1
+  setTxtProgressBar(pb, step)
+}
+
+```
+
+
+```{r}
+## plot cross-correlation
+crosscor <- data.frame(id = tracker.id, cor = NA)
+step <- 1
+for (id in tracker.id) {
+  ar_list <- ar_grid[[id]]
+  crosscor[step, 'cor'] <- cor(ar_list$IVT_max, ar_list$duration)
+  step <- step + 1
+}
+
+crosscor %>% 
+  left_join(tracker, by = c('id' = 'step')) %>% 
+  ggplot() + 
+    geom_raster(aes(x = lon, y = lat, fill = cor)) + 
+    geom_sf(data = california, fill = NA, color = 'grey20') + 
+    ggtitle('IVT vs. Duration Cross-Correlation') + 
+    scale_fill_viridis_c(name = '\u03c1', limits = c(0.25,0.75)) + 
+    theme_void()
+
+crosscor %>% 
+  left_join(tracker, by = c('id' = 'step')) %>%
+  select(cor) %>% max
+
+```
+
+```{r}
+## look at empirical CDFs of precipitation from quantile regression
+ar_list <- ar_grid[[1503]]
+qr.fit <- rq(precip ~ IVT_max + duration, ar_list, tau = seq(0.05, 0.95, 0.05))
+qr.param <- summary(qr.fit, se = 'boot')
+
+precip.fit <- expand.grid(duration = seq(6, 72, 6), IVT_max = seq(250, 1500, 250))
+precip.fit <- cbind(precip.fit, predict(qr.fit, newdata = precip.fit))
+precip.melt <- melt(precip.fit, id.vars = c('IVT_max', 'duration'), variable.name = 'tau', value.name = 'precip.fit')
+precip.melt$tau <- gsub('tau= ', '', precip.melt$tau) %>% toNumber
+
+
+ggplot(data = precip.melt %>% subset(IVT_max == 500 & duration == 24) %>% arrange(tau)) + 
+  geom_step(aes(x = precip.fit, y = tau))
+
+ggplot(data = precip.melt %>% subset(IVT_max == 500)) + 
+  geom_line(aes(x = precip.fit, y = 1-tau, group = duration, color = duration), size = 1) + 
+  ggtitle('Precip CDF by Duration', subtitle = 'IVT = 500 kg/m/s') + 
+  labs(x = 'Storm Total Precipitation (mm)', y = 'Probability of Exceedance') + 
+  scale_color_distiller(name = 'Duration (hrs)', palette = 'Purples', direction = 1) + 
+  theme_classic()
+ggplot(data = precip.melt %>% subset(duration == 24)) + 
+  geom_line(aes(x = precip.fit, y = 1-tau, group = IVT_max, color = IVT_max), size = 1) + 
+  ggtitle('Precip CDF by Duration', subtitle = 'Duration = 24 hrs') + 
+  labs(x = 'Storm Total Precipitation (mm)', y = 'Probability of Exceedance') + 
+  scale_color_distiller(name = 'IVT (kg/m/s)', palette = 'Blues', direction = 1) + 
+  theme_classic()
+
+display.brewer.all()
+
+```
+
+```{r}
+## plot P(rain >= x)
+```
+

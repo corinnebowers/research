@@ -1,0 +1,413 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "8/5/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(lubridate)
+# require(velox)
+require(RColorBrewer)
+require(rnoaa); rnoaa_options(cache_messages = FALSE)
+require(quantreg)
+require(dataRetrieval)
+# require(mvtnorm)
+require(evd)
+require(triangle)
+require(mapview)
+require(abind)
+require(dplyr)
+require(exactextractr)
+
+require(foreach)
+require(parallel)
+require(future)
+require(doSNOW)
+
+require(Rfast)
+require(microbenchmark)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) ifelse(nrow(x)>0, sum(x, na.rm = TRUE), NA)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+## meters to feet conversion factor
+mft <- 3.28084
+
+```
+
+```{r geography}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+## useful geographies
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class= 'sf')
+sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME != 9901)
+
+## useful features
+russian <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) %>% 
+  subset(grepl('Russian', GNIS_Name))
+cities <- matrix(c(38.507930, -122.985860, 'Guerneville',
+         38.616588, -122.858989, 'Healdsburg'), byrow = TRUE, nrow = 2) %>%
+  data.frame %>%
+  setNames(c('lat', 'long', 'city')) %>%
+  mutate(lat = toNumber(lat), long = toNumber(long)) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = NAD)
+
+## import watersheds
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp', quiet = TRUE)
+wbd6 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU6.shp', quiet = TRUE)
+wbd8 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU8.shp', quiet = TRUE)
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp', quiet = TRUE)
+wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp', quiet = TRUE)
+
+```
+
+## step 1: decide on an area of interest
+```{r}
+print('1. identify area of interest')
+
+## define inlet watershed using USGS StreamStats
+inlet <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershed.shp', quiet = TRUE)
+inlet.point <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershedpoint.shp', quiet = TRUE)
+
+## define outlet watershed using USGS StreamStats
+outlet <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershed.shp', quiet = TRUE)
+outlet.point <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershedpoint.shp', quiet = TRUE)
+
+## define area of interest (aoi)
+dem <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy.tif')
+topobathy <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy_save.tif')
+dem <- crop(dem, topobathy)
+aoi <- extent(dem) %>% 
+  as('SpatialPolygons') %>% 
+  as('sf') %>% 
+  st_set_crs(proj4string(dem)) %>% 
+  st_transform(st_crs(sonoma))  #the area under consideration, in sf format
+
+
+## plot for visual check
+ggplot() + 
+  # geom_sf(data = cities) + 
+  # geom_sf_text(data = cities, aes(label = city), nudge_x = -0.11) +
+  geom_sf(data = inlet, fill = 'orangered', color = NA, alpha = 0.5) +
+  geom_sf(data = outlet, fill = 'orange', color = NA, alpha = 0.5) + 
+  geom_sf(data = sonoma, fill = NA, color = 'grey80') + 
+  geom_sf(data = st_union(sonoma), fill = NA, color = 'black') + 
+  geom_sf(data = russian) + 
+  geom_sf(data = russian %>% st_intersection(aoi), color = 'blue', size = 1) +
+  geom_sf(data = inlet.point) + geom_sf(data = outlet.point) + 
+  geom_sf(data = aoi, alpha = 0.25) + 
+  theme_void()
+
+```
+
+## step 2: generate ARs
+```{r}
+source('D:/Research/_scripts/research2020/functions/AR.R')
+print('2. generate ARs')
+
+## decide which USGS gauges are most representative of flows in the study area
+gauge <- c(11464000, 11467000)
+catalog <- generate_AR_catalog(outlet, gauge)
+
+## if you want to use a historic AR: fill in the values below
+# AR <- data.frame(n.AR = 1,
+#                  IVT_max = catalog[399, 'IVT_max'],
+#                  duration = catalog[399, 'duration'])
+
+## if you want to generate synthetic ARs: 
+AR <- generate_AR(catalog, n.AR = 1000, intensity.threshold = 0)
+
+plot_AR_copula(catalog, 
+               add.historic = NA, 
+               add.synthetic = AR)
+# plot_AR_copula(catalog, add.historic = catalog, add.synthetic = AR)
+
+```
+
+
+## step 3: generate precipitation outcomes
+```{r}
+source('./_scripts/research2020/functions/PRCP_parallel.R')
+print('3. generate precipitation outcomes')
+
+## register parallel backend
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+
+precip <- generate_precip(AR, catalog, n.precip = 25, dx = 0.05, precip.threshold = 0.5, plot = FALSE)
+stopCluster(cl)
+
+```
+
+
+## step 4: generate runoff outcomes
+```{r}
+source('./_scripts/research2020/functions/RNFF.R')
+print('4. generate runoff outcomes')
+
+runoff <- generate_runoff(precip, catalog, n.runoff = 25, plot = FALSE)
+
+## perform importance sampling
+runoff$bin <- round(log10(runoff$runoff_in), 1)
+runoff$bin[runoff$bin <= -4 & !is.infinite(runoff$bin)] <- -4
+runoff$bin[runoff$bin <= -3 & runoff$bin > -4 & !is.infinite(runoff$bin)] <- -3
+runoff$bin[runoff$bin <= -2.5 & runoff$bin > -3 & !is.infinite(runoff$bin)] <- -2.5
+runoff$bin[runoff$bin <= -2 & runoff$bin > -2.5 & !is.infinite(runoff$bin)] <- -2
+ggplot(data.frame(table(runoff$bin)[-1])) +
+  geom_bar(aes(x = toNumber(Var1), y = Freq), stat = 'identity') +
+  scale_x_continuous(limits = c(-5, 2))
+
+kclust <- kmeans(round(runoff[,c('duration', 'runoff_mm')], 0),  
+                   centers = 25, iter.max = 1e3, nstart = 5)
+ggplot(data.frame(val = kclust$centers[,2]/25.4, 
+                  freq = data.frame(table(kclust$cluster))[,2])) + 
+  geom_histogram(aes(x = round(log10(toNumber(val)),1), y = freq), stat = 'identity') +
+  scale_x_continuous(limits = c(-5, 2))
+
+## run this more to find the optimal k and to produce stable results
+
+```
+
+
+## step 5: generate inundation maps and flood depths
+```{r}
+source('./_scripts/research2020/functions/INUN_parallel.R')
+print('5. generate inundation maps and flood depths')
+
+## generate files for LISFLOOD
+print('generating files for LISFLOOD...')
+dem <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy.tif')
+topobathy <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy_save.tif')
+dem <- crop(dem, topobathy)
+
+hydropoly <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+                     layer = 'NHDArea', quiet = TRUE)
+fcode <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+                 layer = 'NHDFCode', quiet = TRUE)
+hydropoly_rr <- hydropoly %>% 
+  left_join(fcode %>% select('FCODE', 'DESCRIPTION'), by = c('FCode' = 'FCODE')) %>% 
+  subset(grepl('Stream/River', DESCRIPTION)) %>% 
+  subset(row.names(.) == '2104') %>%  #get Russian River only
+  st_intersection(st_transform(wbd12, st_crs(.))) %>% 
+  mutate(feature_id = row.names(.)) %>% 
+  subset(!(feature_id %in% c('2104', '2104.12', '2104.20'))) %>% 
+  st_transform(albers) %>% 
+  select(feature_id, Shape) %>% 
+  mutate(AREA = st_area(.), 
+         PERIMETER = lwgeom::st_perimeter(.),
+         WIDTH = 2*AREA/PERIMETER) %>%  
+  st_transform(proj4string(dem)) %>% 
+  st_crop(extent(dem))
+
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img') 
+lulc.att <- lulc@data@attributes[[1]]
+lulc.n <- crop(lulc, sonoma %>% st_union %>% st_transform(proj4string(lulc)) %>% as('Spatial') %>% extent)
+vals <- unique(lulc.n[])
+manning <- data.frame(lulc = c(21:24, 31, 41:43, 52, 71, 81, 90, 95), 
+                      n = c(0.0404, 0.0678, 0.0678, 0.0404, 0.0113, 0.36, 0.32, 0.4, 0.4, 0.368, 0.325, 
+                            0.086, 0.1825))
+for (i in 1:length(vals)) {
+  if (vals[i] %in% manning$lulc) {
+    lulc.n[lulc.n == vals[i]] <- manning[manning$lulc == vals[i], 'n']
+  } else {
+    lulc.n[lulc.n == vals[i]] <- 0.05
+  }
+}
+
+## register parallel backend
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+
+## run LISFLOOD for every runoff outcome
+print('calculating LISFLOOD inundation rasters...')
+t1 <- Sys.time()
+inundation <- generate_inundation(fileloc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/',
+                                  dem = dem, river = hydropoly_rr, lulc = lulc.n,
+                                  parname = 'russian', bciname = 'russian',
+                                  runoff = data.frame(kclust$centers), 
+                                  drainarea = inlet$DRNAREA)
+stopCluster(cl)
+print(Sys.time() - t1)
+plot_inundation(inundation, aoi)
+
+# ## to recover a previous run of generate_inundation:
+# cl <- makeCluster(round(detectCores()*2/3))
+# registerDoSNOW(cl)
+# pb <- txtProgressBar(min = 0, max = 40, style = 3)
+# progress <- function(n) setTxtProgressBar(pb, n)
+# opts <- list(progress = progress)
+# inundation <-
+#   foreach (i = 1:40,
+#            .packages = 'raster',
+#            .options.snow = opts) %dopar% {
+#     raster(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma/', 'results/test', i, '.max'))
+#   }
+# inundation <- do.call('stack', inundation)
+# crs(inundation) <- crs(dem)
+# stopCluster(cl)
+
+
+## load building densities & housing counts
+print('importing building information...')
+housing <- st_read('./_gis/California/_structures/SimplyAnalytics_SonomaHousing/SimplyAnalytics_Shapefiles_2020-08-05_17_52_48_84f11ceb99dafe222dde3767eb4fe663.shp', quiet = TRUE) %>%
+  st_transform(st_crs(sonoma)) %>%
+  subset(c(st_intersects(., aoi, sparse = FALSE)))
+names(housing)[3:4] <- c('Households', 'HousingUnits')
+housing$GEOID <- toNumber(housing$spatial_id)
+
+struct <- st_read('./_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
+                  layer = 'CartographicBuildingFootprints', quiet = TRUE) %>% 
+  st_transform(st_crs(sonoma)) %>% 
+  st_centroid() %>% 
+  st_crop(housing)
+
+## register parallel backend
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+
+## find flood depths at each building
+t2 <- Sys.time()
+depth <- generate_flood_depth(inundation, 
+                              runoff = data.frame(kclust$centers), 
+                              river = hydropoly_rr, 
+                              struct, housing, 
+                              buffer = 50, grid.size = 0.02, n.depth = 25)
+stopCluster(cl)
+print(Sys.time() - t2)
+
+```
+
+
+## step 6: generate building damage ratios
+```{r}
+source('./_scripts/research2020/functions/DM.R')
+print('6. generate building damage ratios')
+
+# pb <- txtProgressBar(min = 0, max = length(unique(attr(depth, 'censustract'))), style = 3)
+# i <- 1
+# depth_new <- matrix(nrow = 4000, ncol = 0)
+# censustract <- c()
+# for (ct in unique(attr(depth, 'censustract'))) {
+#   index <- which(attr(depth, 'censustract') == ct)
+#   if (length(index) > 0) {
+#     keep <- rowSort(depth[,index]) %>% apply(2, function(x) sum(x) != 0) %>% which
+#     depth_new <- cbind(depth_new, rowSort(depth[,index])[,keep])
+#     censustract <- c(censustract, attr(depth, 'censustract')[index][keep])
+#   }
+#   setTxtProgressBar(pb, i)
+#   i <- i + 1
+# }
+# attributes(depth_new)$simulation <- attributes(depth)$simulation
+# attributes(depth_new)$censustract <- censustract
+
+t3 <- Sys.time()
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+damage <- generate_flood_damage(depth_new, curve = 'average', n.damage = 1e2)
+stopCluster(cl)
+Sys.time() - t3
+
+save(AR, precip, runoff, kclust, depth_save, depth, depth_new, damage, 
+     file = 'D:/Research/stochastic_progress.Rdata')
+# load('D:/Research/stochastic_progress.Rdata')
+
+```
+
+## step 7: generate loss values by census tract
+```{r}
+source('./_scripts/research2020/functions/DV.R')
+print('7. generate loss values by census tract')
+
+## register parallel backend
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+
+t4 <- Sys.time()
+medval <- 657244/1.31 #median 2019 home value from Zillow, adjusted to 2006 inflation
+loss <- generate_loss_estimates(damage, value_mean = medval, value_sd = 1e5, n.loss = 1e2)
+stopCluster(cl)
+Sys.time() - t4
+
+# save(AR, precip, runoff, kclust, depth, depth_new, damage, loss,
+#      file = 'D:/Research/stochastic_progress.Rdata')
+load('./stochastic_progress.Rdata')
+
+## apply importance sampling weights
+loss.mean <- loss %>% 
+  select(-n.depth, -n.damage, -n.loss) %>% 
+  group_by(lisflood.id) %>% 
+  summarize_all(mean) %>% 
+  ungroup %>% 
+  select(-lisflood.id) %>% 
+  as.matrix
+loss.mean <- (prop.table(table(kclust$cluster)) %*% loss.mean) %>% 
+  t %>% data.frame %>% 
+  cbind(row.names(.)) %>% 
+  setNames(c('loss', 'GEOID')) %>% 
+  mutate(GEOID = toNumber(gsub('CT', '', GEOID))) %>% 
+  right_join(sonoma %>% mutate(GEOID = toNumber(GEOID)), ., by = 'GEOID')
+ggplot() + 
+  geom_sf(data = sonoma, fill = NA) + 
+  geom_sf(data = loss.mean, aes(fill = loss)) + 
+  scale_fill_distiller(palette = 'Blues', direction = 1, limits = c(0,NA), values = c(-0.1,1))
+
+loss.dist <- loss %>% 
+  select(which(grepl('CT', names(.)))) %>% 
+  rowSums %>% 
+  data.frame(loss = .) 
+loss.dist <- rep(table(kclust$cluster), length.out = toNumber(nrow(loss))) %>% 
+  mutate(loss.dist, weight = .)
+ggplot(loss.dist) + 
+  geom_histogram(aes(x = loss/1e6, y = ..density.., weight = weight), 
+                 color = 'black', fill = 'white', bins = sqrt(nrow(loss)/max(kclust$cluster))) + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  theme_classic()
+
+plot_loss_distribution(loss)
+loss[,-(1:6)] %>% apply(1, sum) %>% max
+
+```
+
+## step 8: save out
+```{r}
+save(AR, precip, runoff, kclust, inundation, depth, damage, loss, file = './PARRA_IARC.Rdata')
+# load('./PARRA_quals.Rdata')
+
+```
+

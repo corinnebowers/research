@@ -1,0 +1,801 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "8/19/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(tidyr)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(units)
+require(dataRetrieval)
+require(rnoaa)
+require(exactextractr)
+require(censusapi); Sys.setenv(CENSUS_KEY = 'f2e090156b02ced027d4ed756f82c9a3a1aa38c9')
+
+require(foreach)
+require(parallel)
+require(doSNOW)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) ifelse(sum(is.na(x)) == length(x), NA, mean(x, na.rm = TRUE))
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE) 
+Min <- function(x) min(x, na.rm = TRUE)
+
+opts <- list(progress = function(n) setTxtProgressBar(pb, n))
+
+```
+
+```{r coordinates}
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+```
+
+```{r import NFIP data}
+## NFIP data
+load('./_data/NFIP/NFIP.Rdata')
+claims$counter <- 1
+
+```
+
+```{r assign IVT to claims}
+load('./_data/MERRA/Rutzcatalog.Rdata')
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+hourlist <- rep(datelist, each = 8) #+ hours(rep(seq(0, 21, 3), length(datelist)))
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+# cl <- makeCluster(round(detectCores()*2/3))
+# registerDoSNOW(cl)
+# pb <- txtProgressBar(min = 0, max = nrow(claims), style = 3)
+# claims$IVT <- 
+#   foreach (i = 1:nrow(claims), 
+#            .combine = 'c',
+#            .packages = 'lubridate',
+#            .options.snow = opts) %dopar% {
+#     loc <- toNumber(c(claims[i,'latitude'], claims[i,'longitude']))
+#     loc[2] <- round(loc[2]/0.625)*0.625
+#     loc[1] <- round(loc[1]/0.5)*0.5
+#     claim_period <- claims$dateofloss[i] - days(0)
+#     index <- hourlist %in% claim_period
+#     ifelse(sum(index) > 0, max(IVT[LAT == loc[1], LON == loc[2], index]), NA)
+#   }
+# stopCluster(cl)
+
+```
+
+```{r import geometry data}
+## useful geometries
+## data source: see documentation for tigris package
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class = 'sf')
+CT <- tracts(state = 'CA', class = 'sf')
+CT <- merge(CT, data.frame(COUNTYFP = california$COUNTYFP, COUNTYNAME = california$NAME),
+            by = 'COUNTYFP', all.x = TRUE)
+CT$COUNTYID <- toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP)
+CT$GEOID <- toNumber(CT$GEOID)
+
+## add county names to claims
+claims <- merge(claims, data.frame(countycode = 6000 + toNumber(california$COUNTYFP),
+                                   COUNTYNAME = california$NAME), 
+                by = 'countycode', all.x = TRUE)
+
+```
+
+```{r create AR catalog}
+## data needed:
+load('D:/Research/_data/grid_catalog.Rdata')  # list of ARs by cell (ar_grid) and a spatial tracker (tracker)
+ar.threshold <- 0.5 
+
+tracker.raster <- tracker[,c(2,1,3,4)]
+tracker.raster <- rasterFromXYZ(tracker.raster, crs = st_crs(california)$proj4string) 
+
+timer <- Sys.time()
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+pb <- txtProgressBar(min = 0, max = nrow(california), style = 3)
+county_catalog <- 
+  foreach (c = 1:nrow(california), 
+           .combine = 'rbind',
+           .inorder = FALSE,
+           .packages = c('dplyr', 'raster', 'sf', 'lubridate'), 
+           .options.snow = opts) %dopar% {
+    
+    ## get cells associated with each county         
+    county = california[c,]
+    tracker.id <- rasterize(county, tracker.raster, getCover = TRUE) %>% 
+      as.data.frame(xy = TRUE) %>% 
+      subset(layer > 0) %>% 
+      left_join(tracker, by = c('x'='lon', 'y'='lat')) %>% 
+      dplyr::select(step) %>% 
+      unlist %>% unname %>% sort  
+    tracker.id <- tracker.id[!(tracker.id %in% c(827,1185))]  ## these ones cause issues
+    
+    ## identify all AR storms in the region of interest
+    storm.df <- data.frame(date = seq(ymd('1980-01-01'), ymd('2019-12-31'), 'days'))
+    storm.df[,paste(tracker.id)] <- 0
+    hour.df <- storm.df
+    for (id in 1:length(tracker.id)) {
+      ar_list <- ar_grid[[tracker.id[id]]]
+      ar_list$total_hours <- (ymd_h(paste(ar_list$end_date, ar_list$end_hour)) -
+                                ymd_h(paste(ar_list$start_date, ar_list$start_hour))) %>% 
+        as.numeric(units = 'hours')
+      for (i in 1:nrow(ar_list)) {
+        storm <- seq(ymd(ar_list[i, 'start_date']), ymd(ar_list[i, 'end_date']), 'days')
+        storm.df[storm.df$date %in% storm, id+1] <- ar_list[i, 'IVT_max']
+        hour.df[storm.df$date == storm[1], id+1] <- ar_list[i, 'total_hours']
+      }
+    }
+    ## subset to rainy season
+    storm.df <- storm.df %>% subset(month(date) %in% c(10:12, 1:3))
+    hour.df <- hour.df %>% subset(month(date) %in% c(10:12, 1:3))
+    storm.df$storm <- apply(storm.df[,2:(length(tracker.id)+1)], 1, function(x) sum(x > 0))
+
+    ## number AR storms
+    storm.df$ar <- 0
+    ar <- 0
+    for (i in 2:nrow(storm.df)) {
+      if (storm.df[i, 'storm'] >= length(tracker.id)*ar.threshold) {
+        if (storm.df[i-1, 'storm'] <= length(tracker.id)*ar.threshold) {
+          ar <- ar + 1
+        }
+        storm.df[i, 'ar'] <- ar
+      }
+    }
+    ## make a catalog
+    catalog <- data.frame(AR = 1:max(storm.df$ar))
+    for (ar in 1:max(storm.df$ar)) {
+      catalog$start_day[ar] <- paste(min(ymd(storm.df[storm.df$ar == ar, 'date'])))
+      catalog$end_day[ar] <- paste(max(ymd(storm.df[storm.df$ar == ar, 'date'])))
+      catalog$IVT_max[ar] <- max(storm.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)])
+      catalog$duration[ar] <- max(apply(hour.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)], 2, sum))
+    }
+    catalog %>% mutate(county = county$NAME)
+  }
+stopCluster(cl)
+Sys.time() - timer
+
+```
+
+```{r}
+## do some maps
+county_catalog <- county_catalog %>% 
+  mutate(wateryear = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0))
+county_catalog_info <- county_catalog %>% 
+  group_by(county) %>% 
+  summarize(num_AR = length(AR)/40,
+            mean_duration = mean(duration), 
+            mean_IVT = mean(IVT_max), 
+            mean_start = mean(ymd(start_day) - years(wateryear-1960)),
+            mean_days = as.numeric(days(ymd(mean_start) - ymd('1959-10-1')), units = 'days'),
+            .groups = 'drop') %>% 
+  full_join(california, ., by = c('NAME' = 'county'))
+
+theme_set(theme_void())
+ggplot(county_catalog_info) + 
+  geom_sf(aes(fill = num_AR)) + 
+  ggtitle('Average ARs per Season') + 
+  scale_fill_viridis_c()
+ggplot(county_catalog_info) + 
+  geom_sf(aes(fill = mean_duration)) + 
+  ggtitle('Average AR Duration (hrs)') + 
+  scale_fill_viridis_c()
+ggplot(county_catalog_info) + 
+  ggtitle('Average Max IVT (kg/m/s)') + 
+  geom_sf(aes(fill = mean_IVT)) + 
+  scale_fill_viridis_c()
+ggplot(county_catalog_info) + 
+  ggtitle('Average Days Since Wet Season Onset') + 
+  geom_sf(aes(fill = mean_days)) + 
+  scale_fill_viridis_c()
+theme_set(theme_bw())                      
+                                                          
+```
+
+
+```{r}
+## get daily precip for the length of the record
+
+# datelist <- seq(ymd('1979-01-01'), ymd('2019-12-31'), 'days')
+# precip <- cbind(date = paste(datelist), matrix(nrow = length(datelist), ncol = nrow(CT_sonoma))) %>% as.data.frame
+# names(precip)[-1] <- CT_sonoma$GEOID
+# precip[,-1] <- apply(precip[,-1], 2, as.numeric)
+# 
+# pb <- txtProgressBar(min = 0, max = length(datelist), style = 3)
+# for (i in 1:length(datelist)) {
+#   d <- datelist[i]
+#   cpc_precip <- cpc_prcp(d)
+#   cpc_precip$lon <- cpc_precip$lon-360
+#   cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = st_crs(california)$proj4string))
+#   precip[i,-1] <- velox(cpc_precip)$extract(CT_sonoma, small = TRUE) %>% lapply(mean) %>% unlist
+#   setTxtProgressBar(pb, i)
+# }
+# save(precip, file = './_data/daily_precip_by_CT.Rdata')
+# load('./_data/daily_precip_by_CT.Rdata')
+
+timer <- Sys.time()
+cl <- makeCluster(7)
+registerDoSNOW(cl)
+pb <- txtProgressBar(min = 0, max = length(datelist), style = 3)
+datelist <- seq(ymd('1979-01-01'), ymd('2019-12-31'), 'days')
+precip <-
+  foreach (i = 1:length(datelist),
+           .combine = 'rbind',
+           .packages = c('dplyr', 'rnoaa', 'sf', 'raster', 'exactextractr'),
+           .options.snow = opts) %dopar% {
+    suppressWarnings(
+      cpc_prcp(datelist[i]) %>%
+      mutate(lon = lon-360, precip = ifelse(precip == -99.9, NA, precip)) %>% 
+      rasterFromXYZ(crs = st_crs(california)$proj4string) %>% 
+      exact_extract(california, 'mean', progress = FALSE)
+    )
+  }
+stopCluster(cl)
+Sys.time() - timer
+
+precip_save <- precip
+# precip <- precip_save
+precip <- cbind(data.frame(date = datelist), precip)
+names(precip)[-1] <- california$NAME
+save(precip, file = './_data/daily_precip_by_county.Rdata')
+# load('./_data/daily_precip_by_county.Rdata')
+
+```
+todo: run the code above, make sure that the NA's aren't affecting the exact_extract mean calculation
+
+
+## TIME & LOCATION VARIABLES
+
+```{r get hazard array}
+## open soil moisture file
+soil_nc <- nc_open('./_data/soilmoisture/NOAA/soilw.mon.mean.v2.nc')
+soil_lat <- ncvar_get(soil_nc, 'lat')
+soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+soil <- ncvar_get(soil_nc, 'soilw')
+nc_close(soil_nc)
+
+
+## add hazard variables to catalog
+timer <- Sys.time()
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+pb <- txtProgressBar(min = 0, max = nrow(county_catalog), style = 3)
+catalog_vars <- 
+  foreach (ar = 1:nrow(county_catalog),
+           .combine = 'rbind',
+           .packages = c('dplyr', 'lubridate', 'raster', 'exactextractr'),
+           .inorder = FALSE,
+           .options.snow = opts) %dopar% {
+    ## define input variables
+    start <- ymd(county_catalog$start_day[ar]) - days(1)
+    end <- ymd(county_catalog$end_day[ar]) + days(1)
+    wy <- county_catalog$wateryear[ar]
+
+    ## add damage data
+    vars <- claims %>% 
+      subset(COUNTYNAME == county_catalog$county[ar]) %>% 
+      subset(ymd(dateofloss) >= ymd(county_catalog$start_day[ar])-days(1) & 
+               ymd(dateofloss) <= ymd(county_catalog$end_day[ar])+days(1)) %>%
+      summarize(num_claims = length(amountpaidonbuildingclaim),
+                value_claims = Sum(amountpaidonbuildingclaim) + 
+                  Sum(amountpaidoncontentsclaim)) %>% unlist
+    
+    ## storm total/max rainfall
+    storm <- seq(start, end, 'days')
+    precip.storm <- precip %>% 
+      subset(paste(date) %in% paste(storm)) %>% 
+      dplyr::select(county_catalog$county[ar])
+    vars['precip.total'] <- sum(precip.storm)
+    vars['precip.max'] <- max(precip.storm)
+  
+    ## max storm length (consecutive days of rainfall)
+    vars['days.max'] <- sum(unlist(precip.storm) > 0)
+  
+    ## cumulative rainfall at various points
+    prevweek <- seq(start - days(7), start - days(1), 'days')
+    vars['precip.prevweek'] <- precip %>% 
+      subset(paste(date) %in% paste(prevweek)) %>% 
+      dplyr::select(county_catalog$county[ar]) %>% sum
+    prevmonth <- seq(start - days(31), start - days(1), 'days')
+    vars['precip.prevmonth'] <- precip %>% 
+      subset(paste(date) %in% paste(prevmonth)) %>% 
+      dplyr::select(county_catalog$county[ar]) %>% sum
+    season <- seq(ymd(paste(wy-1, 9, 30)), start, 'days')
+    vars['precip.season'] <- precip %>% 
+      subset(paste(date) %in% paste(season)) %>% 
+      dplyr::select(county_catalog$county[ar]) %>% sum
+    
+    ## soil moisture
+    SM_stack <- raster::stack()
+    monthrecord <- ifelse(month(start) <= month(end),
+                          length(month(start):month(end)),
+                          length((month(start)-12):month(end))) - 1
+    startmonth <- ymd(paste(year(start), month(start), '1', sep = '-'))
+    for (i in 0:monthrecord) {
+      mo <- month(startmonth + months(i))
+      yr <- year(startmonth + months(i))
+      index <- (1:nrow(soil_time))[soil_time$month == mo & soil_time$year == yr]
+      SM_raster <- raster(t(soil[,,index]), xmn = min(soil_lon), xmx = max(soil_lon), 
+                          ymn = min(soil_lat), ymx = max(soil_lat))
+      SM_stack <- raster::stack(SM_stack, SM_raster)
+    }
+    SM_avg <- mean(SM_stack); crs(SM_avg) <- projection(california)
+    vars['soilmoisture'] <- 
+      exact_extract(SM_avg, california %>% subset(NAME == county_catalog$county[ar]), 
+                    'mean', progress = FALSE)
+    ## return result
+    c('AR' = ar, vars)
+  }
+stopCluster(cl)
+Sys.time() - timer
+
+```
+
+
+## LOCATION VARIABLES
+
+```{r}
+#### land use/land cover
+timer <- Sys.time()
+get.lulc <- function(x) x %>% 
+  group_by(value) %>%
+  summarize(coverage = sum(coverage_fraction), .groups = 'drop') %>% 
+  mutate(fraction = prop.table(coverage)) %>% 
+  filter(value %in% 21:24) %>% #filter to developed classes
+  .$fraction %>% sum
+lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img')
+california$developed <- california %>% 
+  st_transform(albers) %>% 
+  st_transform(proj4string(lulc)) %>% 
+  exact_extract(lulc, .) %>% 
+  lapply(get.lulc) %>% unlist
+Sys.time() - timer
+
+#### imperviousness
+timer <- Sys.time()
+imperv <- raster('./_gis/USA/_landcover/NLCD_2016_Impervious_L48_20190405/NLCD_2016_Impervious_L48_20190405.img')
+california$impervious <- exact_extract(imperv, california, 'mean')
+Sys.time() - timer
+
+
+#### percent within floodplain
+timer <- Sys.time()
+NFHL <- st_read('./_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp') %>% 
+  st_transform(albers)
+## add a floodplain column to NFHL
+floodzone <- function(x) {
+  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO', 'V', 'VE')) {
+    return('YES')
+  } else if (x %in% c('D', 'X')) {
+    return('NO')
+  } else if (x == 'OPEN WATER') {
+    return('WATER')
+  } else {
+    return(NA)
+  }
+}
+NFHL$FLOODPLAIN <- factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))
+## divide area within floodplain by total area
+floodplain <- california %>% 
+  select(county = NAME) %>% 
+  st_transform(albers) %>% 
+  st_intersection(st_buffer(NFHL, 0)) %>% 
+  mutate(part_area = st_area(.)) %>%
+  group_by(FLOODPLAIN, county) %>%
+  st_buffer(dist = 0) %>%
+  summarize(part_area = Sum(part_area), .groups = 'drop')
+test <- california %>% 
+  select(county = NAME) %>% 
+  mutate(total_area = st_area(.)) %>% 
+  full_join(floodplain, by = 'county') %>%
+  filter(FLOODPLAIN == 'YES') %>%
+  mutate(pct_floodplain = toNumber(part_area/total_area)) %>% 
+  mutate(pct_floodplain = ifelse(is.na(pct_floodplain), 0, pct_floodplain)) %>% 
+  select(county, pct_floodplain) %>% 
+  full_join(california, ., by = c('NAME' = 'county'))
+california$pct_floodplain <- test
+Sys.time() - timer
+
+
+#### distance from the river
+## river data: https://data.cnra.ca.gov/dataset/national-hydrography-dataset-nhd
+rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>%
+  st_zm %>% st_transform(albers)
+california$river_dist <- california %>% 
+  st_transform(albers) %>% 
+  st_centroid %>% 
+  st_distance(., y = rivers) %>% 
+  drop_units %>% 
+  apply(1, function(x) min(x)/1609.34)
+
+## find the minimum distance to any major river for each CT
+# CT_centroid$DIST <- apply(drop_units(st_distance(x = st_transform(CT_centroid, albers), y = russian)),
+#                           1, min) / 1609.34  #converting meters to miles
+
+
+#### elevation
+temp <- california %>% 
+  st_transform(albers) %>% 
+  st_centroid %>% 
+  st_transform(NAD) %>% 
+  get_elev_point
+
+
+#### ACS population & housing estimates
+california <- 
+  getCensus(name = 'pep/population', vars = 'POP', vintage = 2019, 
+            regionin = 'state:06', region = 'county:*') %>% 
+  rename(population = POP) %>%  
+  full_join(california, ., by = c('COUNTYFP' = 'county', 'STATEFP' = 'state'))
+
+housing_vars <- listCensusMetadata(name = 'acs/acs5/profile', vintage = 2018)
+california <- 
+  getCensus(name = 'acs/acs5/profile', vars = 'group(DP04)', vintage = 2018,
+            regionin = 'state:06', region = 'county:*') %>% 
+  select(-state, -GEO_ID, -NAME) %>% 
+  select(-ends_with('M'), -ends_with('A'), -ends_with('PE')) %>% 
+  pivot_longer(cols = ends_with('E'), names_to = 'variable', values_to = 'estimate') %>% 
+  left_join(housing_vars %>% select('name', 'label'), by = c('variable' = 'name')) %>% 
+  separate(label, c(NA, 'group_title', 'group', 'description'), sep = '!!', fill = 'right') %>% 
+  filter(grepl('1-unit', description)) %>% 
+  group_by(county) %>% 
+  summarize(SFH = sum(estimate), .groups = 'drop') %>% 
+  full_join(california, ., by = c('COUNTYFP' = 'county'))
+
+#### ACS median structural age
+temp <- 
+  getCensus(name = 'acs/acs5/profile', vars = 'group(DP04)', vintage = 2018,
+            regionin = 'state:06', region = 'county:*') %>% 
+  select(-state, -GEO_ID, -NAME) %>% 
+  select(-ends_with('M'), -ends_with('A'), -ends_with('PE')) %>% 
+  pivot_longer(cols = ends_with('E'), names_to = 'variable', values_to = 'estimate') %>% 
+  left_join(housing_vars %>% select('name', 'label'), by = c('variable' = 'name')) %>% 
+  separate(label, c(NA, 'group_title', 'group', 'description'), sep = '!!', fill = 'right') %>% 
+  filter(group_title == 'YEAR STRUCTURE BUILT') %>%
+  filter(!is.na(description)) %>% 
+  select(county, description, estimate) %>% 
+  pivot_wider(id_cols = county, names_from = description, values_from = estimate)
+california <- temp[,11:2] %>% 
+  apply(1, function(x) cumsum(x)/sum(x)) %>% t %>% 
+  apply(1, function(x) c(x[last(which(x < 0.5))], last(which(x < 0.5)), 
+                         x[first(which(x > 0.5))])) %>% t %>% 
+  as.data.frame %>% setNames(c('prop.start', 'id.start', 'prop.end')) %>% 
+  cbind(county = temp$county, .) %>% 
+  mutate(id.end = id.start + 1) %>% 
+  left_join(data.frame(year = c(seq(1939, 2009, 10), 2013, 2020), id = 1:10), 
+            by = c('id.start' = 'id')) %>% rename(year.start = year) %>% 
+  left_join(data.frame(year = c(seq(1939, 2009, 10), 2013, 2020), id = 1:10), 
+            by = c('id.end' = 'id')) %>% rename(year.end = year) %>%
+  mutate(med_struct_age = round(year.start + (0.5-prop.start)*
+                                   (year.end-year.start)/(prop.end-prop.start))) %>% 
+  select(county, med_struct_age) %>% 
+  full_join(california, ., by = c('COUNTYFP' = 'county'))
+
+```
+
+
+## TIME VARIABLES
+
+```{r}
+#### set up dataframe
+df_time <- data.frame(DATE = seq(ymd('1975-01-01'), ymd('2019-12-31'), 'days'))
+df_time$YEAR <- year(df_time$DATE)
+df_time$MONTH <- month(df_time$DATE)
+
+
+####  PDO & ENSO
+load('./_data/PDO_ENSO.Rdata')
+df_time <- merge(df_time, PDO, by = c('YEAR', 'MONTH'), all.x = TRUE)
+df_time <- merge(df_time, ENSO, by = c('YEAR', 'MONTH'), all.x = TRUE)
+
+
+#### days since start of rainy season
+df_time$WATERYEAR <- ifelse(df_time$MONTH %in% 10:12, df_time$YEAR + 1, df_time$YEAR)
+df_time$rainyseason <- toNumber(df_time$DATE - ymd(paste(df_time$WATERYEAR-1, '-10-1', sep = '')) )
+
+
+#### runoff
+## decide which USGS gauges are most representative of flows in the study area
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv') %>%
+  subset(str_length(paste(site_no)) == 8) %>%
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california)) %>%
+  st_transform(albers)
+sites <- sites %>%   
+  st_buffer(dist = 50) %>% #meters
+  st_intersects(rivers, sparse = FALSE) %>% apply(1, any) %>% 
+  filter(sites, .)
+# ggplot() + 
+#   geom_sf(data = california, fill = 'grey95', color = 'grey70') + 
+#   geom_sf(data = rivers, color = 'black', size = 1) + 
+#   geom_sf(data = sites, color = 'red', size = 2) + 
+#   theme_void()
+
+## keep only gauges with long records
+# site.runoff <- readNWISdv(sites$site_no, parameterCd = param, statCd = statcode, startDate = '1979-01-01') %>% 
+#   renameNWISColumns() 
+# site.runoff %>% names
+#   mutate(wateryear = year(date) + ifelse(month(date) %in% 10:12, 1, 0)) %>% 
+#   group_by(site_no) %>% 
+#   summarize(record_length = length(unique(wateryear)), .groups = 'drop')
+```
+
+
+```{r}
+#### CRS
+load('./_data/CRS FOIA/crs_merged.Rdata')
+crs.temp <- crs %>% 
+  filter(State == 'CA') %>% 
+  filter(!is.na(cTot)) %>% 
+  filter(!is.na(`Community Name`)) %>% 
+  group_by(CID, Year) %>% 
+  summarize(community = `Community Name`, score = Mean(toNumber(cTot)), .groups = 'drop') %>% 
+  left_join(temp %>% mutate(CID = str_sub(CID, end = 6)), by = 'CID') %>% 
+  left_join(california %>% 
+              select(NAMELSAD, NAME) %>% 
+              mutate(NAMELSAD = str_to_upper(NAMELSAD)) %>% 
+              st_drop_geometry, 
+            by = c('County' = 'NAMELSAD')) %>% 
+  select(CID, year = Year, county = NAME, map_date = `Curr Eff\nMap Date`, score) %>% 
+  group_by(county, year) %>% 
+  summarize(map_date = Max(mdy(map_date)), score = mean(score), .groups = 'drop') %>% 
+  pivot_wider(id_cols = c(county, map_date), names_from = year, values_from = score) %>% 
+  group_by(county) %>% 
+  summarize(map_date = Max(ymd(map_date)), across(where(is.numeric), ~Mean(.x)), .groups = 'drop') %>% 
+  pivot_longer(cols = c(-county, -map_date), names_to = 'year', values_to = 'score')
+
+# https://www.fema.gov/flood-insurance/work-with-nfip/community-status-book
+temp <- readr::read_csv('C:/Users/cbowers/Downloads/CA.csv', skip = 4)
+temp <- temp %>% filter(!is.na(CID))
+
+# ## variable definitions (https://emilms.fema.gov/IS1101b/groups/32.html)
+# Init FHBM Identified:  This date tells when the Flood Hazard Boundary Map was created.  This map is only a factor in communities that do not have a Flood Insurance Rate Map.
+# Init FIRM Identified:  This date represents the community’s first Flood Insurance Rate Map, and it is important because it represents the dividing line between two building categories called Pre-FIRM and Post-FIRM, which we will discuss in more depth later in this course.
+# Curr Eff Map Date:  This is the date of the map currently in effect.
+# Reg-Emer Date:   The date the community first joined the NFIP. An "E" next to the date indicates that the community is in the Emergency Program and subject to limited coverage. If there is no "E" next to the date, then the community participates in the Regular Program.
+
+```
+
+```{r transfer time information to ARs}
+for (ar in 1:nrow(county_catalog)) {
+  ## define input variables
+  start <- county_catalog$start_day[ar] - days(1)
+  end <- county_catalog$start_day[ar] + days(1)
+  wy <- county_catalog$wateryear[ar]
+  df_time_start <- df_time %>% subset(DATE == start)
+  df_time_subset <- df_time %>% subset(DATE >= start & DATE <= end)
+  
+  ## assign variables to ARs
+  county_catalog$PDO[ar] <- Mean(toNumber(df_time_subset$PDO))
+  county_catalog$ENSO[ar] <- Mean(toNumber(df_time_subset$ENSO))
+  county_catalog$rainyseason[ar] <- df_time_start$rainyseason
+
+  # ## assign runoff variables to ARs
+  # time_subset$runoff.total[ar] <- Sum(df_time_subset$Runoff_mmday)
+  # time_subset$runoff.max[ar] <- Max(df_time_subset$Runoff_mmday)
+  
+  crs.idk <- crs.temp %>% 
+    filter(year == county_catalog$wateryear[ar] & county == county_catalog$county[ar])
+  if (nrow(crs.idk) == 1) {
+    county_catalog$CRS[ar] <- crs.idk$score[1]
+  } else {
+    print('what is happening')
+  }
+}
+
+```
+
+
+## REGRESSION ANALYSIS
+
+```{r reshape into dataframe}
+load('C:/Users/cbowers/Downloads/regression_by_county.Rdata')
+
+county_catalog$CRS[is.na(county_catalog$CRS)] <- 0
+hazard.df <- california %>%
+  dplyr::select(NAME, GEOID, developed, pct_floodplain, elevation_m, population, SFH, med_struct_age) %>% 
+  full_join(county_catalog, by = c('NAME' = 'county')) %>% 
+  st_drop_geometry
+
+```
+
+```{r}
+## SMOTE
+
+```
+
+```{r}
+## lasso variable selection
+
+```
+
+## regressions
+```{r}
+hazard.df <- hazard.df %>% 
+  dplyr::select(-AR, -elev_units, -num_claims, -value_claims) %>% 
+  dplyr::select(-GEOID, -PDO)
+hazard.df$payout <- ifelse(is.na(hazard.df$payout), 0, hazard.df$payout)
+
+# hazard.df <- hazard.df %>% subset(payout > 0)
+hazard.df %>% 
+  group_by(wateryear) %>% 
+  summarize(x = length(wateryear)/nrow(.)) %>% 
+  mutate(x = cumsum(x)) %>% 
+  subset(x > 0.8)
+train <- which(hazard.df$wateryear <= 2008)
+hazard.train <- hazard.df[train,]
+hazard.test <- hazard.df[-train,]
+
+sum(hazard.df$payout == 0) / nrow(hazard.df)
+
+require(caret)
+ctrl <- trainControl(method = 'repeatedcv', number = 10, repeats = 5)
+
+```
+
+
+```{r}
+## register parallel backend
+require(parallel)
+require(foreach)
+require(doParallel)
+
+registerDoParallel(6)
+getDoParWorkers()
+
+
+## elastic net
+f.net <- train(payout ~ ., data = hazard.train, method = 'glmnet',
+               family = 'gaussian',
+               tuneGrid = expand.grid(alpha = seq(0.8, 1, 0.02),
+                                      lambda = 10^seq(-5, -1, length.out = 100)),
+               trControl = ctrl)
+save(f.net, file = './models/f.net.Rdata')
+
+
+## MARS
+f.mars <- train(payout ~ ., data = hazard.train, method = 'earth',
+                tuneGrid = expand.grid(degree = 1:4, 
+                                       nprune = seq(2, 22, 2)), 
+                trControl = ctrl) 
+save(f.mars, file = './models/f.mars.Rdata')
+
+## random forest
+f.rf <- train(payout ~ ., data = hazard.train, method = 'parRF',
+              tuneGrid = expand.grid(mtry = seq(2, 22, 2)),
+              trControl = ctrl)
+save(f.rf, file = './models/f.rf.Rdata')
+
+
+## boosted trees
+f.boost <- train(payout ~ ., data = hazard.train, method = 'gbm', 
+                 distribution = 'gaussian', verbose = FALSE,
+                 tuneGrid = expand.grid(n.trees = c(100, 500, 1000),
+                                        interaction.depth = 1:3,
+                                        shrinkage = 10^seq(-5, -1, length.out = 50), 
+                                        n.minobsinnode = 10),
+                 trControl = ctrl)
+save(f.boost, file = './models/f.boost.Rdata')
+
+stopImplicitCluster()
+
+```
+
+```{r}
+# load('./models/sonoma/f.net.Rdata')
+# load('./models/sonoma/f.mars.Rdata')
+# load('./models/sonoma/f.rf.Rdata')
+# load('./models/sonoma/f.boost.Rdata')
+
+MSE <- function(y_pred, y_true) mean((y_pred - y_true)^2)
+
+predictions <- data.frame(net = predict(f.net, hazard.test), 
+                          mars = predict(f.mars, hazard.test) %>% unname, 
+                          rf = predict(f.rf, hazard.test), 
+                          boost = predict(f.boost, hazard.test))
+
+g1 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = net), color = ggcolor(4)[1]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(net))), linetype = 'dashed') + 
+  ggtitle('Elastic Net') +
+  theme_classic() + theme(axis.title = element_blank()) + 
+  lims(x = c(min(min(hazard.test$payout), min(predictions$net)), 
+             max(max(hazard.test$payout), max(predictions$net))), 
+       y = c(min(min(hazard.test$payout), min(predictions$net)), 
+             max(max(hazard.test$payout), max(predictions$net)))) +
+  coord_fixed(ratio = 1)
+g2 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = mars), color = ggcolor(4)[2]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(mars))), linetype = 'dashed') + 
+  ggtitle('MARS') + 
+  theme_classic() + theme(axis.title = element_blank()) +  
+  lims(x = c(min(min(hazard.test$payout), min(predictions$mars)), 
+             max(max(hazard.test$payout), max(predictions$mars))), 
+       y = c(min(min(hazard.test$payout), min(predictions$mars)), 
+             max(max(hazard.test$payout), max(predictions$mars)))) +
+  coord_fixed(ratio = 1)
+g3 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = rf), color = ggcolor(4)[3]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(rf))), linetype = 'dashed') + 
+  ggtitle('Random Forest') + 
+  theme_classic() + theme(axis.title = element_blank()) +  
+  lims(x = c(min(min(hazard.test$payout), min(predictions$rf)), 
+             max(max(hazard.test$payout), max(predictions$rf))), 
+       y = c(min(min(hazard.test$payout), min(predictions$rf)), 
+             max(max(hazard.test$payout), max(predictions$rf)))) +
+  coord_fixed(ratio = 1)
+g4 <- ggplot(cbind(payout = hazard.test$payout, predictions)) + 
+  geom_point(aes(x = payout, y = boost), color = ggcolor(4)[4]) + 
+  geom_abline(aes(slope = 1, intercept = min(min(payout), min(boost))), linetype = 'dashed') + 
+  ggtitle('Boosted Trees') +
+  theme_classic() + theme(axis.title = element_blank()) +  
+  lims(x = c(min(min(hazard.test$payout), min(predictions$boost)), 
+             max(max(hazard.test$payout), max(predictions$boost))), 
+       y = c(min(min(hazard.test$payout), min(predictions$boost)), 
+             max(max(hazard.test$payout), max(predictions$boost)))) +
+  coord_fixed(ratio = 1)
+gridExtra::grid.arrange(g1, g2, g3, g4, ncol = 2)
+
+ggplot(data = data.frame(model = c('Elastic Net', 'MARS', 'Random Forest', 'Boosted Trees'), 
+                         error = apply(predictions, 2, function(x) MSE(x, hazard.test$payout)))) + 
+  geom_col(aes(x = model, y = error), color = 'black', fill = 'grey90') + 
+  geom_hline(yintercept = MSE(0, hazard.test$payout), color = 'red') + 
+  scale_y_continuous(expand = c(0,0)) + 
+  ggtitle('Model RMSE Comparison') + 
+  theme_classic() + 
+  theme(axis.title = element_blank(),
+        panel.grid.major.y = element_line(color = 'grey75', linetype = 'dashed'))
+ggsave('./_plots/quals/slide33_fig1.jpg', width = 5, height = 5)
+
+ggplot(f.net$results) + 
+  geom_line(aes(x = lambda, y = RMSE, group = factor(alpha), color = factor(alpha))) + 
+  scale_x_log10()
+plot(f.mars)
+plot(f.rf)
+ggplot(f.boost$results) + 
+  geom_line(aes(x = shrinkage, y = RMSE, group = factor(n.trees), color = factor(n.trees))) + 
+  scale_x_log10() + 
+  # scale_y_continuous(limits = c(NA, .1)) + 
+  facet_wrap(~ interaction.depth)
+
+```
+
+```{r}
+
+```
+

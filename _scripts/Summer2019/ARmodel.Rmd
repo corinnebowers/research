@@ -1,0 +1,417 @@
+---
+title: "AR Model Creation"
+author: "Corinne"
+start_date: "10/23/2019"
+end_date: ""
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+```
+
+
+```{r packages, echo = FALSE}
+## packages
+require(ggplot2); theme_set(theme_bw())
+require(lubridate)
+require(ncdf4)
+require(raster)
+require(sf)
+require(lwgeom)
+require(tigris)  
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+```
+
+
+## SIO-R1 AR & IVT Data
+
+### October 23rd
+```{r}
+## load geography
+USA <- states(class = 'sf')
+
+## load in AR data
+AR <- read.table('./_data/SIO-R1/SIO_R1_1948-2017_Comprehensive.txt')
+names(AR) <- c('ID', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'LAT', 'LON', 'IVT', 'IVW', 'WINDU', 'WINDV')
+AR$LON <- AR$LON - 360
+AR$DATE <- ymd(paste(AR$YEAR, AR$MONTH, AR$DAY, sep = '-')) + hours(AR$HOUR)
+
+```
+
+
+PLOTTING IVT
+```{r}
+## look at the 2006 new years storm (#3161)
+AR_subset <- AR[AR$ID == 3161,]
+start <- min(AR_subset$DATE) - days(2)
+finish <- max(AR_subset$DATE) 
+storm <- interval(start, finish)
+
+IVT_2005 <- nc_open('./_data/SIO-R1/IVT_2005.nc')
+IVT_2006 <- nc_open('./_data/SIO-R1/IVT_2006.nc')
+
+lat <- ncvar_get(IVT_2005, 'lat')
+lon <- ncvar_get(IVT_2005, 'lon') - 360
+
+IVT_2005_array <- ncvar_get(IVT_2005, 'IVT')
+IVT_2006_array <- ncvar_get(IVT_2005, 'IVT')
+
+time_2005 <- ncvar_get(IVT_2005, 'time')
+time_2005 <- ymd('1800-01-01') + hours(time_2005)
+
+time_2006 <- ncvar_get(IVT_2006, 'time')
+time_2006 <- ymd('1800-01-01') + hours(time_2006)
+
+time_storm <- c(time_2005[time_2005 %within% storm], time_2006[time_2006 %within% storm])
+length_storm <- sum(c(time_2005, time_2006) %within% storm)
+IVT_storm_array <- array(c(IVT_2005_array[,,time_2005 %within% storm], 
+                           IVT_2006_array[,,time_2006 %within% storm]), 
+                         dim = c(length(lon), length(lat), length_storm))
+
+IVT_storm_raster <- raster(apply(IVT_storm_array, c(1,2), max), 
+                     xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+IVT_storm_df <- as.data.frame(IVT_storm_raster, xy = TRUE)
+
+ggplot() + 
+  geom_raster(data = IVT_storm_df, aes(x = x, y = y, fill = layer)) + 
+  geom_sf(data = USA, fill = NA, color = 'black') + 
+  scale_fill_viridis_c(name = 'IVT (kg/m/s)', direction = -1) +
+  xlim(range(lon)) + ylim(range(lat))
+
+
+nc_close(IVT_2005)
+nc_close(IVT_2006)
+
+```
+
+```{r}
+## try to plot landfalling ARs
+ggplot(data = AR_subset) +
+  geom_sf(data = USA, fill = 'NA') +
+  geom_line(aes(x = LON, y = LAT), color = 'red', size = 1) +
+  xlim(range(lon)) + ylim(range(lat))
+
+```
+
+
+EXTRACTING A TIME SERIES
+```{r}
+## create a raster brick from IVT
+IVT_2006_brick <- brick(IVT_2006_array, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+
+guerneville <- c(38.508798, -122.987234)
+row <- rowFromY(IVT_2006_brick, guerneville[1])
+col <- colFromX(IVT_2006_brick, guerneville[2])
+
+## plot IVT over Guerneville for a year
+guerneville_IVT <- getValues(IVT_2006_brick, row = row)[col,]
+ggplot(data = data.frame(time_2006, guerneville_IVT)) + 
+  geom_line(aes(x = time_2006, y = guerneville_IVT))
+
+## plot IVT over Guerneville for the length of the storm
+IVT_storm_brick <- brick(IVT_storm_array, xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+guerneville_IVT <- getValues(IVT_storm_brick, row = row)[col,]
+ggplot(data = data.frame(time_storm, guerneville_IVT)) + 
+  geom_line(aes(x = time_storm, y = guerneville_IVT))
+
+```
+
+### November 5th
+```{r}
+## find out how many ARs have passed over Guerneville
+latlon_min <- aggregate(cbind(LAT, LON) ~ ID, data = AR, function(x) min(x)-1.25) #resolution = 2.5 degrees
+latlon_max <- aggregate(cbind(LAT, LON) ~ ID, data = AR, function(x) max(x)+1.25)
+latlon <- merge(latlon_min, latlon_max, by = 'ID')
+names(latlon) <- c('ID', 'LATmin', 'LONmin', 'LATmax', 'LONmax')
+
+gville_AR <- latlon[latlon$LATmin < guerneville[1] & latlon$LATmax > guerneville[1] &
+         latlon$LONmin < guerneville[2] & latlon$LONmax > guerneville[2],]
+gville_AR_ID <- gville_AR$ID
+gville_AR_all <- merge(gville_AR, AR, by = 'ID', all.x = TRUE)
+
+## make a catalog of Guerneville ARs
+gville_AR$START <- aggregate(date(DATE) ~ ID, data = AR[AR$ID %in% gville_AR_ID,], min)[,2] #- days(1)
+gville_AR$END <- aggregate(date(DATE) ~ ID, data = AR[AR$ID %in% gville_AR_ID,], max)[,2] #+ days(1)
+
+
+# ## find out how many ARs have passed over Healdsburg
+# healdsburg <- c(38.610887, -122.868808)
+# 
+# hburg_AR <- latlon[latlon$LATmin < healdsburg[1] & latlon$LATmax > healdsburg[1] &
+#          latlon$LONmin < healdsburg[2] & latlon$LONmax > healdsburg[2],]
+# hburg_AR_ID <- hburg_AR$ID
+# hburg_AR_all <- merge(hburg_AR, AR, by = 'ID', all.x = TRUE)
+# 
+# ## make a catalog of Healdsburg ARs
+# hburg_AR$START <- aggregate(date(DATE) ~ ID, data = AR[AR$ID %in% hburg_AR_ID,], min)[,2] #- days(1)
+# hburg_AR$END <- aggregate(date(DATE) ~ ID, data = AR[AR$ID %in% hburg_AR_ID,], max)[,2] #+ days(1)
+
+load('./_data/NFIP.Rdata')
+ggplot(data = claims) + 
+  geom_histogram(aes(x = year(dateofloss)), color = 'black', fill = 'white', 
+                 bins = length(unique(year(claims$dateofloss))))
+
+```
+
+PERCENTAGE OF CLAIMS DUE TO ARS
+```{r}
+## how many claims occur during ARs?
+
+gville_AR$STORM <- interval(gville_AR$START, gville_AR$END)
+
+sonoma <- 6097 #county id
+claims_sonoma <- claims[claims$countycode == sonoma,]
+claims_sonoma <- claims_sonoma[!apply(claims_sonoma, 1, function(x) sum(is.na(x))) == ncol(claims_sonoma),]
+
+pb <- txtProgressBar(min = 0, max = nrow(gville_AR), style = 3)
+for (i in 1:nrow(gville_AR)) {
+  gville_AR$claims[i] <- sum(date(claims_sonoma$dateofloss) %within% gville_AR$STORM[i])
+  setTxtProgressBar(pb, i)
+}
+## note: check this number for double counting
+
+sum(gville_AR$claims)/nrow(claims_sonoma)
+```
+
+```{r}
+# ## repeat the above for Healdsburg
+# hburg_AR$STORM <- interval(hburg_AR$START, hburg_AR$END)
+# for (i in 1:nrow(hburg_AR)) {
+#   hburg_AR$claims[i] <- sum(date(claims_sonoma$dateofloss) %within% hburg_AR$STORM[i])
+# }
+
+```
+ 
+DISTRIBUTION OF AR LENGTHS
+```{r}
+x <- time_length(days(gville_AR$END - gville_AR$START), 'days')
+ggplot(data = data.frame(x)) + 
+  geom_histogram(aes(x=x), binwidth = 1, 
+                 color = 'black', fill = 'gray90') + 
+  ggtitle('Distribution of AR Lengths') + 
+  labs(x = 'Number of Days', y = 'Frequency of Occurrence')
+## keep in mind that I've added a day on either end of the interval, and these are not necessarily the """length""" of the storm
+```
+
+
+
+
+things to do:
+
+* Categorize claims by storm severity
+
+```{r}
+# ## figure out the difference between IVT and IVT_lev
+# 
+# ## lev is taken at 8 pressure levels (see the variable lev)
+# 
+# IVT_lev_2005 <- nc_open('./_data/SIO-R1/IVT_lev_2005.nc')
+# IVT_lev_2005_array <- ncvar_get(IVT_lev_2005, 'IVT')
+# 
+# lev <- ncvar_get(IVT_lev_2005, 'lev')
+# lat <- ncvar_get(IVT_lev_2005, 'lat')
+# lon <- ncvar_get(IVT_lev_2005, 'lon') - 360
+# 
+# ## figure out which level the IVT corresponds to
+# 
+# IVT_lev_raster <- raster(apply(IVT_lev_2005_array[,,1,], c(1,2), mean), 
+#                          xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+# IVT_lev_df <- as.data.frame(IVT_lev_raster, xy = TRUE)
+# ggplot() +
+#   geom_raster(data = IVT_lev_df, aes(x = x, y = y, fill = layer)) +
+#   geom_sf(data = USA, fill = NA, color = 'black') +
+#   scale_fill_viridis_c(name = 'IVT (kg/m/s)', direction = -1) +
+#   xlim(range(lon)) + ylim(range(lat))
+# 
+# IVT_raster <- raster(apply(IVT_2005_array, c(1,2), mean), 
+#                      xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+# IVT_df <- as.data.frame(IVT_raster, xy = TRUE)
+# ggplot() +
+#   geom_raster(data = IVT_df, aes(x = x, y = y, fill = layer)) +
+#   geom_sf(data = USA, fill = NA, color = 'black') +
+#   scale_fill_viridis_c(name = 'IVT (kg/m/s)', direction = -1) +
+#   xlim(range(lon)) + ylim(range(lat))
+# 
+# ## why are lev values so low? move on -> keep the normal IVT
+
+```
+
+
+```{r}
+# ## find the number of claims due to ARs (assign an IVT to each claim)
+# 
+# record <- 1970:2016
+# load('./_data/NFIP.Rdata')
+# 
+# # IVT <- stack()
+# claims$IVT <- 0
+# 
+# pb <- txtProgressBar(min = 1970, max = 2016, style = 3)
+# for (yr in record) {
+#   ## open the IVT file
+#   file <- paste('./_data/SIO-R1/IVT_', yr, '.nc', sep = '')
+#   IVT_nc <- nc_open(file)
+#   IVT_array <- ncvar_get(IVT_nc, 'IVT')
+# 
+#   IVT_time <- ncvar_get(IVT_nc, 'time')
+#   IVT_time <- ymd('1800-01-01') + hours(IVT_time)
+#   nc_close(IVT_nc)
+#   
+#   ##find the max IVT in the previous 3 days
+#   claimlist <- (1:nrow(claims))[date(claims$dateofloss) %in% date(IVT_time)]
+#   for (i in claimlist) {
+#     claim_day <- date(claims[i,'dateofloss'])
+#     claim_period <- claim_day - days(0:3)
+#     
+#     loc <- c(claims[i,'latitude'], claims[i,'longitude'])
+#     loc <- round(loc/2.5)*2.5
+#     
+#     claims[i,'IVT'] <- max(IVT_array[lon == loc[2], lat == loc[1], date(IVT_time) %in% claim_period])
+#   }
+#   setTxtProgressBar(pb, yr)
+# }
+# close(pb)
+# 
+# nrow(claims[claims$IVT > 250,])/nrow(claims)
+
+```
+note: this code was moved to regression3D.Rmd
+
+
+## January 14th
+
+import AR/IVT from Jonathan Rutz as arrays
+(note: this takes 20 hours!!! don't do it unless you absolutely have to!)
+```{r}
+datelist <- seq(ymd('1980-01-01'), ymd('2017-12-31'), 'days')
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+
+# IVT <- array(data = 0, dim = c(length(LAT), length(LON), length(datelist)*8))
+# IVT_total <- IVT; AR <- IVT; AR_duration <- IVT
+# AR_count <- 0
+# 
+# timer <- Sys.time()
+# pb <- txtProgressBar(min = 0, max = length(LON)*length(LAT), style = 3)
+# setTxtProgressBar(pb, 0)
+# for (lon in 1:length(LON)) {
+#   for (lat in 1:length(LAT)) {
+#     filename <- paste('http://www.inscc.utah.edu/~rutz/ar_catalogs/merra_0.5/timeseries/ivt_ar_',
+#                       format(round(LON[lon], 3), nsmall = 3), 'E_', 
+#                       format(round(LAT[lat], 3), nsmall = 3), 'N.txt', sep = '')
+#     file <- read.table(filename, skip = 1, header = FALSE)
+#     names(file) <- c('YEAR', 'MONTH', 'DAY', 'HOUR', 'IVT', 'AR', 'AR_new', 'AR_duration', 'IVT_total')
+#     IVT[lat,lon,] <- file$IVT
+#     IVT_total[lat,lon,] <- file$IVT_total
+#     AR[lat,lon,] <- file$AR
+#     AR_count <- AR_count + sum(file$AR_new)
+#     AR_duration[lat,lon,] <- file$AR_duration
+#     setTxtProgressBar(pb, (lon-1)*length(LAT) + lat)
+#   }
+# }
+# Sys.time() - timer
+# close(pb)
+# 
+# save(IVT, IVT_total, AR, AR_count, AR_duration, file = './_data/Rutzcatalog.Rdata')
+
+load('./_data/Rutzcatalog.Rdata')
+
+```
+
+save arrays as rasters
+(note: takes about two hours)
+```{r}
+# IVT_stack <- raster::stack()
+# AR_stack <- raster::stack()
+
+timer <- Sys.time()
+pb <- txtProgressBar(min = 0, max = length(datelist)*8, style = 3)
+setTxtProgressBar(pb, 0)
+for (i in 1:(length(datelist)*8)) {
+  dateformat <- paste(gsub('-', '', ymd(paste(file$YEAR[i], file$MONTH[i], file$DAY[i], sep = '-'))),
+                      formatC(file$HOUR[i]*100, width = 4, format = 'd', flag = '0'), sep = '_')
+
+  IVT_raster <- raster(IVT[,,i], xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT))
+  crs(IVT_raster) <- '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0'
+  writeRaster(IVT_raster, paste('./_data/MERRA/IVT/IVT_', dateformat, '.nc', sep = ''), overwrite = TRUE)
+  # IVT_stack <- raster::stack(IVT_stack, IVT_raster)
+  
+  AR_raster <- raster(AR[,,i], xmn = min(LON), xmx = max(LON), ymn = min(LAT), ymx = max(LAT))
+  crs(AR_raster) <- '+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0'
+  writeRaster(AR_raster, paste('./_data/MERRA/AR/AR_', dateformat, '.nc', sep = ''), overwrite = TRUE)
+  # AR_stack <- raster::stack(AR_stack, AR_raster)
+  setTxtProgressBar(pb, i)
+}
+Sys.time() - timer
+close(pb)
+
+```
+
+plot AR-IVT footprints
+```{r}
+start <- ymd('2005-12-29')
+end <- ymd('2006-01-03')
+
+start <- ymd('2005-12-28') + hours(3)
+end <- ymd('2006-01-03') + hours(21)
+timeline <- seq(start - hours(3), end, by = difftime(start + hours(3), start, units = 'hours'))
+
+footprint_stack <- raster::stack()
+for (i in 1:length(timeline)) {
+  d <- timeline[i]
+  IVT_filename <- paste('./_data/MERRA/IVT/IVT_', gsub('-', '', floor_date(d, unit = 'days')), '_', 
+                        formatC(hour(d)*100, width = 4, format = 'd', flag = '0'), '.nc', sep = '')
+  IVT_ncfile <- nc_open(IVT_filename)
+  
+  AR_filename <- paste('./_data/MERRA/AR/AR_', gsub('-', '', floor_date(d, unit = 'days')), '_', 
+                       formatC(hour(d)*100, width = 4, format = 'd', flag = '0'), '.nc', sep = '')
+  AR_ncfile <- nc_open(AR_filename)
+  
+  lat <- ncvar_get(IVT_ncfile, 'latitude')
+  lon <- ncvar_get(IVT_ncfile, 'longitude')
+  
+  footprint <- raster(ncvar_get(IVT_ncfile, 'layer') * ncvar_get(AR_ncfile, 'layer'), 
+                      xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat))
+  footprint[footprint <= 0] <- NA
+  footprint_stack <- raster::stack(footprint_stack, footprint)
+  
+  nc_close(IVT_ncfile)
+  nc_close(AR_ncfile)
+}
+
+# require(animation)
+# saveHTML ({
+  for (i in 1:length(timeline)) {
+    plotdf <- as.data.frame(footprint_stack[[i]], xy = TRUE); names(plotdf)[3] <- 'layer'
+    g <- ggplot() + 
+      geom_raster(data = plotdf, aes(x=x, y=y, fill = layer)) + 
+      geom_rect(aes(xmin = min(lon), xmax = max(lon), ymin = min(lat), ymax = max(lat)), 
+                color = 'gray50', linetype = 'dashed', fill = 'gray70', alpha = 0.1) + 
+      scale_fill_gradient2(low = '#f0f468', mid = '#790978', high = '#0034ff', 
+                           limits = c(250, 1500), midpoint = 0.70*(1500-250), na.value = NA, 
+                           name = 'IVT (kg/m/s)') + 
+      geom_sf(data = USA, fill = NA, color = 'black') + 
+      lims(x = c(-160, -105), y = c(20, 53)) + 
+      ggtitle(timeline[i])
+    print(g)
+  }
+# }, img.name = 'footprint', htmlfile = './AR_IVT_footprint.html')
+
+```
+

@@ -1,0 +1,264 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "6/16/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_bw())
+require(sf)
+require(raster)
+require(reshape2)
+require(elevatr)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(ncdf4)
+require(lubridate)
+require(velox)
+require(units)
+require(RColorBrewer)
+require(rnoaa)
+require(quantreg)
+require(dataRetrieval)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+```
+
+```{r coordinates}
+## common geometries
+USA <- states(class = 'sf')
+california <- counties(state = 'CA', class = 'sf')
+
+## EPSG codes for setting CRS
+NAD <- 4269
+albers <- 3310
+
+## import watersheds
+wbd4 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU4.shp')
+wbd6 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU6.shp')
+wbd8 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU8.shp')
+wbd10 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU10.shp')
+wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp')
+
+```
+
+```{r}
+## assign NFIP claims to grid
+
+## import claims
+load('./_data/NFIP.Rdata')
+claims <- claims %>% subset(occupancytype == 1)  #subset to SFH
+claims$dateofloss <- ymd(claims$dateofloss)
+
+## import census tracts
+california <- counties(state = 'CA', class = 'sf')
+california$GEOID <- toNumber(california$GEOID)
+CT <- tracts(state = 'CA', class = 'sf')
+CT <- merge(CT, data.frame(COUNTYFP = california$COUNTYFP, COUNTYNAME = california$NAME),
+            by = 'COUNTYFP', all.x = TRUE)
+CT$COUNTYID <- toNumber(CT$STATEFP)*1e3 + toNumber(CT$COUNTYFP)
+CT$GEOID <- toNumber(CT$GEOID)
+
+LON <- seq(-105, -150, -0.625)
+LAT <- seq(27.5, 52.5, 0.5)
+ggplot() + 
+  geom_sf(data = USA %>% subset(!(toNumber(GEOID) %in% c(2, 15, 60:80)))) + 
+  geom_hline(yintercept = LAT) + 
+  geom_vline(xintercept = LON) + 
+  theme_classic()
+
+claims$lat_rounded <- cut(claims$latitude, breaks = LAT + 0.5/2, dig.lab = 8) %>% paste %>% 
+  str_sub(start = str_locate(cut(claims$latitude, breaks = LAT + 0.5/2, dig.lab = 8) %>% paste, '\\(')[,1]+1, 
+          end = str_locate(cut(claims$latitude, breaks = LAT + 0.5/2, dig.lab = 8) %>% paste, ',')[,1]-1) %>% toNumber
+claims$lon_rounded <- cut(claims$longitude, breaks = LON + 0.625/2, dig.lab = 8) %>% paste %>%
+  str_sub(start = str_locate(cut(claims$longitude, breaks = LON + 0.625/2, dig.lab = 8) %>% paste, '\\(')[,1]+1,
+          end = str_locate(cut(claims$longitude, breaks = LON + 0.625/2, dig.lab = 8) %>% paste, ',')[,1]-1) %>% toNumber
+
+claims %>% 
+  group_by(lat_rounded, lon_rounded) %>% 
+  summarize(num_claims = Sum(counter), 
+            val_claims = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim)) %>%
+  ggplot() + 
+    geom_tile(aes(x = lon_rounded, y = lat_rounded, fill = num_claims)) + 
+    geom_sf(data = california, fill = NA) + 
+    scale_fill_viridis_c(direction = -1) + 
+    theme_void()
+
+claims %>% 
+  group_by(lat_rounded, lon_rounded) %>% 
+  summarize(num_claims = Sum(counter), 
+            val_claims = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim)) %>%
+  ggplot() + 
+    geom_tile(aes(x = lon_rounded, y = lat_rounded, fill = val_claims)) + 
+    geom_sf(data = california, fill = NA) + 
+    scale_fill_viridis_c(direction = -1) + 
+    theme_void()
+
+claims <- claims %>% 
+  mutate(lat_rounded = lat_rounded - 0.5/2, 
+         lon_rounded = lon_rounded - 0.625/2) %>% 
+  left_join(tracker, by = c('lat_rounded' = 'lat', 'lon_rounded' = 'lon'))
+
+```
+
+```{r}
+## compare claims dates to Russian River AR catalog
+claims.df <- claims %>% 
+  subset(month(dateofloss) %in% c(10:12, 1:3)) %>%
+  group_by(year = year(dateofloss), day = yday(dateofloss)) %>% 
+  summarize(claims = sum(counter)) %>% 
+  mutate(date = ymd(paste(year-1, '12', '31', sep = '-')) + days(day)) %>% 
+  mutate(date = paste(ifelse(day > 200, '2019', '2020'), month(date), day(date), sep = '-'))
+claims.df$day <- ifelse(claims.df$day > 200, claims.df$day - 365, claims.df$day)
+
+df <- catalog[[3]]
+storm.dates <- c()
+for (i in 1:nrow(df)) {
+  storm.dates <- c(storm.dates, paste(seq(ymd(df$start[i]), ymd(df$end[i]), 'days')))
+}
+storms.df <- data.frame(counter = 1, dates = storm.dates) %>%
+  group_by(year = year(dates), day = yday(dates)) %>% 
+  summarize(storms = sum(counter)) %>% 
+  mutate(date = ymd(paste(year-1, '12', '31', sep = '-')) + days(day)) %>% 
+  mutate(date = paste(ifelse(day > 200, '2019', '2020'), month(date), day(date), sep = '-'))
+storms.df$day <- ifelse(storms.df$day > 200, storms.df$day - 365, storms.df$day)
+
+ggplot() + 
+  geom_tile(data = claims.df, aes(x = ymd(date), y = year, fill = 'claims', alpha = log(claims)/max(log(claims))), 
+            show.legend = c(fill = TRUE, alpha = FALSE)) + 
+  geom_tile(data = storms.df, aes(x = ymd(date), y = year, fill = 'storms')) + 
+  geom_tile(data = inner_join(claims.df, storms.df, by = c('year', 'day')), 
+            aes(x = ymd(date.x), y = year, fill = 'both')) + 
+  scale_fill_manual(name = '', values = c('black', ggcolor(3)[2:3])) + 
+  theme(axis.title = element_blank())
+
+```
+
+```{r}
+## fit parameters for only storms with claims, across the entire state
+dist.fit <- data.frame(id = tracker.id, IVT_beta = NA, IVT_u = NA, dur_muln = NA, dur_sdln = NA)
+step <- 1
+pb <- txtProgressBar(min = 0, max = length(tracker.id), style = 3)
+for (i in tracker.id) {
+  claims.dates <- (claims %>% subset(step == i))$dateofloss %>% unique %>% ymd
+  if (length(claims.dates) >= 10) {
+    for (n in 1:nrow(ar_grid[[i]])) {
+      storm.dates <- paste(seq(ymd(ar_grid[[i]]$start_date[n]), ymd(ar_grid[[i]]$end_date[n])+days(1), 'days')) 
+      ar_grid[[i]][n, 'claims'] <- any(ymd(storm.dates) %in% claims.dates)
+    }
+    ar_list <- ar_grid[[i]] %>% subset(claims)
+    dist.fit[step, 'IVT_beta'] <- (sd(ar_list$IVT_max)*sqrt(6))/pi
+    dist.fit[step, 'IVT_u'] <- mean(ar_list$IVT_max) - 0.5772*dist.fit[step, 'IVT_beta']
+    dist.fit[step, 'dur_sdln'] <- sqrt(log((sd(ar_list$duration)/mean(ar_list$duration))^2 + 1))
+    dist.fit[step, 'dur_muln'] <- log(mean(ar_list$duration)/exp(dist.fit[step, 'dur_sdln']^2/2))
+  }
+  step <- step + 1
+  setTxtProgressBar(pb, step)
+}
+tracker.dist <- tracker %>% right_join(dist.fit, by = c('step' = 'id')) 
+  
+g1 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = IVT_u)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g2 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = IVT_beta)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g3 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = dur_muln)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+g4 <- ggplot(data = tracker.dist) + 
+  geom_raster(aes(x = lon, y = lat, fill = dur_sdln)) +
+  geom_sf(data = wbd6, fill = NA) +
+  scale_fill_viridis_c(na.value = NA) + 
+  theme_void()
+gridExtra::grid.arrange(g1, g2, g3, g4, nrow = 2)
+
+```
+
+```{r}
+pb <- txtProgressBar(min = 0, max = nrow(tracker), style = 3)
+for (i in tracker.id) {
+  claims.dates <- (claims %>% subset(step == i))$dateofloss %>% unique %>% ymd
+  for (n in 1:nrow(ar_grid[[i]])) {
+    storm.dates <- paste(seq(ymd(ar_grid[[i]]$start_date[n]), ymd(ar_grid[[i]]$end_date[n])+days(1), 'days')) 
+    ar_grid[[i]][n, 'claims'] <- any(ymd(storm.dates) %in% claims.dates)
+  }
+  setTxtProgressBar(pb, i)
+}
+
+
+## plot number of storms vs. number of storms with claims
+storms.plot <- data.frame(id = tracker.id, 
+                          storms_total = unlist(lapply(ar_grid, nrow))[tracker.id], 
+                          storms_claims = lapply(ar_grid[tracker.id], 
+                                                 function(x) nrow(subset(x, claims))) %>% unlist) %>% 
+  left_join(tracker, by = c('id' = 'step'))
+
+ggplot() + 
+  geom_raster(data = storms.plot, aes(x = lon, y = lat, fill = storms_total)) + 
+  geom_sf(data = california, fill = NA) + 
+  theme_void()
+ggplot() + 
+  geom_raster(data = storms.plot, aes(x = lon, y = lat, fill = storms_claims)) + 
+  geom_sf(data = california, fill = NA) + 
+  ggtitle('# of Storms with Claims') + 
+  scale_fill_gradient(name = '', low = 'white', high = 'blue4') + 
+  theme_void()
+
+```
+
+```{r}
+## find out which precipitation thresholds cause claims by HU6 watershed
+
+## get df_claims from dailydata.Rmd
+df_claims %>% 
+  subset(!is.na(num_claims)) %>% 
+  group_by(id) %>%
+  summarize(p10 = quantile(precip, 0.1), 
+            p25 = quantile(precip, 0.25), 
+            p50 = quantile(precip, 0.5), 
+            p90 = quantile(precip, 0.9)) %>% 
+  full_join(wbd6, by = c('id' = 'HUC6')) %>% 
+  st_sf %>% 
+  ggplot() + 
+    geom_sf(aes(fill = p10)) + 
+    geom_sf(data = california, fill = NA) + 
+    theme_void()
+
+## not entirely sure what to do with this information now that I have it -> move on
+```
+

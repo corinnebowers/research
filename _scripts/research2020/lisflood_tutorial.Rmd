@@ -1,0 +1,223 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "6/22/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'D:/Research/_data/LISFLOOD'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+
+```{r packages, message = FALSE, warning = FALSE}
+require(raster)
+require(dplyr)
+require(ggplot2); theme_set(theme_bw())
+
+```
+
+## Exercise 3
+```{r}
+## import data
+d <- raster('./exercise3/Data_layers/maxdepth.asc')
+v <- raster('./exercise3/Data_layers/maxVc.asc')
+
+```
+
+#### Physical risk assessment for people
+$$ H_{people} = d(v+1.5) + DF $$
+```{r}
+## create the DF layer
+DF <- (d > 0.25) | (v > 2)
+
+## create the H_people layer
+hazard_people <- d * (v+1.5) + DF
+
+```
+
+$$ R_1 = 2 E \left( \frac{SF_{area}}{100} \right) H_{people} \left( \frac{SF_{people}}{100} \right) $$
+$$ R_2 = 2R_1 \left( \frac{H_{people}}{100} \right) $$
+```{r}
+## calculate expected number of injuries (R1)
+### assume E = exposure = population (everyone is exposed), and assume SF_area = 9
+pop <- raster('./exercise3/Data_layers/population.asc')
+SF_area <- 9
+SF_people <- raster('./exercise3/Data_layers/people_mobility.asc') + raster('./exercise3/Data_layers/people_old.asc')
+
+R1 <- 2 * pop * (SF_area/100) * hazard_people * (SF_people/100)
+
+## calculate expected number of fatalities (R2)
+R2 <- 2 * R1 * (hazard_people/100)
+
+```
+
+## Physical risk assessment for buildings
+```{r}
+hazard_class <- v*0
+# hazard_class[v == 0 & v*d == 0] <- 0
+hazard_class[(v > 0 & v*d > 0 & v*d <= 3) | (v > 0 & v*d > 0 & v <= 2)] <- 1
+hazard_class[v > 2 & v*d > 3 & v*d <= 7] <- 2
+hazard_class[v > 2 & v*d > 7] <- 3
+
+buildings <- raster('./exercise3/Data_layers/buildings.asc')
+R_class_building <- mask(hazard_class, buildings, maskvalue = 0)
+
+```
+
+## Physical flood risk to infrastructure
+```{r}
+inundation <- mask(d > 0, d, maskvalue = 0) %>% 
+  rasterToPolygons(dissolve = TRUE) %>% 
+  st_as_sf
+roads <- st_read('./exercise3/Data_layers/roads.shp') %>% 
+  st_transform(st_crs(inundation))
+flooded_roads <- st_intersection(roads, inundation)
+
+```
+
+## Economic flood risk to buildings
+```{r}
+depth_damage <- data.frame(depth.min = c(seq(0, 3, 0.3), seq(3.4, 4.9, 0.3)), 
+                           depth.max = c(seq(0.3, 3, 0.3), seq(3.4, 4.9, 0.3), 100), 
+                           structure = c(0, 15, 21, 26, 31, 36, 41, 45, 49, 52, 56, 59, 61, 64, 66, 68, 69), 
+                           contents = c(0, 9, 12, 16, 19, 21, 24, 26, 28, 30, 32, 33, 35, 36, 36, 37, 37))
+damage_structure <- reclassify(d, rcl = depth_damage[,-4])
+damage_contents <- reclassify(d, rcl = depth_damage[,-3])
+
+buildings_cost <- raster('./exercise3/Data_layers/buildings_cost.asc')
+cost_structure <- buildings * buildings_cost * damage_structure/100
+cost_contents <- buildings * buildings_cost * damage_contents/100
+cost_total <- cost_structure + cost_contents
+
+cellStats(cost_total, sum)
+
+```
+
+## Exercise 4
+
+#### Creating a probabilistic flood hazard map
+```{r}
+## import data
+data <- R.matlab::readMat('./exercise4/Exercise 4 data.mat')
+depth <- data$water.depthBE
+depth <- array(unlist(depth), dim = c(nrow(depth[[1]]), ncol(depth[[1]]), 100))
+
+## create a probabilistic flood hazard map
+pfhm <- apply(depth>0, c(1,2), sum)
+
+```
+
+#### Investigating the effect of spatial dependence
+```{r}
+## first, simulate the "worst-case" 1-in-100 year flood 
+flow <- data$best.estimateQs
+
+## find the flow in each channel with an RP of 100 years
+flow %>% 
+  apply(2, function(x) sort(x, decreasing = TRUE)) %>%
+  cbind(100/(1:nrow(flow))) %>% 
+  as.data.frame %>% 
+  setNames(c('main', 'trib1', 'trib2', 'RP')) %>% 
+  subset(RP == 10) %>% 
+  select(-RP)
+
+## run in lisflood -> import results
+results <- raster('./exercise4/lisflood_data/results/res.max.asc')
+
+## compare to the probabilistic model from above
+pfhm.raster <- setValues(results, pfhm)                      
+ggplot() + 
+  geom_tile(data = as.data.frame(results > 0, xy = TRUE) %>% subset(layer), 
+            aes(x = x, y = y, fill = 'Worst-Case'), alpha = 0.5) + 
+  geom_tile(data = as.data.frame(pfhm.raster > 10, xy = TRUE) %>% subset(layer), 
+            aes(x = x, y = y, fill = 'Spatial Dependence'), alpha = 0.5) + 
+  scale_fill_manual(name = 'Model Type', values = c('green', 'blue')) + 
+  coord_fixed(ratio = 1) + 
+  theme_classic() + theme(axis.title = element_blank())
+
+```
+
+#### Estimating uncertainty
+```{r}
+depth.99 <- data$AE01BS
+depth.99 <- array(unlist(depth.99), dim = c(nrow(depth.99[[1]]), ncol(depth.99[[1]]), 99))
+flood.99 <- apply(depth.99 > 0, c(1,2), sum)
+flood.raster <- setValues(results, flood.99)
+
+river <- st_read('./exercise3/Data_layers/River.shp')
+
+require(RColorBrewer)
+ggplot() + 
+  geom_tile(data = as.data.frame(flood.raster, xy = TRUE) %>% subset(res.max > 0),
+            aes(x = x, y = y, fill = 'Highest 10%')) + 
+  geom_tile(data = as.data.frame(flood.raster, xy = TRUE) %>% subset(res.max >= quantile(1:99, 0.1)),
+            aes(x = x, y = y, fill = 'Middle 80%')) +
+  geom_tile(data = as.data.frame(flood.raster, xy = TRUE) %>% subset(res.max >= quantile(1:99, 0.9)),
+            aes(x = x, y = y, fill = 'Lowest 10%')) +
+  geom_sf(data = river, size = 2, color = 'black') + 
+  scale_fill_manual(name = 'Uncertainty',
+                    breaks = c('Lowest 10%', 'Middle 80%', 'Highest 10%'), 
+                    values = brewer.pal(4, 'Blues')[c(2,4,3)]) + 
+  ggtitle('1-in-100 Year Flood Extent') + 
+  # coord_fixed(ratio = 1) + 
+  theme_classic() + theme(axis.title = element_blank())
+
+```
+
+
+## Exercise 5
+
+#### flood prevention scenario A: floodwalls
+```{r}
+## modify original DEMs to account for floodwalls
+
+## wall #1: north waterville
+dem <- raster('./exercise5/A_floodwall/flood_valley_original.dem.asc')
+# 424250:424450 %>% colFromX(object = dem)
+x <- 27:30
+# 198502:198702 %>% rowFromY(object = dem)
+y <- 30:27
+
+for (i in 1:4) {
+  dem[y[i], x[i]] <- dem[y[i], x[i]] + 1
+}
+writeRaster(dem, './exercise5/A_floodwall/flood_valley_wall1.dem.asc', overwrite = TRUE)
+
+## wall #2: north riverton
+dem <- raster('./exercise5/A_floodwall/flood_valley_original.dem.asc')
+# 425551:425751 %>% colFromX(object = dem) 
+x <- 53:56
+# 199101:198901 %>% rowFromY(object = dem)
+y <- 19:22
+
+for (i in 1:4) {
+  dem[y[i], x[i]] <- dem[y[i], x[i]] + 1
+}
+writeRaster(dem, './exercise5/A_floodwall/flood_valley_wall2.dem.asc', overwrite = TRUE)
+
+```
+
+#### flood prevention scenario B: channel modification
+```{r}
+## deepening the channel
+bed <- raster('./exercise5/B_channel_modification/flood_valley_original.bed.asc')
+writeRaster(bed - 1, './exercise5/B_channel_modification/flood_valley_deeper.bed.asc', overwrite = TRUE)
+
+## widening the channel
+width <- raster('./exercise5/B_channel_modification/flood_valley_original.width.asc')
+writeRaster(width * 2, './exercise5/B_channel_modification/flood_valley_wider.width.asc', overwrite = TRUE)
+
+## creating an extra channel
+dem <- raster('./exercise5/A_floodwall/flood_valley_original.dem.asc')
+bed[28, 43:51] <- dem[28, 43:51] - 2
+width[28, 43:51] <- 20
+writeRaster(bed, './exercise5/B_channel_modification/flood_valley_extra.bed.asc', overwrite = TRUE)
+writeRaster(width, './exercise5/B_channel_modification/flood_valley_extra.width.asc', overwrite = TRUE)
+
+```
+
