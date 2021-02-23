@@ -101,8 +101,8 @@ vignette on DEM creation:
 hydro_m <- hydro / mft
 writeRaster(hydro_m, filename = 'C:/Users/cbowers/Downloads/watersheds/HYDRO_DEM_meters.tif')
 ```
-* use the Mosaic tool to merge with TopoBathy (set TopoBathy as target, set "Mosaic Operator" to last)
 
+* use the Mosaic tool to merge with TopoBathy (set TopoBathy as target, set "Mosaic Operator" to last)
 ```{r DEM}
 ## DEM
 dem <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy.tif')

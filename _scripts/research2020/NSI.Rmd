@@ -1,0 +1,339 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "1/5/2021"
+output: html_document
+---
+
+```{r}
+## packages
+require(sf)
+require(lubridate)
+require(tidyverse); theme_set(theme_classic())
+require(tigris)
+require(dataRetrieval)
+require(rnoaa)
+require(raster)
+require(RColorBrewer)
+require(scales)
+require(grid)
+require(gridExtra)
+require(plotly)
+require(mapview)
+require(elevatr)
+require(scales)
+
+```
+
+
+```{r}
+## functions
+toNumber <- function(x) as.numeric(paste(x))
+sum.na <- function(x) sum(is.na(x))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+
+CONUS <- states() %>% filter(STATEFP < 60) %>% filter(!(STUSPS %in% c('AK', 'HI')))
+california <- counties(state = 'CA')
+sonoma <- tracts(state = 'CA', county = 'Sonoma') %>% filter(TRACTCE != '990100')
+
+```
+
+
+```{r}
+## load data
+nsi <- read.csv('C:/Users/cbowers/Downloads/NSI_Sonoma.csv/NSI_sonoma.csv') %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = st_crs(CONUS))
+
+ggplot() + 
+  geom_sf(data = sonoma) + 
+  geom_sf(data = nsi[1:10000,])
+
+```
+
+```{r}
+#### set up analysis ####
+names(nsi)
+g <- ggplot(nsi) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  scale_y_continuous(expand = c(0,0), labels = comma)
+
+```
+
+
+```{r}
+#### check structure value ####
+medvalue <- 609600 #from the Census
+median(nsi_res$VAL_STRUCT + nsi_res$VAL_CONT)
+nsi_res %>%
+  st_drop_geometry %>% 
+  filter(grepl('RES1', OCCTYPE)) %>%
+  select(VAL_STRUCT, VAL_CONT) %>% 
+  rowSums %>% median
+## the median in this dataset is far lower (about 2/3 of) the median census home value. why?
+
+sum(nsi_res$VAL_STRUCT <= 1e6)/nrow(nsi_res)
+g + geom_histogram(data = nsi_res %>% filter(VAL_STRUCT <= 1e6),
+  aes(x = (VAL_STRUCT+VAL_CONT)/1e3), color = 'black', fill = 'white', bins = 100) + 
+  geom_vline(xintercept = medvalue/1e3, color = 'red') + 
+  scale_x_continuous(expand = c(0,0), labels = comma_format(prefix = '$', suffix = 'K'))
+
+
+#### check foundations & heights ####
+table(nsi_res$BASEMENT, nsi_res$FOUND_TYPE) ## all houses with basements are correctly labeled
+table(nsi_res$FOUND_HT, nsi_res$FOUND_TYPE)
+
+## from the metadata:
+# Based on the information in the hzCensusBlock table for building scheme and the tables in the MSH.mdb database that also contain the building scheme attribute, structures are classified into Slab, Pier, Unattached, and Basement using random assignment.
+# Foundation height (in feet) are calculated and provided based on the foundation type and whether the structures are in blocks that were dated pre- or post-NFIP.
+
+## these results definitely look generated, and why are basements above ground? is that the elevation of the first floor? 
+
+
+#### check elevations ####
+nsi_elev <- get_elev_point(nsi_res, src = 'aws')
+ggplot(nsi_elev) + 
+  geom_point(aes(x = GROUND_ELV, y = elevation), alpha = 0.1) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'NSI Elevation', y = 'NED Elevation') + 
+  coord_equal(clip = 'off')
+
+nsi_elev$error <- 100*(nsi_elev$GROUND_ELV-nsi_elev$elevation)/nsi_elev$elevation
+errordist <- nsi_elev$error %>% abs %>% cut(breaks = c(0, 1, 2, 5, 10, 25, 50, 100, Inf)) %>% summary
+round(cumsum(prop.table(errordist))*100, 2)
+
+ggplot(nsi_elev %>% filter(abs(error)>100)) + 
+  geom_sf(aes(color = error)) + 
+  scale_color_distiller(palette = 'Spectral')
+
+pal <- mapviewPalette("mapviewSpectralColors")
+mapview(sonoma, col.regions = 'grey70') + 
+  mapview(nsi_elev %>% filter(abs(error)>100), 
+          zcol = 'error', col.regions = pal(100), alpha.regions = 1)
+
+sum(nsi_elev$error>0)/nrow(nsi_elev)
+
+
+```
+
+```{r}
+## get more complete data on housing values
+require(censusapi)
+Sys.setenv(CENSUS_KEY = 'f2e090156b02ced027d4ed756f82c9a3a1aa38c9')
+acs_vars_2018_5yr <- listCensusMetadata(name = "2018/acs/acs5", type = "variables")
+
+acs_vars_2018_5yr %>% 
+  filter(grepl('VALUE', concept)) %>% View
+
+## find median value of owner-occupied units by census tract
+acs <- 
+  getCensus(name = "acs/acs5", vintage = 2018, region = "tract:*", 
+            regionin = "state:06+county:097", vars = "group(B25077)") %>%
+  mutate(GEOID = paste0(state, county, tract) %>% toNumber) %>% 
+  select(-c(GEO_ID, state, county, tract, NAME)) %>% 
+  select(-ends_with('EA'), -ends_with('M'), -ends_with('MA')) %>%
+  pivot_longer(ends_with('E'), names_to = 'variable', values_to = 'value')
+
+## compare to NSI data
+nsi_res$GEOID <- floor(nsi_res$CBFIPS/1e4)
+g <- nsi_res %>% 
+  st_drop_geometry %>%
+  mutate(total_value = VAL_STRUCT + VAL_CONT) %>% 
+  group_by(GEOID) %>% 
+  summarize(median_nsi = median(total_value), .groups = 'drop') %>% 
+  select(GEOID, median_nsi) %>% 
+  left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID') %>% 
+  ggplot() + 
+  geom_point(aes(x = median_acs, y = median_nsi)) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  scale_x_continuous(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)', 
+                     labels = comma_format(prefix = '$')) + 
+  scale_y_continuous(name = 'NSI Median Value for \nResidential Buildings', 
+                     labels = comma_format(prefix = '$')) + 
+  ggtitle('Median Housing Value by Census Tract', subtitle = 'Sonoma County, CA') + theme_bw()
+plotly::ggplotly(g)
+
+## find county aggregate values for different housing types
+acs <-
+  getCensus(name = "acs/acs5", vintage = 2018, region = "county:097",
+            regionin = "state:06", vars = "group(B25080)") %>%
+  mutate(county = paste0(state, county)) %>%
+  select(-c(GEO_ID, state, NAME)) %>%
+  select(-ends_with('EA'), -ends_with('M'), -ends_with('MA')) %>%
+  pivot_longer(ends_with('E'), names_to = 'variable', values_to = 'value') %>%
+  left_join(acs_vars_2018_5yr %>% select(name, label), by = c('variable' = 'name')) %>%
+  select(-variable) %>%
+  separate(label, into = c(NA, NA, 'type'), sep = '!!', fill = 'right') %>%
+  filter(!is.na(type))
+acs <- acs %>% 
+  mutate(category = c('SFH', 'SFH', 'MFH2', 'MFH3to4', 'MFH5plus', 'MFG', 'OTHER'))
+res_totals <- res_totals %>% 
+  mutate(category = c(rep('SFH', 8), 'MFG', 'MFH2', 'MFH3to4', rep('MFH5plus', 4)))
+nsi %>% 
+  st_drop_geometry %>% 
+  mutate(total_value = VAL_STRUCT + VAL_CONT) %>% 
+  left_join(res_totals %>% select(-count), by = c('OCCTYPE' = 'type')) %>% 
+  group_by(category) %>% 
+  summarize(value_nsi = sum(total_value), .groups = 'drop') %>% 
+  full_join(acs %>% select(value, category) %>% 
+              group_by(category) %>% 
+              summarize(value_acs = sum(value), .groups = 'drop'), by = 'category') %>%
+  filter(!is.na(value_nsi) & !is.na(value_acs)) %>% 
+  ggplot() + 
+  geom_point(aes(x = value_acs, y = value_nsi)) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  geom_text(aes(x = value_acs, y = value_nsi*1.2, label = category)) + 
+  scale_x_log10(labels = comma_format(scale = 1e-9, prefix = '$', suffix = 'B', accuracy = 0.1)) + 
+  scale_y_log10(labels = comma_format(scale = 1e-9, prefix = '$', suffix = 'B', accuracy = 0.1)) + 
+  annotation_logticks() +
+  theme_bw()
+
+```
+
+```{r}
+## compare NSI 1.0 vs. NSI 2.0
+nsi1 <- read.csv('C:/Users/cbowers/Downloads/NSI1_Sonoma.csv/NSI1_sonoma.csv') %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = st_crs(CONUS))
+
+```
+
+```{r}
+#### compare year built ####
+sum(nsi$YRBUILT > 0)/nrow(nsi)
+sum(nsi$MED_YR_BLT > 0)/nrow(nsi)
+# ggplot(nsi) + 
+#   geom_histogram(data = nsi %>% subset(YRBUILT > 0),
+#                  aes(x = YRBUILT), color = 'black', fill = 'white', binwidth = 5) + 
+#   scale_x_continuous(expand = c(0,0)) + 
+#   scale_y_continuous(expand = c(0,0), labels = comma)
+# ggplot(nsi) + 
+#   geom_histogram(aes(x = MED_YR_BLT), color = 'black', fill = 'white', binwidth = 5) + 
+#   scale_x_continuous(expand = c(0,0)) +
+#   scale_y_continuous(expand = c(0,0), labels = comma)
+
+sum(nsi1$MedYrBlt > 0)/nrow(nsi1)
+ggplot() + 
+  geom_density(data = nsi, aes(x = MED_YR_BLT), bw = 3,
+               color = 'darkorange3', size = 1, fill = 'darkorange3', alpha = 0.25) + 
+  geom_density(data = nsi1 %>% subset(MedYrBlt > 0), aes(x = MedYrBlt), bw = 3, 
+               color = 'dodgerblue3', size = 1, fill = 'dodgerblue3', alpha = 0.25)
+
+```
+
+```{r}
+#### compare number of households ####
+total_households <- 208305  #estimate from https://www.census.gov/quickfacts/sonomacountycalifornia
+
+## calculate number of households in NSI 2.0 
+nsi_res <- nsi %>% filter(grepl('RES', OCCTYPE))
+res_totals <- data.frame(table(droplevels(nsi_res$OCCTYPE))) %>% setNames(c('type', 'count'))
+nsi_households <- res_totals %>% 
+  mutate(type = gsub('RES', '', type),
+         count = toNumber(count)) %>% 
+  mutate(category = stringr::str_sub(type, end = 1), 
+         subcategory = stringr::str_sub(type, start = 2)) %>% 
+  mutate(subcategory = gsub('-', '', subcategory)) %>% 
+  mutate(households = 
+           case_when(category %in% 1:2 ~ count, 
+                     type == '3A' ~ count*2,
+                     type == '3B' ~ count*mean(c(3,4)), 
+                     type == '3C' ~ count*mean(c(5,9)), 
+                     type == '3D' ~ count*mean(c(10,19)),
+                     type == '3E' ~ count*mean(c(20,50)),
+                     type == '3F' ~ count*50)) %>% 
+  .$households %>% Sum
+(nsi_households-total_households)/total_households
+## this number is very close to the correct number of housing units 
+
+## lastly, get rid of hotels & nursing homes
+nsi_res <- nsi_res %>% 
+  filter(grepl('RES1', OCCTYPE) | grepl('RES2', OCCTYPE) | grepl('RES3', OCCTYPE))
+
+## calculate number of households in NSI 1.0
+nsi1_res <- nsi1 %>% filter(grepl('RES', OccType))
+res1_totals <- data.frame(table(droplevels(nsi1_res$OccType))) %>% setNames(c('type', 'count'))
+nsi1_households <- res1_totals %>% 
+  mutate(type = gsub('RES', '', type),
+         count = toNumber(count)) %>% 
+  mutate(category = stringr::str_sub(type, end = 1), 
+         subcategory = stringr::str_sub(type, start = 2)) %>% 
+  mutate(households = 
+           case_when(category %in% 1:2 ~ count, 
+                     type == '3AI' ~ count*2,
+                     type == '3BI' ~ count*mean(c(3,4)), 
+                     type == '3CI' ~ count*mean(c(5,9)), 
+                     type == '3DI' ~ count*mean(c(10,19)),
+                     type == '3EI' ~ count*mean(c(20,50)),
+                     type == '3FI' ~ count*50)) %>% 
+  .$households %>% Sum
+(nsi1_households-total_households)/total_households
+## a little off, but still pretty good
+
+```
+
+
+```{r}
+#### compare occupancy type ####
+occupancy <- data.frame(summary(nsi$OCCTYPE)) %>% 
+  setNames('nsi_number') %>% 
+  mutate(code = row.names(.)) %>% 
+  full_join(data.frame(summary(nsi1$OccType)) %>% 
+              setNames('nsi1_number') %>% 
+              mutate(code = row.names(.)) %>% 
+              mutate(code = case_when(grepl('RES3', code) ~ gsub('I', '', code),
+                                      TRUE ~ code))) %>% 
+  select(code, nsi_number, nsi1_number) %>% 
+  mutate(group = stringr::str_sub(code, end = 3))
+
+ggplot(occupancy) + 
+  geom_point(aes(x = nsi_number, y = nsi1_number, color = group), size = 2) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  scale_x_log10() + scale_y_log10() + annotation_logticks() + 
+  scale_color_brewer(palette = 'Paired')
+ggplot(occupancy %>% filter(group != 'RES')) + 
+  geom_point(aes(x = nsi_number, y = nsi1_number, color = group), size = 2) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  # scale_x_log10() + scale_y_log10() + annotation_logticks() + 
+  scale_color_brewer(palette = 'Paired')
+
+```
+
+```{r}
+#### compare building locations ####
+parcels <- st_read('https://opendata.arcgis.com/datasets/355b1002325d47e580d57c478778c97f_0.geojson')
+
+# require(leaflet)
+# require(mapboxapi)
+# leaflet() %>% 
+#   addMapboxTiles(style_id = "light-v9", username = "mapbox") %>% 
+#   addPolygons(data = parcels[1:10000,], color = 'gray', fill = FALSE, weight = 2)
+
+# names(sonoma_parcels)
+# View(st_drop_geometry(sonoma_parcels[1:1000,]))
+
+test <- st_intersection(nsi %>% st_transform(st_crs(parcels)), 
+                        parcels %>% select(OBJECTID) %>% st_buffer(0))
+test1 <- st_intersection(nsi1 %>% st_transform(st_crs(parcels)), 
+                         parcels %>% select(OBJECTID) %>% st_buffer(0))
+
+nrow(test)/nrow(nsi)
+nrow(test1)/nrow(nsi1)
+
+ggplot(test) + 
+  geom_step(aes(x = 1:nrow(test), y = OBJECTID)) + 
+  geom_abline(slope = 1, intercept = 0, color = 'red')
+ggplot(test1) + 
+  geom_step(aes(x = 1:nrow(test1), y = OBJECTID)) + 
+  geom_abline(slope = 1, intercept = 0, color = 'red')
+
+pal <- colorNumeric(palette = c('darkorange3', 'dodgerblue3'), domain = c(0,1))
+leaflet() %>%
+  addMapboxTiles(style_id = "light-v9", username = "mapbox") %>%
+  addPolygons(data = parcels, color = 'black', fill = FALSE, weight = 2) %>%
+  addCircleMarkers(data = test, color = ~pal(0)) %>%
+  addCircleMarkers(data = test1, color = ~pal(1))
+
+```
+

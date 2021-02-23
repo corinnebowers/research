@@ -1,0 +1,150 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "1/8/2021"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(dataRetrieval)
+require(sf)
+require(tigris)
+require(moments)
+require(lubridate)
+require(tidyverse); theme_set(theme_classic())
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+## meters to feet conversion factor
+mft <- 3.28084
+
+```
+
+```{r geography}
+california <- counties(state = 'CA')
+sonoma <- tracts(state = 'CA', county = 'Sonoma')
+
+russian <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) %>% 
+  subset(grepl('Russian', GNIS_Name))
+
+```
+
+
+```{r}
+## choose gauge(s)
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv') %>% 
+  subset(str_length(paste(site_no)) == 8) %>% 
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(california)) %>% 
+  st_intersection(california %>% subset(NAME %in% c('Sonoma', 'Mendocino'))) %>% 
+  subset(grepl('RUSSIAN', station_nm)) %>% 
+  st_intersection(california %>% subset(NAME == 'Sonoma')) %>%  #subset to gauges below reservoirs
+  subset(site_no != 11467002) %>%  #subset to gauges with cfs only
+  subset(!(site_no %in% c(11463980, 11465390)))  #keep gauges with long records only
+ggplot() + 
+  geom_sf(data = sonoma, color = 'grey70', fill = NA) + 
+  geom_sf(data = russian %>% st_crop(st_union(sonoma))) + 
+  geom_sf(data = sites, aes(color = factor(site_no)))
+
+data <- readNWISdv(sites$site_no, parameterCd = param, startDate = '1948-01-01') %>% 
+  renameNWISColumns
+ggplot(data) + 
+  geom_vline(xintercept = ymd(paste(seq(1950,2020,10), 1, 1, sep = '-')), color = 'grey90') + 
+  geom_tile(aes(x = Date, y = factor(site_no, levels = rev(levels(factor(site_no)))), 
+                fill = factor(site_no)))
+
+```
+
+
+```{r}
+## import data
+data <- readNWISdv(11464000, parameterCd = param) %>% renameNWISColumns
+annual_flow <- data %>% 
+  mutate(WY = ifelse(month(Date) %in% 10:12, year(Date)+1, year(Date))) %>% 
+  group_by(WY) %>% 
+  filter(!(WY %in% c(1940,2021))) %>% 
+  summarize(max_flow = max(Flow), .groups = 'drop')
+
+```
+
+goal: to find the 100-year RP flow using Hydrology Bulleting #17B
+
+```{r}
+## IV) data assumptions
+
+## check for trends
+trend <- lm(logQ ~ WY, data = annual_flow)
+summary(trend)
+ggplot(annual_flow) + 
+  geom_point(aes(x = WY, y = logQ)) + 
+  geom_line(aes(x = WY, y = predict(trend)), color = 'darkred') + 
+  ggtitle('Russian River Annual Peak Flows') +
+  labs(x = '', y = 'Flow (cfs)')
+## trendline is not significant --> ok
+
+## check for randomness
+ggplot(annual_flow) + 
+  geom_point(aes(x = WY, y = predict(trend) - logQ)) + 
+  geom_hline(yintercept = 0) + 
+  scale_y_continuous(name = 'Observed Residuals', 
+                     limits = max(abs(predict(trend) - annual_flow$logQ))*c(-1,1))
+ggplot(annual_flow) + 
+  geom_point(aes(x = WY, y = rnorm(n = nrow(annual_flow), sd = sd(logQ)))) + 
+  geom_hline(yintercept = 0) + 
+  scale_y_continuous(name = 'Standard Normal Residuals',
+                     limits = max(abs(predict(trend) - annual_flow$logQ))*c(-1,1))
+  
+## drop 1977 as an outlier
+annual_flow <- annual_flow %>% filter(WY != 1977)
+
+## check for watershed changes (USGS documentation)
+
+
+```
+
+```{r}
+## plotting position
+alpha <- 0
+annual_flow <- annual_flow %>% 
+  mutate(logQ = log(max_flow)) %>% 
+  arrange(max_flow) %>% 
+  mutate(i = 1:nrow(.),
+         p = (i - alpha)/(nrow(.) - 2*alpha + 1))
+ggplot(annual_flow) + 
+  geom_point(aes(x = p, y = max_flow)) + 
+  scale_y_log10()
+
+## find values
+xbar <- mean(annual_flow$logQ)
+S <- sd(annual_flow$logQ)
+G <- moments::skewness(annual_flow$logQ)
+K <- pracma::interp1(x = c(-0.7, -0.8), y = c(-2.82359, -2.89101), xi = G)
+rp100 <- exp(xbar + K*S)
+
+```
+

@@ -8,7 +8,7 @@
 ## @return
 ## catalog (data.frame): catalog of ARs occurring in region of interest
 
-generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
+generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5, quiet = FALSE) {
   ## data needed:
   load('D:/Research/_data/grid_catalog.Rdata')  # list of ARs by cell (ar_grid) and a spatial tracker (tracker)
 
@@ -75,9 +75,9 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
     mutate(Runoff_mmday = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) %>% 
     dplyr::select(Runoff_mmday, Date) %>% 
     group_by(Date) %>% 
-    summarize(Runoff_mmday = Mean(Runoff_mmday))
+    summarize(Runoff_mmday = Mean(Runoff_mmday), .groups = 'drop')
   
-  pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+  if (!quiet) { pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3) }
   for (ar in 1:nrow(catalog)) {
     datelist <- seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days')
     ## get storm-total precip (mm)
@@ -88,7 +88,7 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
       cpc_precip$lon <- cpc_precip$lon-360
       cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = "+proj=longlat +datum=NAD83 +no_defs"))
       precip <- precip + 
-        exact_extract(cpc_precip, aoi, 'mean', progress = FALSE) %>% unlist
+        suppressWarnings(exact_extract(cpc_precip, aoi, 'mean', progress = FALSE) %>% unlist)
         # velox(cpc_precip)$extract(aoi, small = TRUE) %>% lapply(mean) %>% unlist
     }
     catalog[ar, 'precip'] <- precip
@@ -97,7 +97,7 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
     catalog[ar, 'runoff'] <- site.runoff %>% 
       subset(Date %in% datelist) %>% 
       select(Runoff_mmday) %>% Sum
-    setTxtProgressBar(pb, ar)
+    if (!quiet) { setTxtProgressBar(pb, ar) }
   }
   return(catalog)
 }
@@ -120,7 +120,7 @@ generate_AR <- function(catalog, n.AR = 1, intensity.threshold = 0.9) {
   create_AR_copula(catalog) 
   
   ## generate new points from the copula
-  z <- rmvnorm(n = round(n.AR/(1-intensity.threshold)), mean = c(0,0), sigma = RHO) %>% as.data.frame 
+  z <- rmvnorm(n = round(n.AR/(1-intensity.threshold)), mu = c(0,0), sigma = RHO) %>% as.data.frame 
   dz <- 1/(1-intensity.threshold)
   temp <- data.frame(id = 1:n.AR, base = floor(dz), add = 0)
   temp$add[sample(1:n.AR, size = nrow(z)-floor(dz)*n.AR, replace = FALSE)] <- 1
@@ -132,7 +132,7 @@ generate_AR <- function(catalog, n.AR = 1, intensity.threshold = 0.9) {
   z <- z %>% 
     group_by(id) %>% 
     summarize(index = which.max(rank), 
-              v1 = V1[index], v2 = V2[index]) %>% 
+              v1 = V1[index], v2 = V2[index], .groups = 'drop') %>% 
     dplyr::select(v1, v2) %>% 
     as.matrix
   u <- pnorm(z)

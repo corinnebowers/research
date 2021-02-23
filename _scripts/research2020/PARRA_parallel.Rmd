@@ -42,7 +42,7 @@ require(future)
 require(doSNOW)
 
 require(Rfast)
-require(microbenchmark)
+# require(microbenchmark)
 
 ```
 
@@ -63,6 +63,17 @@ Min <- function(x) min(x, na.rm = TRUE)
 
 ## meters to feet conversion factor
 mft <- 3.28084
+
+# df <- expand.grid(i = 1:73, j = 1:9)
+# df$colors <- grDevices::colors()
+# df$colors <- factor(df$colors, levels = df$colors)
+# df$value <- DescTools::ColToHsv(df$colors)['v',]
+# ggplot(df) +
+#   geom_tile(aes(x = j, y = i, fill = colors), show.legend = FALSE) +
+#   scale_fill_manual(values = paste(df$colors)) +
+#   geom_text(aes(x = j, y = i, label = colors, color = value>0.5), size = 3, show.legend = FALSE) +
+#   scale_color_manual(values = c('white', 'black')) +
+#   theme_void()
 
 ```
 
@@ -150,7 +161,7 @@ catalog <- generate_AR_catalog(outlet, gauge)
 #                  duration = catalog[399, 'duration'])
 
 ## if you want to generate synthetic ARs: 
-AR <- generate_AR(catalog, n.AR = 1000, intensity.threshold = 0)
+AR <- generate_AR(catalog, n.AR = 100, intensity.threshold = 0.75)
 
 plot_AR_copula(catalog, 
                add.historic = NA, 
@@ -166,10 +177,9 @@ source('./_scripts/research2020/functions/PRCP_parallel.R')
 print('3. generate precipitation outcomes')
 
 ## register parallel backend
-cl <- makeCluster(round(detectCores()*2/3))
+cl <- parallel::makeCluster(round(detectCores()*2/3))
 registerDoSNOW(cl)
-
-precip <- generate_precip(AR, catalog, n.precip = 25, dx = 0.05, precip.threshold = 0.5, plot = FALSE)
+precip <- generate_precip(AR, catalog, n.precip = 100, dx = 0.05, precip.threshold = 0.75, plot = FALSE)
 stopCluster(cl)
 
 ```
@@ -180,26 +190,30 @@ stopCluster(cl)
 source('./_scripts/research2020/functions/RNFF.R')
 print('4. generate runoff outcomes')
 
-runoff <- generate_runoff(precip, catalog, n.runoff = 25, plot = FALSE)
+runoff <- generate_runoff(precip, catalog, n.runoff = 100, plot = FALSE)
 
-## perform importance sampling
-runoff$bin <- round(log10(runoff$runoff_in), 1)
-runoff$bin[runoff$bin <= -4 & !is.infinite(runoff$bin)] <- -4
-runoff$bin[runoff$bin <= -3 & runoff$bin > -4 & !is.infinite(runoff$bin)] <- -3
-runoff$bin[runoff$bin <= -2.5 & runoff$bin > -3 & !is.infinite(runoff$bin)] <- -2.5
-runoff$bin[runoff$bin <= -2 & runoff$bin > -2.5 & !is.infinite(runoff$bin)] <- -2
-ggplot(data.frame(table(runoff$bin)[-1])) +
-  geom_bar(aes(x = toNumber(Var1), y = Freq), stat = 'identity') +
-  scale_x_continuous(limits = c(-5, 2))
+# ## perform importance sampling
+# runoff$bin <- round(log10(runoff$runoff_in), 1)
+# runoff$bin[runoff$bin <= -4 & !is.infinite(runoff$bin)] <- -4
+# runoff$bin[runoff$bin <= -3 & runoff$bin > -4 & !is.infinite(runoff$bin)] <- -3
+# runoff$bin[runoff$bin <= -2.5 & runoff$bin > -3 & !is.infinite(runoff$bin)] <- -2.5
+# runoff$bin[runoff$bin <= -2 & runoff$bin > -2.5 & !is.infinite(runoff$bin)] <- -2
+# ggplot(data.frame(table(runoff$bin)[-1])) +
+#   geom_bar(aes(x = toNumber(Var1), y = Freq), stat = 'identity') +
+#   scale_x_continuous(limits = c(-5, 2))
+# 
+# kclust <- kmeans(round(runoff[,c('duration', 'runoff_mm')], 0),  
+#                    centers = 25, iter.max = 1e3, nstart = 5)
+# ggplot(data.frame(val = kclust$centers[,2]/25.4, 
+#                   freq = data.frame(table(kclust$cluster))[,2])) + 
+#   geom_histogram(aes(x = round(log10(toNumber(val)),1), y = freq), stat = 'identity') +
+#   scale_x_continuous(limits = c(-5, 2))
+# 
+# ## run this more to find the optimal k and to produce stable results
 
-kclust <- kmeans(round(runoff[,c('duration', 'runoff_mm')], 0),  
-                   centers = 25, iter.max = 1e3, nstart = 5)
-ggplot(data.frame(val = kclust$centers[,2]/25.4, 
-                  freq = data.frame(table(kclust$cluster))[,2])) + 
-  geom_histogram(aes(x = round(log10(toNumber(val)),1), y = freq), stat = 'identity') +
-  scale_x_continuous(limits = c(-5, 2))
+ggplot(runoff %>% filter(runoff_mm > 0)) + 
+  geom_histogram(aes(x = runoff_mm), color = 'black', fill = 'white', bins = sqrt(nrow(runoff)))
 
-## run this more to find the optimal k and to produce stable results
 
 ```
 
@@ -234,21 +248,6 @@ hydropoly_rr <- hydropoly %>%
   st_transform(proj4string(dem)) %>% 
   st_crop(extent(dem))
 
-lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img') 
-lulc.att <- lulc@data@attributes[[1]]
-lulc.n <- crop(lulc, sonoma %>% st_union %>% st_transform(proj4string(lulc)) %>% as('Spatial') %>% extent)
-vals <- unique(lulc.n[])
-manning <- data.frame(lulc = c(21:24, 31, 41:43, 52, 71, 81, 90, 95), 
-                      n = c(0.0404, 0.0678, 0.0678, 0.0404, 0.0113, 0.36, 0.32, 0.4, 0.4, 0.368, 0.325, 
-                            0.086, 0.1825))
-for (i in 1:length(vals)) {
-  if (vals[i] %in% manning$lulc) {
-    lulc.n[lulc.n == vals[i]] <- manning[manning$lulc == vals[i], 'n']
-  } else {
-    lulc.n[lulc.n == vals[i]] <- 0.05
-  }
-}
-
 ## register parallel backend
 cl <- makeCluster(round(detectCores()*2/3))
 registerDoSNOW(cl)
@@ -260,10 +259,12 @@ inundation <- generate_inundation(fileloc = 'C:/Users/cbowers/Desktop/LISFLOOD/s
                                   dem = dem, river = hydropoly_rr, lulc = lulc.n,
                                   parname = 'russian', bciname = 'russian',
                                   runoff = data.frame(kclust$centers), 
-                                  drainarea = inlet$DRNAREA)
+                                  drainarea = inlet$DRNAREA * 1609.34^2)
 stopCluster(cl)
 print(Sys.time() - t1)
 plot_inundation(inundation, aoi)
+
+## NOTE: USGS streamstats outputs drainage area in square miles
 
 # ## to recover a previous run of generate_inundation:
 # cl <- makeCluster(round(detectCores()*2/3))
@@ -411,3 +412,17 @@ save(AR, precip, runoff, kclust, inundation, depth, damage, loss, file = './PARR
 
 ```
 
+
+bash code for generating .par files:
+i=1
+for simlength in 1000 2000 3000; 
+do for channel in 0.002 0.003 0.004 0.005; 
+do for floodplain in 0.002 0.003 0.004 0.005; 
+do sed -i "1s/.*/trial$i/" input.txt; 
+sed -i "3s/.*/$simlength/" input.txt; 
+sed -i "7s/.*/$channel/" input.txt; 
+sed -i "12s/.*/$floodplain/" input.txt; 
+sed -i "13s/.*/final$i.par/" input.txt; 
+cat input.txt | bash makepar.sh; 
+let "i+=1"; 
+done; done; done

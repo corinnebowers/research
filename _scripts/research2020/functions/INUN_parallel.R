@@ -22,8 +22,8 @@ write_lisflood_rasters <- function(fileloc, dem, river, lulc, parname, bciname) 
   par[6,] <- c('saveint', 24*3600)  #save interval for inundation rasters
   
   ## check resolution of elevation raster
-  if (prod(res(dem)) > 1e6) {
-    dem <- raster::aggregate(dem, fact = ceiling(prod(res(dem))/1e6))
+  if (prod(dim(dem)) > 1e6) {
+    dem <- raster::aggregate(dem, fact = ceiling(prod(dim(dem))/1e6))
   }
   ## write elevation raster to file
   writeRaster(dem, format = 'ascii',

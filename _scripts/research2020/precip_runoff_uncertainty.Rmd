@@ -1,0 +1,732 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "10/19/2020"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+# rm(list=ls())
+
+root <- 'D:/Research'
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = root)
+
+```
+
+```{r packages, message = FALSE, warning = FALSE}
+require(ggplot2); theme_set(theme_classic())
+require(sf)
+require(raster)
+require(reshape2)
+require(dplyr)
+require(tigris); options(tigris_use_cache = TRUE)
+require(stringr)
+require(lubridate)
+require(RColorBrewer)
+require(rnoaa); rnoaa_options(cache_messages = FALSE)
+require(dataRetrieval)
+require(glmnet)
+require(GGally)
+require(ncdf4)
+require(velox)
+
+```
+
+```{r functions}
+toNumber <- function(x) as.numeric(paste(x))
+
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) ifelse(nrow(x)>0, sum(x, na.rm = TRUE), NA)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+## meters to feet conversion factor
+mft <- 3.28084
+
+```
+
+
+**LISFLOOD parameter sensitivity tests**
+
+* downstream boudnary condition: free vs. fixed
+* Manning's roughness (floodplain): constant vs. spatially varying
+* channel roughness
+* dry/wet initial condition
+* simulation length
+* simulation timestep
+* streambed depth
+* streambed width
+* DEM resolution
+* unit hydrograph parameters
+
+
+**runoff vs. discharge comparison**
+
+```{r}
+## get catalog of historic events
+russian <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) %>% 
+  subset(grepl('Russian', GNIS_Name))
+inlet <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershed.shp', quiet = TRUE)
+inlet.point <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershedpoint.shp', quiet = TRUE)
+outlet <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershed.shp', quiet = TRUE)
+outlet.point <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershedpoint.shp', quiet = TRUE)
+ggplot() + 
+  geom_sf(data = outlet, fill = 'blue', alpha = 0.5) +
+  geom_sf(data = outlet.point) + 
+  geom_sf(data = inlet, fill = 'darkblue', alpha = 0.5) + 
+  geom_sf(data = inlet.point) + 
+  geom_sf(data = russian)
+
+gauge <- c(11464000, 11467000)
+# gauge <- c(11463500, 11463682)
+source('D:/Research/_scripts/research2020/functions/AR.R')
+catalog <- generate_AR_catalog(outlet, gauge)
+AR <- catalog %>% mutate(n.AR = 1:nrow(catalog))
+
+```
+
+
+```{r}
+## find precipitation for each historic event
+source('./_scripts/research2020/functions/PRCP_parallel.R')
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+precip <- generate_precip(AR, catalog, n.precip = 100, dx = 0.05, precip.threshold = 0.5, plot = FALSE)
+stopCluster(cl)
+
+## compare simulated vs. recorded precip (using 90th percentile CIs)
+precip.compare <- precip %>% 
+  group_by(n.AR) %>% 
+  summarize(precip_mean = mean(precip_mm), 
+            precip_sd = sd(precip_mm),
+            precip_lower = precip_mean - 1.64*precip_sd,
+            precip_upper = precip_mean + 1.64*precip_sd) %>% 
+  full_join(catalog %>% select(precip_obs = precip) %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR')
+ggplot(precip.compare) + 
+  geom_point(aes(x = precip_obs, y = precip_mean)) + 
+  geom_errorbar(aes(x = precip_obs, ymin = precip_lower, ymax = precip_upper), alpha = 0.25) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  ggtitle('Sonoma County Precipitation (mm)') + 
+  labs(x = 'Observed', y = 'Simulated') + 
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) + scale_y_continuous(expand = c(0,0)) + 
+  coord_fixed(ratio = 1, xlim = c(0, NA), y = c(0, NA))
+# ggsave('D:/Research/_plots/slides_precipplot.jpg', width = 5, height = 5)
+
+ggplot(precip.compare) + 
+  geom_point(aes(x = n.AR, y = precip_obs-precip_mean)) + 
+  geom_hline(yintercept = 0, linetype = 'dashed') + 
+  ggtitle('Precipitation Residuals') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'Storm Number', y = 'Observed - Simulated')
+ggplot(precip.compare) + 
+  geom_histogram(aes(x = precip_obs-precip_mean), bins = sqrt(nrow(AR)), color = 'black', fill = 'white') + 
+  geom_vline(xintercept = 0, linetype = 'dashed') + 
+  ggtitle('Precipitation Residuals') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'Observed - Simulated', y = 'Frequency of Occurrence')
+# ggsave('D:/Research/_plots/slides_preciphist.jpg', width = 5, height = 5)
+
+ggplot(precip.compare %>% filter(precip_obs >= 0)) + 
+  geom_point(aes(x = precip_obs, y = precip_obs-precip_mean)) + 
+  geom_hline(yintercept = 0) + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'Observed Precipitation', y = 'Observed - Simulated') + 
+  coord_cartesian(clip = 'off')
+
+```
+
+note: the residuals plots show that observed tends to be less than simulated, but if you look at the scatterplot (and the final fourth plot I just added) this seems to be driven by smaller events. come back here to do an analysis of how good we are at predicting the big events, which is what we really care about
+
+```{r}
+## find runoff for each historic event
+source('./_scripts/research2020/functions/RNFF.R')
+runoff <- generate_runoff(precip, catalog, n.runoff = 100, plot = FALSE)
+
+## get real storm-total discharge
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+site.discharge <- readNWISdv(gauge, parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>% 
+  renameNWISColumns() %>% 
+  full_join(readNWISsite(gauge), by = 'site_no') %>% 
+  dplyr::select(Flow, Date) %>% 
+  group_by(Date) %>% 
+  summarize(Flow = Mean(Flow))
+for (ar in 1:nrow(catalog)) {
+  datelist <- seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days')
+  catalog[ar, 'discharge_cfs'] <- site.discharge %>% 
+    subset(Date %in% datelist) %>% 
+    select(Flow) %>% 
+    unlist %>% unname %>% Mean
+  catalog[ar, 'discharge_m3s'] <- catalog[ar, 'discharge_cfs'] / mft^3
+}
+  
+## find area of watershed (square miles)
+# drainarea <- inlet$DRNAREA
+# drainarea <- as.numeric(st_area(inlet))*(mft/5280)^2
+drainarea <- mean(readNWISsite(gauge)$drain_area_va)
+
+## compare simulated vs. recorded discharges (using 90th percentile CIs)
+discharge.compare <- runoff %>% 
+  mutate(discharge_cfs = (runoff_in/12) * (drainarea*5280^2) / (duration*60^2),
+         discharge_m3s = (runoff_mm/1e3) * drainarea*(5280/mft)^2 / (duration*60^2)) %>% 
+  group_by(n.AR) %>% 
+  summarize(cfs_mean = mean(discharge_cfs), 
+            cfs_sd = sd(discharge_cfs), 
+            cfs_lower = cfs_mean - 1.64*cfs_sd,
+            cfs_upper = cfs_mean + 1.64*cfs_sd,
+            m3s_mean = mean(discharge_m3s), 
+            m3s_sd = sd(discharge_m3s),
+            m3s_lower = m3s_mean - 1.64*m3s_sd,
+            m3s_upper = m3s_mean + 1.64*m3s_sd) %>% 
+  full_join(catalog %>% select(discharge_cfs, discharge_m3s) %>% mutate(n.AR = 1:nrow(catalog)), ., by = 'n.AR')
+ggplot(discharge.compare) + 
+  geom_point(aes(x = discharge_cfs, y = cfs_mean)) + 
+  geom_errorbar(aes(x = discharge_cfs, ymin = cfs_lower, ymax = cfs_upper), alpha = 0.25) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  ggtitle('Russian River Discharge (cfs)') + 
+  labs(x = 'Observed', y = 'Simulated') + 
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0,0.05))) + 
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = 0)) +
+  coord_fixed(ratio = 1, xlim = c(0, 75000), ylim = c(0, 81000)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# ggsave('D:/Research/_plots/slides_runoffplot.jpg', width = 5, height = 5)
+
+ggplot(discharge.compare) + 
+  geom_point(aes(x = n.AR, y = discharge_cfs - cfs_mean)) + 
+  geom_hline(yintercept = 0, linetype = 'dashed') + 
+  ggtitle('Discharge Residuals') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'Storm Number', y = 'Observed - Simulated')
+ggplot(discharge.compare) + 
+  geom_histogram(aes(x = discharge_cfs - cfs_mean), bins = sqrt(nrow(AR)), color = 'black', fill = 'white') + 
+  geom_vline(xintercept = 0, linetype = 'dashed') + 
+  ggtitle('Discharge Residuals') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'Observed - Simulated', y = 'Frequency of Occurrence')
+# ggsave('D:/Research/_plots/slides_runoffhist.jpg', width = 5, height = 5)
+
+ggplot(discharge.compare) + 
+  geom_point(aes(x = discharge_cfs, y = discharge_cfs-cfs_mean)) + 
+  geom_hline(yintercept = 0) + 
+  scale_x_continuous(expand = c(0,0), labels = comma) + 
+  scale_y_continuous(expand = c(0,0), labels = comma) + 
+  labs(x = 'Observed Discharge', y = 'Observed - Simulated') + 
+  coord_cartesian(clip = 'off')
+
+```
+
+```{r}
+## look at the uncertainty in G(R) alone
+runoff <- generate_runoff(data.frame(precip_mm = catalog$precip, 
+                                     duration = catalog$duration,
+                                     n.AR = 1:nrow(catalog), 
+                                     n.precip = 1),
+                          catalog, n.runoff = 100, plot = FALSE)
+
+drainarea <- mean(readNWISsite(gauge)$drain_area_va)
+discharge.compare <- runoff %>% 
+  mutate(discharge_cfs = (runoff_in/12) * (drainarea*5280^2) / (duration*60^2),
+         discharge_m3s = (runoff_mm/1e3) * drainarea*(5280/mft)^2 / (duration*60^2)) %>% 
+  group_by(n.AR) %>% 
+  summarize(cfs_mean = mean(discharge_cfs), 
+            cfs_sd = sd(discharge_cfs), 
+            cfs_lower = cfs_mean - 1.64*cfs_sd,
+            cfs_upper = cfs_mean + 1.64*cfs_sd,
+            m3s_mean = mean(discharge_m3s), 
+            m3s_sd = sd(discharge_m3s),
+            m3s_lower = m3s_mean - 1.64*m3s_sd,
+            m3s_upper = m3s_mean + 1.64*m3s_sd) %>% 
+  full_join(catalog %>% select(discharge_cfs, discharge_m3s) %>% mutate(n.AR = 1:nrow(catalog)), ., by = 'n.AR')
+ggplot(discharge.compare) + 
+  geom_point(aes(x = discharge_cfs, y = cfs_mean)) + 
+  geom_errorbar(aes(x = discharge_cfs, ymin = cfs_lower, ymax = cfs_upper), alpha = 0.25) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  ggtitle('Russian River Discharge (cfs)') + 
+  labs(x = 'Observed', y = 'Simulated') + 
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0,0.05))) + 
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = 0)) +
+  coord_fixed(ratio = 1, xlim = c(0, 75000), ylim = c(0, 81000)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# ggsave('D:/Research/_plots/slides_runoffplot.jpg', width = 5, height = 5)
+
+ggplot(discharge.compare) + 
+  geom_histogram(aes(x = discharge_cfs - cfs_mean), bins = sqrt(nrow(AR)), color = 'black', fill = 'white') + 
+  geom_vline(xintercept = 0, linetype = 'dashed') + 
+  ggtitle('Discharge Residuals') + 
+  scale_x_continuous(expand = c(0,0)) + scale_y_continuous(expand = c(0,0)) + 
+  labs(x = 'Observed - Simulated', y = 'Frequency of Occurrence')
+# ggsave('D:/Research/_plots/slides_runoffhist.jpg', width = 5, height = 5)
+
+ggplot(discharge.compare) + 
+  geom_point(aes(x = discharge_cfs, y = discharge_cfs-cfs_mean)) + 
+  geom_hline(yintercept = 0) + 
+  scale_x_continuous(expand = c(0,0), labels = comma) + 
+  scale_y_continuous(expand = c(0,0), labels = comma) + 
+  labs(x = 'Observed Discharge', y = 'Observed - Simulated') + 
+  coord_cartesian(clip = 'off')
+
+```
+
+```{r}
+runoff.compare <- runoff %>% 
+  group_by(n.AR) %>% 
+  summarize(in_mean = mean(runoff_in), 
+            in_sd = sd(runoff_in), 
+            in_lower = in_mean - 2*in_sd, 
+            in_upper = in_mean + 2*in_sd,
+            mm_mean = mean(runoff_mm), 
+            mm_sd = sd(runoff_mm),
+            mm_lower = mm_mean - 2*mm_sd,
+            mm_upper = mm_mean + 2*mm_sd) %>% 
+  full_join(catalog %>% select(runoff) %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR')
+ggplot(runoff.compare) + 
+  geom_point(aes(x = runoff, y = mm_mean)) + 
+  geom_errorbar(aes(x = runoff, ymin = mm_lower, ymax = mm_upper), alpha = 0.25) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  ggtitle('Russian River Runoff (mm)') + 
+  labs(x = 'Observed', y = 'Simulated') + 
+  coord_fixed(ratio = 1, xlim = c(0,NA), ylim = c(0,NA))
+
+```
+
+**LISFLOOD unit hydrograph**
+
+```{r}
+# vec <- c(seq(0.1,0.9,0.1), seq(1, 19, 1), seq(20, 98, 2.5), seq(100, 395, 5), seq(400, 990, 10), 
+#          seq(1000, 1990, 25), seq(2000, 4900, 50), seq(5000, 7000, 100))
+
+runoff %>% 
+  group_by(n.AR) %>% 
+  summarize(duration = mean(duration),
+            mm_mean = mean(runoff_mm),
+            mm_sd = sd(runoff_mm),
+            mm_lower = mm_mean - 2*mm_sd,
+            mm_upper = mm_mean + 2*mm_sd) %>% 
+ggplot() + 
+  geom_hline(yintercept = 0, linetype = 'dashed') + 
+  geom_point(aes(x = duration, y = mm_mean)) + 
+  geom_errorbar(aes(x = duration, ymin = mm_lower, ymax = mm_upper), alpha = 0.25) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  ggtitle('Duration vs. Runoff Total') + 
+  labs(x = 'Storm Duration (hrs)', y = 'Storm Total Runoff (mm)')
+ggsave('D:/Research/_plots/duration_runoff.jpg', width = 6.5, height = 5)
+
+```
+
+```{r}
+## get unit hydrograph parameters ## 
+
+## step 1: go through every graph and pick the ones that look good
+## iv starts in mid-1987 (row 98)
+for (c in 98:nrow(catalog)) {
+  ## find start of precipitation
+  data <- data.frame(date = seq(ymd(cat$start[c]) - days(4), ymd(cat$end[c]) + days(6), 'days'))
+  for (i in 1:nrow(data)) {
+    d <- ymd(data$date[i])
+    cpc_precip <- cpc_prcp(d)
+    cpc_precip$lon <- cpc_precip$lon-360
+    cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = st_crs(california)$proj4string))
+    data$precip[i] <- velox(cpc_precip)$extract(aoi, small = TRUE) %>% lapply(mean) %>% unlist
+  }
+  if (sum(data$precip > 1) > 0) {
+    data <- data[which(data$precip > 1)[1]:nrow(data),]
+
+    ## find tp & Qp
+    flow <- readNWISdata(sites = gauge, parameterCd = param,
+                         startDate = data$date[1], endDate = data$date[nrow(data)],
+                         service = 'iv', tz = 'America/Los_Angeles') %>% 
+      renameNWISColumns %>% 
+      mutate(Flow = Flow_Inst, Date = dateTime)
+    temp <- flow %>% 
+      group_by(site_no) %>% 
+      summarize(tp = toNumber(difftime(Date[which.max(Flow)], Date[1], units = 'secs')),
+                Qp = max(Flow))
+
+    ## check to see if it looks like a "nice" storm
+    fit1 <- flow %>%
+      subset(site_no == gauge[1]) %>%
+      mutate(t = toNumber(difftime(Date, Date[1], units = 'secs')/toNumber(temp[1,'tp'])),
+             q = (Flow-Min(Flow))/(toNumber(temp[1,'Qp'])-Min(Flow)),
+             site_no = gauge[1]) %>%
+      select(site_no, t, q)
+    fit2 <- flow %>%
+      subset(site_no == gauge[2]) %>%
+      mutate(t = toNumber(difftime(Date, Date[1], units = 'secs')/toNumber(temp[2,'tp'])),
+             q = (Flow-Min(Flow))/(toNumber(temp[2,'Qp'])-Min(Flow)),
+             site_no = gauge[2]) %>%
+      select(site_no, t, q)
+    fit <- rbind(fit1, fit2)
+    g <- ggplot(fit) +
+      geom_line(aes(x = t, y = q, color = factor(site_no), group = factor(site_no))) +
+      ggtitle(paste0('ID = ', c))
+    print(g)
+  }
+}
+keep <- c(100,104,110,111,113,117,118,119,120,122,129,131,138,
+          153,155,160,161,163,172,173,177,182,184,
+          207,216,222,227,232,235,241,
+          252,253,254,255,260,262,263,268,269,272,274,280,281,282,286,289,296,298,
+          308,311,318,320,326,331,
+          353,359,362,372,379,384,395,
+          406,409,417,419,421,427,429,430,432,442,446,449,450,451,455,460,463,465,466)
+
+## step 2: get m by fitting nonlinear gamma distribution
+hydrograph <- data.frame(site_no = NA, tp = NA, Qp = NA, m = NA, n.AR = NA)[-1,]
+pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+for (c in keep) {
+  ## find start of precipitation
+  data <- data.frame(date = seq(ymd(cat$start[c]) - days(4), ymd(cat$end[c]) + days(6), 'days'))
+  for (i in 1:nrow(data)) {
+    d <- ymd(data$date[i])
+    cpc_precip <- cpc_prcp(d)
+    cpc_precip$lon <- cpc_precip$lon-360
+    cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = st_crs(california)$proj4string))
+    data$precip[i] <- velox(cpc_precip)$extract(aoi, small = TRUE) %>% lapply(mean) %>% unlist
+  }
+  data <- data[which(data$precip > 0)[1]:nrow(data),]
+
+  ## find tp & Qp
+  flow <- readNWISdata(sites = gauge, parameterCd = param,
+                       startDate = data$date[1], endDate = data$date[nrow(data)],
+                       service = 'iv', tz = 'America/Los_Angeles') %>% 
+    renameNWISColumns %>% 
+    rename(Flow = Flow_Inst, Date = dateTime)
+  temp <- flow %>% 
+    group_by(site_no) %>% 
+    summarize(tp = toNumber(difftime(Date[which.max(Flow)], Date[1], units = 'secs')),
+              Qp = max(Flow)) %>% 
+    mutate(m = NA, n.AR = c)
+  
+  ## find m 
+  for (id in 1:nrow(temp)) {
+    if (!is.na(temp$Qp[id])) {
+      fit <- flow %>%
+        subset(site_no == gauge[id]) %>%
+        mutate(t = toNumber(difftime(Date, Date[1], units = 'secs')/toNumber(temp[id,'tp'])),
+               q = (Flow-Min(Flow)) / (toNumber(temp[id,'Qp'])-Min(Flow)),
+               site_no = gauge[id]) %>% 
+        select(site_no, t, q)
+      model <- nls(q ~ exp(m*(1-t)) * t^m, data = fit, start = list(m = 3.7), control = list(maxiter = 500))
+      temp$m[id] <- coef(model)
+      # g <- ggplot(data = fit) +
+      #   geom_line(aes(x = t, y = q)) +
+      #   geom_line(aes(x = t, y = predict(model, fit)), color = 'red') + 
+      #   ggtitle(paste0('ID = ', c, ' & Site = ', temp$site_no[id]))
+      # print(g)
+    }
+  }
+  hydrograph <- rbind(hydrograph, temp)
+  setTxtProgressBar(pb, c)
+}
+hydrograph <- hydrograph[!is.na(hydrograph$Qp),]
+hydrograph_save <- hydrograph
+
+```
+
+
+```{r}
+## find relationship between PARRA parameters & hydrograph parameters ## 
+
+hydrograph <- hydrograph_save %>% 
+  full_join(catalog %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR') %>%
+  pivot_wider(names_from = site_no, values_from = c(tp, Qp, m)) %>% 
+  mutate(tp = rowMeans(cbind(tp_11464000, tp_11467000)/60^2),
+         Qp = rowMeans(cbind(Qp_11464000, Qp_11467000)),
+         m = rowMeans(cbind(m_11464000, m_11467000))) %>% 
+  select(-tp_11464000, -tp_11467000, -tp_NA,
+         -Qp_11464000, -Qp_11467000, -Qp_NA,
+         -m_11464000, -m_11467000, -m_NA)
+
+## tp vs. duration
+ggplot(hydrograph) + 
+  geom_point(aes(x = duration, y = tp)) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') + 
+  # ggtitle(expression(paste('Duration vs. ', t[p]))) + 
+  labs(x = 'Storm Duration (hrs)', y = 'Time to Peak Discharge (hrs)') + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  coord_fixed(ratio = 1)
+ggsave('D:/Research/_plots/slides_tp.jpg', width = 5, height = 5)
+
+## tp vs. precip & runoff
+ggplot(hydrograph) + 
+  geom_point(aes(x = IVT_max, y = tp)) + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  labs(x = 'Max IVT (kg/m/s)', y = 'Time to Peak Discharge (hrs)')
+ggplot(hydrograph) + 
+  geom_point(aes(x = precip, y = tp)) + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  labs(x = 'Precipitation (mm)', y = 'Time to Peak Discharge (hrs)')
+ggplot(hydrograph) + 
+  geom_point(aes(x = runoff, y = tp)) + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  labs(x = 'Runoff (mm)', y = 'Time to Peak Discharge (hrs)')
+
+## daily max vs. daily mean discharge
+for (ar in 1:nrow(catalog)) {
+  datelist <- seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days')
+  catalog[ar, 'discharge_mean'] <- site.discharge %>% 
+    subset(Date %in% datelist) %>% 
+    select(Flow) %>% 
+    unlist %>% unname %>% Mean
+  catalog[ar, 'discharge_max'] <- site.discharge %>% 
+    subset(Date %in% datelist) %>% 
+    select(Flow) %>% 
+    unlist %>% unname %>% Max
+}
+ggplot(catalog) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed') +
+  geom_abline(slope = 2, intercept = 0, linetype = 'dotted') + 
+  geom_point(aes(x = discharge_mean, y = discharge_max, color = duration)) + 
+  scale_color_gradientn(colors = c('darkblue', 'red', 'goldenrod')) + 
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) + 
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) + 
+  labs(x = 'Mean Discharge (cfs)', y = 'Max Discharge (cfs)') + 
+  coord_fixed(ratio = 1)
+ggsave('D:/Research/_plots/slides_meanmaxdischarge.jpg', width = 5, height = 5)
+
+## Qp vs. daily mean discharge
+ggplot() + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)), color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*2), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*5), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*10), color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*20), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*50), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*100), color = 'grey60') + 
+  geom_point(data = hydrograph, aes(x = discharge_mean, y = Qp, color = duration)) + 
+  scale_color_gradientn(colors = c('darkblue', 'red', 'goldenrod')) + 
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) + 
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) + 
+  labs(x = 'Mean Discharge (cfs)', y = 'Peak Discharge (cfs)') + 
+  coord_fixed(ratio = 1, 
+              xlim = c(Min(hydrograph[,c('discharge_mean', 'Qp')]), 
+                       Max(hydrograph[,c('discharge_mean', 'Qp')])),
+              ylim = c(Min(hydrograph[,c('discharge_mean', 'Qp')]), 
+                       Max(hydrograph[,c('discharge_mean', 'Qp')])))
+ggplot() + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)), color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*2), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*5), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*10), color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*20), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*50), linetype = 'dashed', color = 'grey60') + 
+  geom_line(aes(x = c(1,1e6), y = c(1,1e6)*100), color = 'grey60') + 
+  geom_point(data = hydrograph, aes(x = discharge_mean, y = Qp, color = duration)) + 
+  scale_color_gradientn(colors = c('darkblue', 'red', 'goldenrod')) + 
+  scale_x_log10(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) + 
+  scale_y_log10(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) + 
+  annotation_logticks() + 
+  labs(x = 'Mean Discharge (cfs)', y = 'Peak Discharge (cfs)') + 
+  coord_fixed(ratio = 1, 
+              xlim = c(Min(hydrograph[,c('discharge_mean', 'Qp')]), 
+                       Max(hydrograph[,c('discharge_mean', 'Qp')])),
+              ylim = c(Min(hydrograph[,c('discharge_mean', 'Qp')]), 
+                       Max(hydrograph[,c('discharge_mean', 'Qp')])))
+ggsave('D:/Research/_plots/slides_logdischarge.jpg', height = 5)
+
+lm(Qp ~ runoff, data = hydrograph) %>% summary
+
+
+```
+
+
+```{r}
+## check linear predictive power
+tp.lasso <- 
+  cv.glmnet(x = hydrograph %>% subset(!is.na(tp)) %>% select(IVT_max, duration, precip, runoff) %>% as.matrix, 
+            y = hydrograph %>% subset(!is.na(tp)) %>% select(tp) %>% unlist,
+            family = 'gaussian', alpha = 1,
+            standardize = TRUE,
+            nlambda = 1e3, lambda.min.ratio = 1e-5,
+            nfolds = 10)
+coef(tp.lasso, s = tp.lasso$lambda.1se)
+coef(tp.lasso, s = tp.lasso$lambda.min)
+lm(tp ~ duration + precip, data = hydrograph) %>% summary
+
+Qp.lasso <- 
+  cv.glmnet(x = hydrograph %>% subset(!is.na(tp)) %>% select(IVT_max, duration, precip, runoff) %>% as.matrix, 
+            y = hydrograph %>% subset(!is.na(tp)) %>% select(Qp) %>% unlist,
+            family = 'gaussian', alpha = 1,
+            standardize = TRUE,
+            nlambda = 1e3, lambda.min.ratio = 1e-5,
+            nfolds = 10)
+coef(Qp.lasso, s = Qp.lasso$lambda.1se)
+coef(Qp.lasso, s = Qp.lasso$lambda.min)
+lm(Qp ~ IVT_max + precip + runoff, data = hydrograph) %>% summary
+
+ggplot(hydrograph) + 
+  geom_point(aes(x = runoff, y = Qp)) + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  labs(x = 'Runoff (mm)', y = 'Peak Discharge (cfs)')
+
+ggpairs(hydrograph %>% select(IVT_max, duration, precip, runoff, tp, Qp), 
+        progress = FALSE) + 
+  theme_bw() + 
+  scale_x_continuous(labels = scales::comma) + scale_y_continuous(labels = scales::comma) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.75))
+  
+```
+
+```{r}
+## test seasonality & soil moisture effects on tp ##
+
+## open soil moisture file
+soil_nc <- nc_open('./_data/soilmoisture/NOAA/soilw.mon.mean.v2.nc')
+soil_lat <- ncvar_get(soil_nc, 'lat')
+soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+soil <- ncvar_get(soil_nc, 'soilw')
+nc_close(soil_nc)
+
+catalog$SM <- NA
+pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+for (ar in 1:nrow(catalog)) {
+  start <- ymd(catalog$start_day[ar]) - days(1)
+  end <- ymd(catalog$end_day[ar]) + days(1)
+  SM_stack <- raster::stack()
+  monthrecord <- ifelse(month(start) <= month(end),
+                        length(month(start):month(end)),
+                        length((month(start)-12):month(end))) - 1
+  startmonth <- ymd(paste(year(start), month(start), '1', sep = '-'))
+  for (i in 0:monthrecord) {
+    mo <- month(startmonth + months(i))
+    yr <- year(startmonth + months(i))
+    index <- (1:nrow(soil_time))[soil_time$month == mo & soil_time$year == yr]
+    SM_raster <- raster(t(soil[,,index]), xmn = min(soil_lon), xmx = max(soil_lon), 
+                        ymn = min(soil_lat), ymx = max(soil_lat))
+    SM_stack <- raster::stack(SM_stack, SM_raster)
+  }
+  SM_avg <- mean(SM_stack)
+  crs(SM_avg) <- projection(california)
+  catalog$SM[ar] <- velox(SM_avg)$extract(aoi) %>% lapply(mean) %>% unlist
+  setTxtProgressBar(pb, ar)
+}
+catalog$SM <- (catalog$SM - mean(catalog$SM)) / sd(catalog$SM)
+
+catalog$wateryear <- ifelse(month(catalog$start) %in% 10:12, year(catalog$start)+1, year(catalog$start))
+catalog$seasonlength <- as.numeric(ymd(catalog$start_day) - ymd(paste0(catalog$wateryear-1, '-10-1')))
+
+hydrograph <- hydrograph_save %>% 
+  full_join(catalog %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR') %>%
+  pivot_wider(names_from = site_no, values_from = c(tp, Qp, m)) %>% 
+  mutate(tp = rowMeans(cbind(tp_11464000, tp_11467000)/60^2),
+         Qp = rowMeans(cbind(Qp_11464000, Qp_11467000)),
+         m = rowMeans(cbind(m_11464000, m_11467000))) %>% 
+  select(-tp_11464000, -tp_11467000, -tp_NA,
+         -Qp_11464000, -Qp_11467000, -Qp_NA,
+         -m_11464000, -m_11467000, -m_NA)
+ggplot(hydrograph) + 
+  geom_point(aes(x = SM, y = tp/60^2)) + 
+  scale_x_continuous(expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  labs(x = 'Normalized Soil Moisture Anomaly', y = 'Time to Peak Discharge (hrs)')
+ggplot(hydrograph) + 
+  geom_point(aes(x = seasonlength, y = tp/60^2)) + 
+  scale_x_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  scale_y_continuous(limits = c(0,NA), expand = c(0.01,0.01)) + 
+  labs(x = 'Days since Water Year Start', y = 'Time to Peak Discharge (hrs)')
+
+ggpairs(hydrograph %>% subset(!is.na(tp)) %>% mutate(tp = tp/60^2) %>% select(SM, seasonlength, tp), 
+        progress = FALSE) + theme_bw()
+
+```
+
+
+
+
+
+
+```{r}
+generate_inundation <- function(fileloc, dem, river, lulc, parname, bciname, runoff, drainarea, 
+                                tp = 48*3600, m = 4, baseflow = 2, simlength = 86400*10, plot = TRUE) {
+  ## convert runoff to discharge
+  runoff <- runoff %>% mutate(discharge_m3s = runoff_mm/1e3 * drainarea / duration / 3600)
+  
+  ## set up LISFLOOD simulation
+  raster.list <- write_lisflood_rasters(fileloc, dem, river, lulc, parname, bciname)
+  par <- raster.list[[1]]; edge.in <- raster.list[[2]]; edge.out <- raster.list[[3]]
+  cmd <- paste0('cd ', fileloc, ' & lisflood ', parname, '.par')
+  
+  ## define write_lisflood_files function
+  write_lisflood_files <- function(i, par, fileloc, parname, bciname, runoff, tp, m, baseflow, simlength) {
+    ## set up hydrograph variables
+    t <- seq(0, simlength, 360)
+    baseflow <- baseflow / 100  #m2/s
+    
+    ## create hydrograph
+    Qp <- runoff[i,'discharge_m3s'] / 100  #m2/s
+    q <- apply(cbind(exp(m*(1-t/tp)) * (t/tp)^m * Qp, rep(baseflow, length(t))), 1, max)
+    
+    ## write .bdy file
+    bdy <- matrix(c('LISFLOOD', NA, paste0('flow', i), NA, length(t), 'seconds'), 
+                  byrow = TRUE, ncol = 2)
+    bdy <- rbind(bdy, cbind(q, t))
+    write.table(bdy, file = paste0(fileloc, 'flow', i, '.bdy'), 
+                row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t', na = '')
+    
+    ## edit .par and .bci file
+    par[1,] <- c('resroot', paste0('test', i))  #prefix name on all results files
+    par[15,] <- c('bdyfile', paste0('flow', i, '.bdy'))
+    write.table(par, paste0(fileloc, parname, '.par'),
+                row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t', na = '')
+    
+    bci <- data.frame(matrix(c('N', min(edge.in$x), max(edge.in$x), 'QVAR', paste0('flow', i),
+                               'W', min(edge.out$y), max(edge.out$y), 'FREE', NA),
+                             nrow = 2, byrow = TRUE))
+    write.table(bci, file = paste0(fileloc, bciname, '.bci'), 
+                row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t')
+    
+  }
+
+  pb <- txtProgressBar(min = 0, max = nrow(runoff), style = 3)
+  progress <- function(n) setTxtProgressBar(pb, n)
+  opts <- list(progress = progress)
+  
+  inundation <- 
+    foreach (i = 1:nrow(runoff),
+             .packages = 'raster',
+             .options.snow = opts) %dopar% {
+      ## define input files
+      write_lisflood_files(i, par, fileloc, parname, bciname, runoff, tp, m, baseflow, simlength)
+      
+      ## run LISFLOOD
+      setwd(fileloc)
+      shell(shQuote(cmd, type = 'cmd'))
+  
+      ## save results to raster brick
+      raster(paste0(fileloc, 'results/test', i, '.max'))
+    }
+
+  inundation <- do.call('stack', inundation)
+  crs(inundation) <- crs(dem)
+  return(inundation)
+}
+
+inundation <- 
+  generate_inundation(
+    fileloc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma/', 
+    dem = dem, river = hydropoly_rr, lulc = lulc.n, 
+    parname = 'grid', bciname = 'grid', 
+    runoff = runoff, 
+    drainarea = inlet$DRNAREA, 
+    plot = FALSE
+  )
+
+```
+

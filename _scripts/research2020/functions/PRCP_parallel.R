@@ -9,8 +9,7 @@
 ## @return
 ## precip (data.frame): list of synthetic precipitation events
 
-generate_precip <- function(AR, catalog, dx = 0.05, n.precip = 1, precip.threshold = 0.5, 
-                            quiet = FALSE, plot = TRUE) {
+generate_precip <- function(AR, catalog, dx = 0.05, n.precip = 1, precip.threshold = 0.5, plot = TRUE) {
   ## fix inputs 
   precip.threshold <- max(precip.threshold, dx)
   
