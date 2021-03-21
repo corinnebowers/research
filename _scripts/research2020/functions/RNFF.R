@@ -22,7 +22,7 @@ generate_runoff <- function(precip, catalog, n.runoff = 1, plot = TRUE) {
   for (wy in 1:nrow(wateryear.df)) {
     index <- catalog %>% 
       subset(wateryear == unique(wateryear)[wy]) %>% 
-      select(precip) %>% unlist %>% which.max
+      dplyr::select(precip) %>% unlist %>% which.max
     index.value <- catalog %>% 
       subset(wateryear == unique(wateryear)[wy]) %>% 
       subset(1:nrow(.) == index)

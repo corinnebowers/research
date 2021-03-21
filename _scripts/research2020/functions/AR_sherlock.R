@@ -1,75 +1,4 @@
 
-print('loading packages...')
-
-require(ggplot2); theme_set(theme_bw())
-require(sf)
-require(raster)
-require(reshape2)
-require(dplyr)
-require(tigris); options(tigris_use_cache = TRUE)
-require(stringr)
-require(lubridate)
-# require(velox)
-require(RColorBrewer)
-require(rnoaa); rnoaa_options(cache_messages = FALSE)
-require(quantreg)
-require(dataRetrieval)
-require(mvtnorm)
-require(evd)
-
-print('defining input information...')
-
-toNumber <- function(x) as.numeric(paste(x))
-
-ggcolor <- function(n) {
-  hues = seq(15, 375, length = n + 1)
-  hcl(h = hues, l = 65, c = 100)[1:n]
-}
-
-log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
-
-Mean <- function(x) mean(x, na.rm = TRUE)
-Sum <- function(x) ifelse(nrow(x)>0, sum(x, na.rm = TRUE), NA)
-Max <- function(x) max(x, na.rm = TRUE)
-Min <- function(x) min(x, na.rm = TRUE)
-
-## meters to feet conversion factor
-mft <- 3.28084
-
-USA <- states(class = 'sf')
-california <- counties(state = 'CA', class= 'sf')
-sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME != 9901)
-
-print('1. identify area of interest')
-
-# data = matrix(rnorm(100), nrow = 10)
-# write.csv(data, './test.csv')
-
-## define inlet watershed using USGS StreamStats
-print('reading inlet...')
-inlet <- st_read('./PARRA/_data/inlet/layers/globalwatershed.shp', quiet = TRUE)
-inlet.point <- st_read('./PARRA/_data/inlet/layers/globalwatershedpoint.shp', quiet = TRUE)
-
-## define outlet watershed using USGS StreamStats
-print('reading outlet...')
-outlet <- st_read('./PARRA/_data/outlet/layers/globalwatershed.shp', quiet = TRUE)
-outlet.point <- st_read('./PARRA/_data/outlet/layers/globalwatershedpoint.shp', quiet = TRUE)
-
-## define area of interest (aoi)
-print('reading dem...')
-dem <- raster('./PARRA/_data/watersheds/TopoBathy.tif')
-print('reading topobathy...')
-topobathy <- raster('./PARRA/_data/watersheds/TopoBathy_save.tif')
-print('transforming...')
-dem <- crop(dem, topobathy)
-aoi <- extent(dem) %>%
-  as('SpatialPolygons') %>%
-  as('sf') %>%
-  st_set_crs(proj4string(dem)) %>%
-  st_transform(st_crs(sonoma))  #the area under consideration, in sf format
-
-
-
 ## @param
 ## aoi (sf): polygon bounding region of interest
 ## gauge (vector): list of USGS gauge ID(s) that best represent flows within the study area
@@ -81,7 +10,7 @@ aoi <- extent(dem) %>%
 
 generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
   ## data needed:
-  load('./PARRA/_data/grid_catalog.Rdata')  # list of ARs by cell (ar_grid) and a spatial tracker (tracker)
+  load('./_data/grid_catalog.Rdata')  # list of ARs by cell (ar_grid) and a spatial tracker (tracker)
 
   ## find which cells cross the area of interest
   tracker.raster <- tracker[,c(2,1,3,4)]
@@ -157,9 +86,8 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
       cpc_precip <- cpc_prcp(d)
       cpc_precip$lon <- cpc_precip$lon-360
       cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = "+proj=longlat +datum=NAD83 +no_defs"))
-      # precip <- precip + velox(cpc_precip)$extract(aoi, small = TRUE) %>% lapply(mean) %>% unlist
-      # precip <- precip + exact_extract(cpc_precip, aoi, 'mean', progress = FALSE)
-      precip <- precip + raster::extract(cpc_precip, aoi, mean, method = 'bilinear', small = TRUE)
+      precip <- precip + 
+        suppressWarnings(exact_extract(cpc_precip, aoi, 'mean', progress = FALSE) %>% unlist)
     }
     catalog[ar, 'precip'] <- precip
 
@@ -171,6 +99,9 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
   }
   return(catalog)
 }
+
+
+
 
 ## @param
 ## catalog (data.frame): catalog of ARs occurring in region of interest
@@ -301,25 +232,14 @@ plot_AR_copula <- function(catalog, add.historic = NA, add.synthetic = NA) {
     scale_fill_viridis_c()
 
   if (!is.na(add.historic)) {
-    g <- g + geom_point(data = add.historic,
-                        aes(x = IVT_max, y = duration), shape = 21, fill = 'green', color = 'white')
+    g <- g + 
+      geom_point(data = add.historic,
+                 aes(x = IVT_max, y = duration), shape = 21, fill = 'green', color = 'white')
   }
   if(!is.na(add.synthetic)) {
-    g <- g + geom_point(data = add.synthetic,
-                        aes(x = IVT_max, y = duration), shape = 21, fill = 'red', color = 'white')
+    g <- g + 
+      geom_point(data = add.synthetic,
+                 aes(x = IVT_max, y = duration), shape = 21, fill = 'red', color = 'white')
   }
-
   print(g)
 }
-
-
-print('2. generate ARs')
-
-## decide which USGS gauges are most representative of flows in the study area
-gauge <- c(11464000, 11467000)
-catalog <- generate_AR_catalog(outlet, gauge)
-write.csv(x = catalog, file = './PARRA/_results/catalog.csv')
-# catalog <- read.csv('./PARRA/_results/catalog.csv')
-
-AR <- generate_AR(catalog, n.AR = 100)
-write.csv(x = AR, file = './PARRA/_results/AR.csv')

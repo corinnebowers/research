@@ -1,75 +1,3 @@
-print('loading packages...')
-
-require(ggplot2); theme_set(theme_bw())
-require(sf)
-require(raster)
-require(reshape2)
-require(dplyr)
-require(tigris); options(tigris_use_cache = TRUE)
-require(stringr)
-require(lubridate)
-# require(velox)
-require(RColorBrewer)
-require(rnoaa); rnoaa_options(cache_messages = FALSE)
-require(quantreg)
-require(dataRetrieval)
-require(mvtnorm)
-require(evd)
-require(foreach)
-require(parallel)
-require(future)
-require(doSNOW)
-
-print('defining input information...')
-
-toNumber <- function(x) as.numeric(paste(x))
-
-ggcolor <- function(n) {
-  hues = seq(15, 375, length = n + 1)
-  hcl(h = hues, l = 65, c = 100)[1:n]
-}
-
-log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
-
-Mean <- function(x) mean(x, na.rm = TRUE)
-Sum <- function(x) ifelse(nrow(x)>0, sum(x, na.rm = TRUE), NA)
-Max <- function(x) max(x, na.rm = TRUE)
-Min <- function(x) min(x, na.rm = TRUE)
-
-## meters to feet conversion factor
-mft <- 3.28084
-
-USA <- states(class = 'sf')
-california <- counties(state = 'CA', class= 'sf')
-sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME != 9901)
-
-print('identifying area of interest...')
-
-# data = matrix(rnorm(100), nrow = 10)
-# write.csv(data, './test.csv')
-
-## define inlet watershed using USGS StreamStats
-print('reading inlet...')
-inlet <- st_read('./PARRA/_data/inlet/layers/globalwatershed.shp', quiet = TRUE)
-inlet.point <- st_read('./PARRA/_data/inlet/layers/globalwatershedpoint.shp', quiet = TRUE)
-
-## define outlet watershed using USGS StreamStats
-print('reading outlet...')
-outlet <- st_read('./PARRA/_data/outlet/layers/globalwatershed.shp', quiet = TRUE)
-outlet.point <- st_read('./PARRA/_data/outlet/layers/globalwatershedpoint.shp', quiet = TRUE)
-
-## define area of interest (aoi)
-print('reading dem...')
-dem <- raster('./PARRA/_data/watersheds/TopoBathy.tif')
-print('reading topobathy...')
-topobathy <- raster('./PARRA/_data/watersheds/TopoBathy_save.tif')
-print('transforming...')
-dem <- crop(dem, topobathy)
-aoi <- extent(dem) %>%
-  as('SpatialPolygons') %>%
-  as('sf') %>%
-  st_set_crs(proj4string(dem)) %>%
-  st_transform(st_crs(sonoma))  #the area under consideration, in sf format
 
 ## @param
 ## catalog (data.frame): catalog of ARs occurring in region of interest
@@ -82,7 +10,7 @@ aoi <- extent(dem) %>%
 ## precip (data.frame): list of synthetic precipitation events
 
 generate_precip <- function(AR, catalog, dx = 0.05, n.precip = 1, precip.threshold = 0.5, 
-                            quiet = FALSE, plot = TRUE) {
+                            quiet = FALSE, plot = FALSE) {
   ## fix inputs 
   precip.threshold <- max(precip.threshold, dx)
   
@@ -97,29 +25,54 @@ generate_precip <- function(AR, catalog, dx = 0.05, n.precip = 1, precip.thresho
   }
   
   ## generate precipitation realizations
-  progress <- function(n) setTxtProgressBar(pb, n)
-  opts <- list(progress = progress)
+  opts <- 
   pb <- txtProgressBar(min = 0, max = n.AR, style = 3)
   precip <- 
-    foreach (ar = 1:n.AR, 
-             .combine = 'rbind',
-             .packages = c('quantreg', 'dplyr'), 
-             .options.snow = opts) %dopar% {
-      quant.result <- data.frame(tau = tau, fit = NA, lower = NA, higher = NA)
-      for (i in 1:length(tau)) {
-        quant.boot <- predict(quant.model[[i]], newdata = AR[ar,], 
-                              type = 'percentile', interval = 'confidence', se = 'boot')
-        quant.result[i, 2:4] <- quant.boot
-        quant.result[i,'sd'] <- (quant.result$higher[i]-quant.result$lower[i])/4
+    foreach (
+      ar = 1:n.AR, 
+      .combine = 'rbind', .inorder = FALSE,
+      .packages = c('quantreg', 'dplyr', 'fitdistrplus', 'scales', 'foreach'), 
+      .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
+        
+        ## fit distribution for all quantiles
+        quant.result <- data.frame(tau = tau, fit = NA, lower = NA, higher = NA)
+        for (i in 1:length(tau)) {
+          quant.boot <- predict(quant.model[[i]], newdata = AR[ar,], 
+                                type = 'percentile', interval = 'confidence', se = 'boot')
+          quant.result[i, 2:4] <- quant.boot
+          quant.result[i,'sd'] <- (quant.result$higher[i]-quant.result$lower[i])/4
+        }
+
+        ## take the median precip value & find the lognormal quantile
+        generate_q <- function(n) {
+          precip.fit <- fitdist(catalog$precip, 'lnorm')
+          quant.median <- quant.result %>% filter(tau == 0.5)
+          # out <- 
+            foreach (i = 1:n, .combine = 'c') %do% {
+              plnorm(
+                q = rnorm(1, quant.median$fit, quant.median$sd),
+                meanlog = rnorm(1, precip.fit$estimate['meanlog'], precip.fit$sd['meanlog']),
+                sdlog = rnorm(1, precip.fit$estimate['sdlog'], precip.fit$sd['sdlog']))
+            }
+          # return(out)
+        }
+
+        ## generate sample quantiles for the n.precip data points
+        q <- generate_q(n.precip) %>% 
+          comma(accuracy = dx) %>% as.numeric %>% 
+          cbind(dx) %>% apply(1, max)
+        
+        ## generate a precipitation value & save out
+        index <- match(round(q, 2), round(tau, 2))
+        data.frame(
+          n.AR = ar, 
+          n.precip = 1:n.precip, 
+          q = q,
+          precip_mm = 
+            data.frame(mean = quant.result[index, 'fit'], sd = quant.result[index, 'sd']) %>% 
+            apply(1, function(x) rnorm(n = 1, mean = x[1], sd = x[2]))
+          )
       }
-      q <- sample(seq(precip.threshold, 1-dx, dx), size = n.precip, replace = TRUE)
-      index <- match(round(q, 2), round(tau, 2))
-      
-      data.frame(n.AR = ar, n.precip = 1:n.precip, q = q,
-                 precip_mm = data.frame(mean = quant.result[index, 'fit'],
-                                        sd = quant.result[index, 'sd']) %>% 
-                   apply(1, function(x) rnorm(n = 1, mean = x[1], sd = x[2])))
-    }
 
   ## plot cumulative distribution
   if (plot) {
@@ -141,18 +94,3 @@ generate_precip <- function(AR, catalog, dx = 0.05, n.precip = 1, precip.thresho
   precip <- precip %>% full_join(AR, by = 'n.AR')
   return(precip)
 }
-
-print('3. generate precipitation outcomes')
-
-AR <- read.csv('./PARRA/_results/AR.csv')
-catalog <- read.csv('./PARRA/_results/catalog.csv')
-
-## register parallel backend
-num_cores <- as.numeric(Sys.getenv("SLURM_NTASKS_PER_NODE"))
-cl <- makeCluster(num_cores)
-registerDoSNOW(cl)
-
-precip <- generate_precip(AR, catalog, n.precip = 100, dx = 0.05, precip.threshold = 0.5, plot = FALSE)
-stopCluster(cl)
-
-write.csv(precip, file = './PARRA/_results/precip.csv')

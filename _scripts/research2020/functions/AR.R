@@ -19,7 +19,7 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5, quiet = FALSE) {
     as.data.frame(xy = TRUE) %>% 
     subset(layer > 0) %>% 
     left_join(tracker, by = c('x'='lon', 'y'='lat')) %>% 
-    select(step) %>% 
+    dplyr::select(step) %>% 
     unlist %>% unname %>% sort
   tracker.id <- tracker.id[!(tracker.id %in% c(827,1185))]  ## these ones cause issues
   
@@ -89,14 +89,13 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5, quiet = FALSE) {
       cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = "+proj=longlat +datum=NAD83 +no_defs"))
       precip <- precip + 
         suppressWarnings(exact_extract(cpc_precip, aoi, 'mean', progress = FALSE) %>% unlist)
-        # velox(cpc_precip)$extract(aoi, small = TRUE) %>% lapply(mean) %>% unlist
     }
     catalog[ar, 'precip'] <- precip
     
     ## get storm-total runoff (mm)
     catalog[ar, 'runoff'] <- site.runoff %>% 
       subset(Date %in% datelist) %>% 
-      select(Runoff_mmday) %>% Sum
+      dplyr::select(Runoff_mmday) %>% Sum
     if (!quiet) { setTxtProgressBar(pb, ar) }
   }
   return(catalog)

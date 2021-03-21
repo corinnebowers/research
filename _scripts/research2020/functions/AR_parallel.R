@@ -62,7 +62,7 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
   catalog <- 
     foreach (ar = 1:max(storm.df$ar), 
              .combine = 'rbind',
-             .packages = c('dplyr', 'dataRetrieval', 'rnoaa', 'lubridate', 'velox', 'raster', 'sf'),
+             .packages = c('dplyr', 'dataRetrieval', 'rnoaa', 'lubridate', 'exactextractr', 'raster', 'sf'),
              .options.snow = opts) %dopar% {
                
       start_day = paste(min(ymd(storm.df[storm.df$ar == ar, 'date'])))
@@ -75,7 +75,7 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
         cpc_precip <- cpc_prcp(d)
         cpc_precip$lon <- cpc_precip$lon-360
         cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = "+proj=longlat +datum=NAD83 +no_defs"))
-        precip <- precip + velox(cpc_precip)$extract(aoi, small = TRUE) %>% lapply(mean) %>% unlist
+        precip <- precip + exact_extract(cpc_precip, aoi) %>% lapply(mean) %>% unlist
       }
       
       param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
@@ -86,7 +86,7 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
         mutate(Runoff_mmday = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) %>% 
         dplyr::select(Runoff_mmday, Date) %>% 
         group_by(Date) %>% 
-        summarize(Runoff_mmday = Mean(Runoff_mmday)) %>% 
+        summarize(Runoff_mmday = mean(Runoff_mmday, na.rm = TRUE)) %>% 
         subset(Date %in% datelist) %>% 
         dplyr::select(Runoff_mmday) %>% 
         unlist %>% 
@@ -122,7 +122,7 @@ generate_AR <- function(catalog, n.AR = 1, intensity.threshold = 0.9) {
   create_AR_copula(catalog) 
   
   ## generate new points from the copula
-  z <- rmvnorm(round(n.AR/(1-intensity.threshold)), mean = c(0,0), sigma = RHO) %>% 
+  z <- rmvnorm(round(n.AR/(1-intensity.threshold)), mu = c(0,0), sigma = RHO) %>% 
     # t %>% c %>% 
     # array(dim = c(2, n.AR, 10)) %>% 
     # apply(c(1,2), max) %>% t
