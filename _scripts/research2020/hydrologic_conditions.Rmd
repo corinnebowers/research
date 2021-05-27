@@ -1,0 +1,110 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+require(ncdf4)
+
+```
+
+
+```{r}
+## soil moisture
+## data source: https://www.esrl.noaa.gov/psd/data/gridded/data.cpcsoil.html (simulated product)
+
+## open soil moisture file
+soil_nc <- nc_open('D:/Research/_data/soilmoisture/soilw.mon.mean.v2.nc')
+soil_lat <- ncvar_get(soil_nc, 'lat')
+soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+soil <- ncvar_get(soil_nc, 'soilw')
+nc_close(soil_nc)
+
+load('C:/Users/cbowers/Desktop/catalog.Rdata')
+catalog <- catalog %>% mutate(sm = NA)
+pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+for (ar in 1:nrow(catalog)) {
+  start <- catalog$start_day[ar]
+  end <- catalog$end_day[ar]
+  
+  SM_stack <- raster::stack()
+  monthrecord <- ifelse(month(start) <= month(end),
+                        length(month(start):month(end)),
+                        length((month(start)-12):month(end))) - 1
+  startmonth <- ymd(paste(year(start), month(start), '1', sep = '-'))
+  for (i in 0:monthrecord) {
+    mo <- month(startmonth + months(i))
+    yr <- year(startmonth + months(i))
+    index <- (1:nrow(soil_time))[soil_time$month == mo & soil_time$year == yr]
+    SM_raster <- raster(t(soil[,,index]), xmn = min(soil_lon), xmx = max(soil_lon), 
+                        ymn = min(soil_lat), ymx = max(soil_lat))
+    SM_stack <- raster::stack(SM_stack, SM_raster)
+  }
+  SM_avg <- mean(SM_stack)
+  crs(SM_avg) <- projection(california)
+  
+  catalog$sm[ar] <- exact_extract(SM_avg, aoi %>% st_transform(crs(SM_avg)), fun = 'mean')
+  setTxtProgressBar(pb, ar)
+}
+
+catalog <- catalog %>% 
+  mutate(event = case_when(AR == 172 ~ 1995, AR == 318 ~ 2006, AR == 510 ~ 2019)) %>% 
+  mutate(wateryear = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>% 
+  mutate(season.start = ymd(paste(wateryear-1, 10, 1, sep = '-')),
+         season.end = ymd(paste(wateryear, 4, 1, sep = '-')),
+         season.days = toNumber(ymd(start_day) - season.start),
+         season.frac = season.days / toNumber(season.end-season.start))
+  
+g <- ggplot(catalog) + 
+  geom_point(aes(x = season.frac, y = sm, color = factor(event))) + 
+  scale_x_origin() + scale_y_origin()
+plotly::ggplotly(g)
+
+g <- ggplot(catalog) + 
+  geom_line(aes(x = season.frac, y = sm, color = wateryear, group = wateryear)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'corkO')
+plotly::ggplotly(g)
+
+```
+
+```{r}
+ggplot(catalog) + 
+  geom_histogram(aes(x = log(sm)), color = 'black', fill = 'grey90', bins = 25) + 
+  scale_x_origin() + scale_y_origin()
+
+ggplot(catalog) + 
+  geom_histogram(aes(x = season.frac), color = 'black', fill = 'grey90', bins = 25) + 
+  scale_x_origin() + scale_y_origin()
+
+require(GGally)
+ggpairs(catalog %>% select(sm, season.frac, precip, runoff, Qp), progress = FALSE)
+
+require(fitdistrplus)
+fitdist(catalog$sm, distr = 'lnorm')
+
+```
+
+```{r}
+## test effects on Qp linear regression
+
+catalog <- catalog %>%
+  mutate(Qp_m3s = Qp/(3.28084^3)) %>% #convert to metric
+  mutate(wateryear = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0),
+         seasondays = toNumber(ymd(start_day) - ymd(paste(wateryear-1, 10, 1, sep = '-'))))
+fun <- Qp ~ I(sqrt(runoff)) + runoff*duration + precip:runoff + IVT_max:precip
+
+## fit linear regression to predict Qp
+model <- lm(fun, data = catalog)
+summary(model)
+# 0.8922
+
+fun <- Qp ~ I(sqrt(runoff)) + runoff*duration + IVT_max:precip + sm
+model <- lm(fun, data = catalog)
+summary(model)
+
+
+```
+

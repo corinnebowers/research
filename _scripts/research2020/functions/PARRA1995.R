@@ -33,14 +33,20 @@ num_cores <- as.numeric(Sys.getenv("SLURM_CPUS_PER_TASK"))
 ## set working directory
 setwd('/home/users/cbowers/PARRA/')
 
-## set number of Monte Carlo runs per function
-n.AR <- 1
-n.precip <- 100
-n.runoff <- 100
-n.hydro <- 1
-n.inun <- 10
-n.damage <- 10
-n.loss <- 10
+## read input information
+args <- commandArgs(trailingOnly = TRUE)
+
+## define number of Monte Carlo runs per model
+prob.ar <- as.logical(args[1]); n.ar <- as.numeric(args[2])
+prob.prcp <- as.logical(args[3]); n.prcp <- as.numeric(args[4])
+prob.rnff <- as.logical(args[5]); n.rnff <- as.numeric(args[6])
+prob.hydro <- as.logical(args[7]); n.hydro <- as.numeric(args[8])
+prob.inun <- as.logical(args[9]); n.inun <- as.numeric(args[10])
+prob.dmg <- as.logical(args[11]); n.dmg <- as.numeric(args[12])
+prob.loss <- as.logical(args[13]); n.loss <- as.numeric(args[14])
+
+## set results folder
+results <- args[15]
 
 
 ##### load functions ##############################################################################
@@ -69,16 +75,9 @@ predict.se <- function(model, fitdata, newdata) {
   var.fit <- rowSums((X %*% V) * X) #find the diagonal of the var-cov matrix for yhat
   # se.conf <- sqrt(var.fit) #find pointwise standard errors of predicted mean (CI)
   se.pred <- sqrt(var.fit + MSE^2) #find standard error of the prediction interval (PI)
-  return(se.pred*2)
+  return(se.pred)
 }
 
-# interp <- function(x, y, xi) {
-#   n <- length(x)
-#   xx <- c(x[1], (x[2:n] + x[1:(n - 1)])/2, x[n])
-#   yy <- c(y, y[n])
-#   yi <- approx(xx, yy, xi, method = "constant")$y
-#   return(yi)
-# }
 
 #### load geographies #############################################################################
 print('loading geographies...')
@@ -94,7 +93,6 @@ sonoma <- tracts(state = 'CA', county = 'Sonoma', class = 'sf') %>% subset(NAME 
 
 ## import useful features
 russian <- ('./_data/nhd_majorrivers/MajorRivers.shp') %>% 
-# russian <- ('D:/Research/_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp') %>% 
   st_read(quiet = TRUE) %>% 
   st_zm(st_transform(albers)) %>% 
   subset(grepl('Russian', GNIS_Name))
@@ -115,10 +113,6 @@ inlet <- st_read('./_data/inlet/layers/globalwatershed.shp', quiet = TRUE)
 inlet.point <- st_read('./_data/inlet/layers/globalwatershedpoint.shp', quiet = TRUE)
 outlet <- st_read('./_data/outlet/layers/globalwatershed.shp', quiet = TRUE)
 outlet.point <- st_read('./_data/outlet/layers/globalwatershedpoint.shp', quiet = TRUE)
-# inlet <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershed.shp', quiet = TRUE)
-# inlet.point <- st_read('C:/Users/cbowers/Downloads/inlet/layers/globalwatershedpoint.shp', quiet = TRUE)
-# outlet <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershed.shp', quiet = TRUE)
-# outlet.point <- st_read('C:/Users/cbowers/Downloads/outlet/layers/globalwatershedpoint.shp', quiet = TRUE)
 
 ## load dem
 ## note: most up-to-date version of dem comes from LISFLOOD.Rmd (3/20/21)
@@ -129,7 +123,6 @@ crs(dem) <- paste(
   '+lat_1=39.8333333333333', '+lat_2=38.3333333333333', 
   '+x_0=2000000', '+y_0=500000', 
   '+ellps=GRS80', '+units=m', '+no_defs')
-# load('C:/Users/cbowers/Desktop/dem.Rdata')
 
 ## convert dem to sf format to get area of interest (aoi)
 aoi <- extent(dem) %>% 
@@ -144,7 +137,7 @@ print('2. generate historic catalog')
 source('./_scripts/AR_sherlock.R')
 
 ## decide which USGS gauges are most representative of flows in the study area
-gauge <- 11464000 #c(11464000, 11467000)
+gauge <- c(11463500, 11463682, 11464000)
 
 ## create AR catalog
 #cl <- parallel::makeCluster(num_cores)
@@ -153,9 +146,8 @@ gauge <- 11464000 #c(11464000, 11467000)
 #stopCluster(cl)
 
 ## checkpoint
-#save(catalog, file = './_results/catalog.Rdata')
-load('./_results/catalog.Rdata')
-# load('C:/Users/cbowers/Desktop/catalog.Rdata')
+#save(catalog, file = paste0(results, 'catalog.Rdata'))
+load('/home/groups/bakerjw/cbowers/PARRA/catalog.Rdata')
 
 
 ##### G(AR): generate AR realizations #############################################################
@@ -167,50 +159,56 @@ print('3. generate AR realizations')
 #AR <- 
 #  generate_AR(
 #    catalog = catalog, 
-#    n.AR = 10, 
+#    n.AR = n.ar, 
 #    intensity.threshold = 0)
 #stopCluster(cl)
 
 ## or, use a scenario event
 AR <- catalog %>% 
-  # filter(start_day == '2005-12-30') %>% 
-  .[411,] %>% 
+  filter(start_day == '1995-01-06') %>% 
+#   filter(start_day == '2005-12-30') %>% 
+#   filter(start_day == '2019-02-25') %>% 
   transmute(n.AR = 1, IVT_max, duration)
 
 ## checkpoint
-save(AR, file = './_results/AR.Rdata')
+save(AR, file = paste0(results, 'AR.Rdata'))
 
 
 ##### G(PRCP): generate precipitation realizations ################################################
 print('4. generate precipitation realizations')
 source('./_scripts/PRCP_sherlock.R')
-# source('D:/Research/_scripts/research2020/functions/PRCP_sherlock.R')
 
 ## simulate precipitation values
 precip <- 
   generate_precip(
     AR = AR, 
     catalog = catalog,
-    probabilistic = TRUE,
-    n.precip = 100)
+    probabilistic = prob.prcp,
+    n.precip = n.prcp)
 
 ## checkpoint
-save(precip, file = './_results/PRCP.Rdata')
+save(precip, file = paste0(results, 'PRCP.Rdata'))
 precip <- precip %>% filter(precip_mm > 0)
 
 
 ##### G(RNFF): generate runoff realizations #######################################################
 print('5. generate runoff realizations')
 source('./_scripts/RNFF_sherlock.R')
-# source('D:/Research/_scripts/research2020/functions/RNFF_sherlock.R')
+
+
+
+#load(paste0(results, 'PRCP.Rdata'))
+#precip <- precip %>% filter(precip_mm > 0)
+
+
 
 ## simulate runoff values
 runoff <- 
   generate_runoff(
     precip = precip, 
     catalog = catalog, 
-    probabilistic = TRUE,
-    n.runoff = n.runoff)
+    probabilistic = prob.rnff,
+    n.runoff = n.rnff)
 
 ## convert runoff to a hydrograph (Qp+tp)
 hydrograph <- 
@@ -218,11 +216,11 @@ hydrograph <-
     precip = precip,
     runoff = runoff, 
     catalog = catalog, 
-    probabilistic = TRUE,
+    probabilistic = prob.hydro,
     n.hydro = n.hydro)
 
 ## checkpoint
-save(runoff, hydrograph, file = './_results/Q.Rdata')
+save(runoff, hydrograph, file = paste0(results, 'Q.Rdata'))
 hydrograph <- hydrograph %>% filter(Qp_m3s > 0)
 
 
@@ -230,9 +228,15 @@ hydrograph <- hydrograph %>% filter(Qp_m3s > 0)
 print('6. generate inundation realizations at building locations')
 source('./_scripts/INUN_sherlock.R')
 
+
+
+#load(paste0(results, 'Q.Rdata'))
+#hydrograph <- hydrograph %>% filter(Qp_m3s > 0)
+
+
+
 ## load building information (from buildings.Rmd)
 load('./_data/buildings.Rdata')
-# load('C:/Users/cbowers/Desktop/buildings.Rdata')
 res.buildings <- res.buildings[-11654,] 
 ## res.buildings was cropped to coarser nonzero.buffer --> one snuck through
 
@@ -243,13 +247,13 @@ inundation <-
   generate_inundation(
     hydrograph = hydrograph,
     buildings = res.buildings,
-    probabilistic = TRUE,
+    probabilistic = prob.inun,
     n.inun = n.inun
   )
 stopCluster(cl)
 
 ## checkpoint
-save(inundation, file = './_results/INUN.Rdata')
+save(inundation, file = paste0(results, 'INUN.Rdata'))
 
 
 #### G(DM): generate damage realizations ##########################################################
@@ -258,7 +262,6 @@ source('./_scripts/DM_sherlock.R')
 
 ## load foundation information (from buildings.Rmd)
 load('./_data/foundations.Rdata')
-load('C:/Users/cbowers/Desktop/foundations.Rdata')
 
 ## calculate damage ratios for each building
 cl <- parallel::makeCluster(num_cores)
@@ -269,18 +272,24 @@ damage <-
     buildings = res.buildings,
     foundations = nsi1.found,
     curve = 'average',
-    probabilistic = TRUE,
-    n.damage = n.damage
+    probabilistic = prob.dmg,
+    n.damage = n.dmg
   )
 stopCluster(cl)
 
 ## checkpoint
-save(damage, file = './_results/DM.Rdata')
+save(damage, file = paste0(results, 'DM.Rdata'))
 
 
 #### G(DV): generate loss realizations ############################################################
 print('8. generate loss realizations for each building & event')
 source('./_scripts/DV_sherlock.R')
+
+
+
+#load(paste0(results, 'DM.Rdata'))
+
+
 
 ## edit buildings dataframe
 res.buildings <- res.buildings %>% 
@@ -294,7 +303,7 @@ loss.group <-
     damage = damage,
     buildings = res.buildings,
     aggregate = 'group',
-    probabilistic = TRUE,
+    probabilistic = prob.loss,
     n.loss = n.loss
   )
 
@@ -304,13 +313,13 @@ loss.sim <-
     damage = damage,
     buildings = res.buildings,
     aggregate = 'sim',
-    probabilistic = TRUE,
+    probabilistic = prob.loss,
     n.loss = n.loss
   )
 stopCluster(cl)
 
 ## checkpoint
-save(loss.group, loss.sim, file = './_results/DV.Rdata')
+save(loss.group, loss.sim, file = paste0(results, 'DV.Rdata'))
 
 
 ###################################################################################################

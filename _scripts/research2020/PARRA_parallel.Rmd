@@ -5,6 +5,28 @@ date: "8/5/2020"
 output: html_document
 ---
 
+```{r}
+res.buildings %>% 
+  st_drop_geometry %>% 
+  group_by(GEOID) %>% 
+  summarize(median_value = median(V601Strt), .groups = 'drop') %>% 
+  select(GEOID, median_value) %>% 
+  mutate(GEOID = floor(toNumber(GEOID)/10)) %>% 
+  filter(median_value < 1e6) %>% 
+  left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID') %>% 
+  ggplot() + 
+  geom_point(aes(x = median_acs, y = median_value*2.5)) + 
+  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  # scale_x_log10() + scale_y_log10() + 
+  geom_parity() + coord_fixed() + 
+  theme_classic() + theme(plot.margin = margin(1,20,1,20))
+
+```
+
+
 ```{r setup, include = FALSE}
 # rm(list=ls())
 
@@ -35,6 +57,8 @@ require(mapview)
 require(abind)
 require(dplyr)
 require(exactextractr)
+require(fitdistrplus) ##new!
+require(scales) ##new!
 
 require(foreach)
 require(parallel)
@@ -148,12 +172,16 @@ ggplot() +
 
 ## step 2: generate ARs
 ```{r}
-source('D:/Research/_scripts/research2020/functions/AR.R')
+source('D:/Research/_scripts/research2020/functions/AR_sherlock.R')
 print('2. generate ARs')
 
 ## decide which USGS gauges are most representative of flows in the study area
-gauge <- c(11464000, 11467000)
-catalog <- generate_AR_catalog(outlet, gauge)
+# gauge <- c(11464000, 11467000)
+# cl <- parallel::makeCluster(round(detectCores()*2/3))
+# registerDoSNOW(cl)
+# catalog <- generate_AR_catalog(outlet, gauge)
+# stopCluster(cl)
+
 
 ## if you want to use a historic AR: fill in the values below
 # AR <- data.frame(n.AR = 1,
@@ -161,25 +189,28 @@ catalog <- generate_AR_catalog(outlet, gauge)
 #                  duration = catalog[399, 'duration'])
 
 ## if you want to generate synthetic ARs: 
-AR <- generate_AR(catalog, n.AR = 100, intensity.threshold = 0.75)
+AR <- generate_AR(catalog, n.AR = 1000, intensity.threshold = 0)
 
-plot_AR_copula(catalog, 
-               add.historic = NA, 
-               add.synthetic = AR)
+# plot_AR_copula(catalog, 
+#                add.historic = NA, 
+#                add.synthetic = AR)
 # plot_AR_copula(catalog, add.historic = catalog, add.synthetic = AR)
+
 
 ```
 
 
 ## step 3: generate precipitation outcomes
 ```{r}
-source('./_scripts/research2020/functions/PRCP_parallel.R')
+source('./_scripts/research2020/functions/PRCP_sherlock.R')
 print('3. generate precipitation outcomes')
+
+AR <- catalog %>% mutate(n.AR = 1)
 
 ## register parallel backend
 cl <- parallel::makeCluster(round(detectCores()*2/3))
 registerDoSNOW(cl)
-precip <- generate_precip(AR, catalog, n.precip = 100, dx = 0.05, precip.threshold = 0.75, plot = FALSE)
+precip <- generate_precip4(AR, catalog, n.precip = 500, dx = 0.05, precip.threshold = 0.75, plot = FALSE)
 stopCluster(cl)
 
 ```
@@ -190,7 +221,7 @@ stopCluster(cl)
 source('./_scripts/research2020/functions/RNFF.R')
 print('4. generate runoff outcomes')
 
-runoff <- generate_runoff(precip, catalog, n.runoff = 100, plot = FALSE)
+runoff <- generate_runoff(precip, catalog, n.runoff = 500, plot = FALSE)
 
 # ## perform importance sampling
 # runoff$bin <- round(log10(runoff$runoff_in), 1)

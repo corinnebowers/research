@@ -1,0 +1,558 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "3/20/2021"
+output: html_document
+---
+
+```{r packages, include = FALSE}
+require(caret)
+require(dataRetrieval)
+require(foreach)
+require(doSNOW)
+require(parallel)
+
+```
+
+```{r}
+#### construct hydrographs ####
+
+## load events (found from manual inspection)
+## note: nicest just means the graph looked particularly good/clean
+hydrographs <- read.csv('C:/Users/cbowers/OneDrive/research/hydrographs.csv') %>% 
+  setNames(c('start', 'end', 'nicest')) %>% 
+  tidyr::separate(start, into = c('start_date', 'start_time'), sep = ' ', remove = FALSE) %>% 
+  tidyr::separate(end, into = c('end_date', 'end_time'), sep = ' ', remove = FALSE) %>% 
+  mutate(duration = toNumber(mdy_hm(end) - mdy_hm(start)))
+
+## get flow timeseries for each event
+param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
+statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
+
+pb <- txtProgressBar(min = 0, max = nrow(hydrographs), style = 3)
+cl <- makeCluster(round(detectCores()*2/3))
+registerDoSNOW(cl)
+flow <- 
+  foreach (
+    i = 1:nrow(hydrographs), 
+    .packages = c('dataRetrieval', 'dplyr', 'lubridate'), 
+    .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
+      readNWISdata(
+        sites = 11464000, parameterCd = param,
+        startDate = mdy(hydrographs$start_date[i]), 
+        endDate = mdy(hydrographs$end_date[i]) + days(1),
+        service = 'iv', tz = 'America/Los_Angeles'
+      ) %>% 
+        renameNWISColumns %>% 
+        rename(flow = Flow_Inst, datetime = dateTime) %>% 
+        filter(datetime >= mdy_hm(hydrographs$start[i], tz = 'America/Los_Angeles') & 
+                 datetime <= mdy_hm(hydrographs$end[i], tz = 'America/Los_Angeles'))
+    }
+stopCluster(cl)
+    
+flow <- lapply(
+  flow, function(x) x %>% 
+    mutate(q = flow/Max(flow), 
+           t = toNumber(difftime(datetime, datetime[1], units = 'secs') - 
+                          toNumber(difftime(datetime[which.max(flow)], datetime[1], units = 'secs')))) %>% 
+    mutate(t_diff = -min(t),
+           t_adj = q[1] + (1-q[1])*(t+t_diff)/t_diff))
+
+```
+
+```{r}
+## calculate m
+hydrographs <- hydrographs %>% mutate(m = NA, quality = NA)
+for (i in 1:nrow(hydrographs)) {
+  df <- flow[[i]] %>% filter(t_adj <= 5 & !is.na(q))
+  fit <- nls(q ~ t_adj^m * exp(m*(1-t_adj)), data = df, 
+             start = list(m = 4), control = nls.control(maxiter = 1000))
+  hydrographs$m[i] <- coef(fit)
+  hydrographs$quality[i] <- caret::R2(predict(fit), df$q)
+}
+
+## calculate Qp
+hydrographs$Qp <- flow %>% lapply(function(x) max(x$flow)) %>% unlist
+hydrographs$Qp.date <- flow %>% lapply(function(x) x$datetime[which.max(x$flow)] %>% date %>% paste) %>% unlist
+
+```
+
+```{r}
+#### calculate tp ####
+
+## option 1: only consider hydrographs where the runoff starts at Q/Qp <= 0.1
+start.zero <- c()
+for (i in 1:nrow(hydrographs)) {
+  q.temp <- flow[[i]] %>% subset(t_adj <= 5) %>% .$q
+  if (q.temp[1] < 0.1 & q.temp[1] < q.temp[length(q.temp)]) {
+    start.zero <- c(start.zero, i)
+  }
+}
+hydrographs$tp1 <- NA
+hydrographs[start.zero, 'tp1'] <- 
+  flow[start.zero] %>% 
+  lapply(function(x) x$t_diff[1]/3600) %>% 
+  unlist
+
+## option 2: only consider hydrographs where the gamma distribution fits well 
+## (chosen by manual inspection)
+hydrographs <- hydrographs %>% mutate(alpha = NA, beta = NA)
+means <- c()
+# for (i in 1:nrow(hydrographs)) {
+#   df <- flow[[i]] %>% filter(t_adj <= 5 & !is.na(q)) %>%
+#     mutate(q_adj = (q-min(q))/(1-min(q))) %>%
+#     mutate(t_pos = (t-min(t))/3600) %>%
+#     filter(t_pos <= 1.7*t_pos[which.max(q)])
+#   fit <- nls(q ~ t_pos^a * exp(-b*t_pos) * b^(a+1) / gamma(a), data = df,
+#              start = list(a = df$t_pos[which.max(df$q)], b = 1), control = nls.control(maxiter = 1000))
+#   hydrographs$alpha[i] <- coef(fit)[1]
+#   hydrographs$beta[i] <- coef(fit)[2]
+#   means <- c(means, mean(df$t_pos))
+#   # g <- ggplot(df) +
+#   #   geom_line(aes(x = t_pos, y = q_adj)) +
+#   #   geom_line(aes(x = t_pos, y = predict(fit)), color = 'red') +
+#   #   ggtitle(paste0('ID = ', i))
+#   # print(g)
+# }
+good.tp <- c(2:4, 7, 12, 17, 18, 21, 24, 30:32, 40:42, 46, 50, 
+             54, 56, 57, 60, 62, 65, 72, 73, 75, 79, 85, 86, 90:94, 96:99,
+             102, 105, 108, 111, 118, 123, 126:133, 135:138, 141, 143,
+             146:149, 151)
+hydrographs$tp2 <- NA
+hydrographs[good.tp, 'tp2'] <- hydrographs[good.tp, 'alpha'] / hydrographs[good.tp, 'beta']
+
+## option 3: calculate tp for all of them
+hydrographs$tp3 <- flow %>% lapply(function(x) x$t_diff[1]/3600) %>% unlist
+
+## comparison plots
+g1 <- ggplot(hydrographs) + 
+  geom_point(aes(x = tp1, y = tp2)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
+g2 <- ggplot(hydrographs) + 
+  geom_point(aes(x = tp2, y = tp3)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
+g3 <- ggplot(hydrographs) + 
+  geom_point(aes(x = tp1, y = tp3)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
+gridExtra::grid.arrange(g3, g2, g1, nrow = 2)
+
+```
+
+```{r}
+#### match hydrographs to AR catalog ####
+
+## load catalog
+# load('C:/Users/cbowers/Desktop/catalog.Rdata')
+# save(catalog, file = 'C:/Users/cbowers/Desktop/catalog.Rdata')
+
+## create combined dataframe
+pb <- txtProgressBar(min = 0, max = nrow(catalog)-100, style = 3)
+# cl <- makeCluster(detectCores()*2/3)
+# registerDoSNOW(cl)
+combined <- 
+  foreach (
+    ar = 100:nrow(catalog), 
+    .combine = 'rbind',
+    .packages = c('dplyr', 'lubridate'), 
+    .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %do% {
+      index <- which(ymd(hydrographs$Qp.date) %in% ymd(catalog$Qp.date[ar]))
+      # index <- 
+      #   hydrograph.dates %>% 
+      #   lapply(function(x) any(x %in% seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days'))) %>% 
+      #   unlist %>% which
+      if (length(index) >= 1) {
+        data.frame(AR = ar, hydrograph = index)
+      } else {
+        data.frame(AR = NA, hydrograph = NA)[-1,]
+      }
+    }
+# stopCluster(cl)
+
+gauge <- 11464000
+combined <- combined %>% 
+  left_join(catalog %>% dplyr::select(AR, runoff, Qp, duration), by = 'AR') %>% 
+  rename(Qp.catalog = Qp, runoff.catalog = runoff, duration.catalog = duration) %>% 
+  mutate(runoff.catalog = runoff.catalog/25.4/12) %>% 
+  left_join(hydrographs %>% 
+              mutate(hydrograph = 1:nrow(.)) %>% 
+              dplyr::select(hydrograph, Qp, tp1, tp2, tp3, m, duration), 
+            by = 'hydrograph') %>% 
+  rename(Qp.hydrograph = Qp, duration.hydrograph = duration) %>% 
+  mutate(runoff.hydrograph = Qp.hydrograph / (readNWISsite(gauge)$drain_area_va*5280^2) * (duration.catalog*3600))
+
+# catalog <- catalog %>% 
+#   select(-ends_with('.x')) %>% setNames(gsub('.y', '', names(.))) %>% 
+#   rename(start_day = start_d, end_day = end_d)
+# combined <- combined[,1:2]
+
+```
+
+```{r}
+ggplot(catalog) + 
+  geom_point(aes(x = precip, y = runoff)) + 
+  scale_x_origin() + scale_y_origin() + theme_classic()
+
+ggplot(catalog) + 
+  geom_point(aes(x = precip, y = Qp)) + 
+  scale_x_origin() + scale_y_origin() + theme_classic()
+
+```
+
+
+```{r}
+## compare catalog vs. hydrograph variables (runoff & Qp)
+
+ggplot(combined) + 
+  geom_point(aes(x = Qp.catalog, y = Qp.hydrograph)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed() + 
+  scale_color_scico(palette = 'batlow')
+## these match perfectly!
+
+ggplot(combined) + 
+  geom_point(aes(x = runoff.catalog, y = runoff.hydrograph)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed() + 
+  scale_color_scico(palette = 'batlow')
+## these do not --> what's the difference? and which should I use?
+
+## catalog: total runoff summed from catalog start_day to end_day (usually a longer period than the hydrograph)
+## hydrograph: max runoff multiplied by the AR duration 
+
+## conclusion: there is no reason for these to match, and one is not consistently larger than the other
+
+g1 <- ggplot(combined) + 
+  geom_point(aes(x = runoff.catalog, y = Qp.catalog)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'batlow')
+g2 <- ggplot(combined) + 
+  geom_point(aes(x = runoff.hydrograph, y = Qp.catalog)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'batlow')
+g3 <- ggplot(combined) + 
+  geom_point(aes(x = runoff.catalog, y = Qp.hydrograph)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'batlow')
+g4 <- ggplot(combined) + 
+  geom_point(aes(x = runoff.hydrograph, y = Qp.hydrograph)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'batlow')
+gridExtra::grid.arrange(g1, g2, g3, g4)
+
+```
+
+```{r}
+#### predict Qp from runoff ####
+
+## here is how I'm currently doing it: 
+catalog <- catalog %>% 
+  mutate(Qp.lisflood = (runoff/25.4/12) * (readNWISsite(gauge)$drain_area_va*5280^2) / (duration*3600))
+plotmax <- Max(catalog %>% filter(is.finite(Qp.lisflood)) %>% .$Qp.lisflood)
+
+lm(Qp ~ Qp.lisflood, data = catalog %>% filter(is.finite(Qp.lisflood))) %>% summary
+R1 <- lm(Qp ~ Qp.lisflood, data = catalog %>% filter(is.finite(Qp.lisflood))) %>% 
+  summary %>% .$adj.r.squared 
+R1 <- paste0('R^2 == ', comma(R1, 1e-4))
+g1 <- ggplot(catalog %>% filter(duration >= 6)) + 
+  geom_point(aes(x = Qp, y = Qp.lisflood)) + 
+  geom_text(data = data.frame(x=1), 
+            aes(x = plotmax/2, y = 8e4, label = R1), parse = TRUE) +
+  scale_x_origin('Recorded Qp', labels = comma) + 
+  scale_y_origin('Estimated Qp', labels = comma) + 
+  geom_parity() + coord_fixed(xlim = c(0,plotmax), ylim = c(0,plotmax)) + 
+  theme_classic()
+ggplot(catalog %>% filter(duration >= 6)) + 
+  geom_segment(aes(x = runoff, xend = runoff, y = Qp, yend = Qp.lisflood), color = 'grey50') +
+  geom_point(aes(x = runoff, y = Qp, color = 'Recorded')) + 
+  geom_point(aes(x = runoff, y = Qp.lisflood, color = 'Estimated')) +
+  scale_color_manual('Flow', values = c('red', 'black')) + 
+  scale_x_origin() + scale_y_origin() + 
+  theme_classic() + theme(legend.position = c(0.8, 0.2))
+
+## and here is the new way:
+catalog <- catalog %>%
+  mutate(wateryear = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0),
+         seasondays = toNumber(ymd(start_day) - ymd(paste(wateryear-1, 10, 1, sep = '-'))))
+model <- lm(Qp ~ I(sqrt(runoff)) + runoff*duration + precip + IVT_max, data = catalog)
+summary(model)
+R2 <- summary(model)$adj.r.squared
+R2 <- paste0('R^2 == ', comma(R2, 1e-4))
+
+predictions <- rep(NA, nrow(catalog))
+predictions[!is.na(catalog$Qp)] <- predict(model)
+g2 <- ggplot(catalog) + 
+  geom_point(aes(x = Qp, y = predictions)) + 
+  geom_text(data = data.frame(x=1), 
+            aes(x = plotmax/2, y = 8e4, label = R2), parse = TRUE) +
+  scale_x_origin('Recorded Qp', labels = comma) + 
+  scale_y_origin('Estimated Qp', labels = comma) + 
+  geom_parity() + coord_fixed(xlim = c(0,plotmax), ylim = c(0,plotmax)) + 
+  theme_classic()
+ggplot(catalog) + 
+  geom_segment(aes(x = runoff, xend = runoff, y = Qp, yend = predictions), color = 'grey50') + 
+  geom_point(aes(x = runoff, y = Qp, color = 'Recorded')) + 
+  geom_point(aes(x = runoff, y = predictions, color = 'Estimated')) +
+  scale_color_manual('Flow', values = c('red', 'black')) + 
+  scale_x_origin('Average Runoff (mm)', labels = comma) + 
+  scale_y_origin('Peak Flow (cfs)', labels = comma) + 
+  coord_cartesian(ylim = c(0, plotmax)) + 
+  theme_classic() + theme(legend.position = c(0.8, 0.2))
+
+ggpubr::ggarrange(g1, g2, align = 'h')
+
+```
+
+```{r}
+#### see if the results are different using only the combined catalog ####
+
+## here is how I'm currently doing it: 
+combined <- combined %>% 
+  mutate(Qp.lisflood = runoff.catalog * (readNWISsite(gauge)$drain_area_va*5280^2) / (duration.catalog*3600))
+plotmax <- Max(combined %>% filter(is.finite(Qp.lisflood)) %>% .$Qp.lisflood)
+
+lm(Qp.catalog ~ Qp.lisflood, data = combined %>% filter(is.finite(Qp.lisflood))) %>% summary
+R1 <- lm(Qp.catalog ~ Qp.lisflood, data = combined %>% filter(is.finite(Qp.lisflood))) %>% 
+  summary %>% .$adj.r.squared 
+R1 <- paste0('R^2 == ', comma(R1, 1e-4))
+g1 <- ggplot(catalog %>% filter(duration >= 6)) + 
+  geom_point(aes(x = Qp, y = Qp.lisflood)) + 
+  geom_text(data = data.frame(x=1), 
+            aes(x = plotmax/2, y = 8e4, label = R1), parse = TRUE) +
+  scale_x_origin('Recorded Qp', labels = comma) + 
+  scale_y_origin('Estimated Qp', labels = comma) + 
+  geom_parity() + coord_fixed(xlim = c(0,plotmax), ylim = c(0,plotmax)) + 
+  theme_classic()
+ggplot(catalog %>% filter(duration >= 6)) + 
+  geom_segment(aes(x = runoff, xend = runoff, y = Qp, yend = Qp.lisflood), color = 'grey50') +
+  geom_point(aes(x = runoff, y = Qp, color = 'Recorded')) + 
+  geom_point(aes(x = runoff, y = Qp.lisflood, color = 'Estimated')) +
+  scale_color_manual('Flow', values = c('red', 'black')) + 
+  scale_x_origin() + scale_y_origin() + 
+  theme_classic() + theme(legend.position = c(0.8, 0.2))
+
+## and here is the new way:
+# combined <- combined %>%
+#   left_join(catalog %>% select(AR, start_day, end_day, IVT_max, precip), by = 'AR') %>% 
+#   mutate(wateryear = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0),
+#          seasondays = toNumber(ymd(start_day) - ymd(paste(wateryear-1, 10, 1, sep = '-'))))
+model <- lm(Qp.catalog ~ I(sqrt(runoff.catalog)) + runoff.catalog*duration.catalog + 
+              precip + IVT_max, data = combined)
+summary(model)
+R2 <- summary(model)$adj.r.squared
+R2 <- paste0('R^2 == ', comma(R2, 1e-4))
+
+predictions <- predict(model)
+g2 <- ggplot(combined) + 
+  geom_point(aes(x = Qp.catalog, y = predictions)) + 
+  geom_text(data = data.frame(x=1), 
+            aes(x = plotmax/2, y = 8e4, label = R2), parse = TRUE) +
+  scale_x_origin('Recorded Qp', labels = comma) + 
+  scale_y_origin('Estimated Qp', labels = comma) + 
+  geom_parity() + coord_fixed(xlim = c(0,plotmax), ylim = c(0,plotmax)) + 
+  theme_classic()
+ggplot(combined) + 
+  geom_segment(aes(x = runoff.catalog, xend = runoff.catalog, 
+                   y = Qp.catalog, yend = predictions), color = 'grey50') + 
+  geom_point(aes(x = runoff.catalog, y = Qp.catalog, color = 'Recorded')) + 
+  geom_point(aes(x = runoff.catalog, y = predictions, color = 'Estimated')) +
+  scale_color_manual('Flow', values = c('red', 'black')) + 
+  scale_x_origin('Average Runoff (mm)', labels = comma) + 
+  scale_y_origin('Peak Flow (cfs)', labels = comma) + 
+  coord_cartesian(ylim = c(0, plotmax)) + 
+  theme_classic() + theme(legend.position = c(0.8, 0.2))
+
+ggpubr::ggarrange(g1, g2, align = 'h')
+
+```
+
+
+```{r}
+## compare catalog vs. hydrograph duration
+ggplot(combined) + 
+  geom_point(aes(x = duration.catalog, y = duration.hydrograph)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
+## there is absolutely no relation between these
+## the hydrograph "duration" is just the period that I manually identified where the hydrograph looks nice
+## catalog duration is actually related to the storm --> keep that one
+
+```
+
+```{r}
+#### find a way to predict tp from Qp ####
+ggplot(combined) + 
+  geom_point(aes(x = Qp.catalog, y = tp1))
+ggplot(combined) + 
+  geom_point(aes(x = Qp.catalog, y = tp2))
+ggplot(combined) + 
+  geom_point(aes(x = Qp.catalog, y = tp3))
+
+ggplot(combined) + 
+  geom_point(aes(x = Qp.catalog, y = tp3)) + 
+  scale_x_origin('Qp, Peak Flow (cfs)', labels = comma) + 
+  scale_y_origin('tp, Time to Peak Flow (hrs)', labels = comma) + 
+  theme_classic()
+
+```
+
+```{r}
+#### create a Gaussian copula to represent the relationship between Qp & tp ####
+
+require(fitdistrplus)
+require(scico)
+
+# tp <- combined %>% filter(!is.na(tp1)) %>% .$tp1
+# tp <- combined %>% filter(!is.na(tp2)) %>% .$tp2
+tp <- combined$tp3
+
+## fit a distribution to tp
+norm.fit <- fitdist(data = tp, distr = 'norm')$estimate
+gamma.fit <- fitdist(data = tp, distr = 'gamma')$estimate
+lnorm.fit <- fitdist(data = tp, distr = 'lnorm')$estimate
+# gumbel.fit <- fitdist(data = tp, distr = 'gumbel', start = list(loc = 0, scale = 1))$estimate
+weibull.fit <- fitdist(data = tp, distr = 'weibull')$estimate
+
+# ## fit a pareto distribution
+# require(actuar)
+# require(VGAM)
+# pareto.mle <- function(x) {
+#   xm <- min(x)
+#   alpha <- length(x)/(sum(log(x))-length(x)*log(xm))
+#   return( list(xm = xm, alpha = alpha))
+# }
+# dpareto <- function(x, xm, alpha) ifelse(x > xm , alpha*xm**alpha/(x**(alpha+1)), 0)
+# ppareto <- function(q, xm, alpha) ifelse(q > xm , 1 - (xm/q)**alpha, 0 )
+# qpareto <- function(p, xm, alpha) ifelse(p < 0 | p > 1, NaN, xm*(1-p)**(-1/alpha))
+# rpareto <- function(n, xm, alpha) qpareto(runif(n), xm, alpha)
+# 
+# pareto.fit <- pareto.mle(tp)
+
+df <- data.frame(tp = sort(tp), i = 1:length(tp)) %>% 
+  mutate(p = i/(length(tp)+1)) %>% 
+  mutate(norm = qnorm(p, mean = norm.fit[1], sd = norm.fit[2]),
+         gamma = qgamma(p, shape = gamma.fit[1], rate = gamma.fit[2]), 
+         lnorm = qlnorm(p, meanlog = lnorm.fit[1], sdlog = lnorm.fit[2]),
+         # gumbel = qgumbel(p, loc = gumbel.fit[1], scale = gumbel.fit[2]),
+         weibull = qweibull(p, shape = weibull.fit[1], scale = weibull.fit[2])
+         # pareto = qpareto(p, xm = pareto.fit$xm, alpha = pareto.fit$alpha)
+         ) %>% 
+  pivot_longer(cols = c('norm', 'gamma', 'lnorm', 'weibull'), names_to = 'dist')
+
+g1 <- ggplot(df) + 
+  geom_point(aes(x = p, y = tp)) + 
+  geom_line(aes(x = p, y = value, color = dist, group = dist), size = 1) + 
+  scale_color_scico_d('distribution', palette = 'batlow') + 
+  ggtitle('Empirical CDF') + 
+  scale_y_origin()
+g2 <- ggplot(df %>% filter(dist %in% c('gamma', 'lnorm'))) + 
+  geom_step(aes(x = tp, y = value, color = dist, group = dist), size = 1, ) + 
+  scale_color_manual('tp', values = scico(n = 4, palette = 'batlow')[1:2]) + 
+  ggtitle('Q-Q Plot') + 
+  scale_x_origin('Observed') + scale_y_origin('Predicted') + 
+  geom_parity() #+ coord_fixed(ylim = c(0,60))
+ggpubr::ggarrange(g1, g2, align = 'v', common.legend = TRUE, legend = 'bottom')
+
+```
+
+```{r}
+## compare lognormal parameters for different tp subsets
+tp <- combined %>% filter(!is.na(tp1)) %>% .$tp1
+tp1.fit <- fitdist(data = tp, distr = 'lnorm')$estimate
+tp <- combined %>% filter(!is.na(tp2)) %>% .$tp2
+tp2.fit <- fitdist(data = tp, distr = 'lnorm')$estimate
+tp <- combined$tp3
+tp3.fit <- fitdist(data = tp, distr = 'lnorm')$estimate
+
+data.frame(
+  tp1 = rlnorm(1e3, meanlog = tp1.fit[1], sdlog = tp1.fit[2]),
+  tp2 = rlnorm(1e3, meanlog = tp2.fit[1], sdlog = tp2.fit[2]),
+  tp3 = rlnorm(1e3, meanlog = tp3.fit[1], sdlog = tp3.fit[2])
+) %>% 
+  pivot_longer(cols = everything(), names_to = 'tp', values_to = 'value') %>% 
+  ggplot() + 
+  geom_density(aes(x = value, group = tp, fill = tp), alpha = 0.5)
+
+# tp.fit <- rbind(tp1.fit, tp2.fit) %>% apply(2, mean)
+tp.fit <- tp3.fit 
+
+```
+
+```{r}
+## check that nothing else is correlated with tp
+temp <- combined %>% 
+  left_join(catalog %>% dplyr::select(AR, IVT_max, precip, seasondays), by = 'AR') %>% 
+  filter(!is.na(Qp.catalog)) %>% 
+  dplyr::select(tp3, runoff.catalog, Qp.catalog, duration.catalog, IVT_max, precip, seasondays)
+
+GGally::ggpairs(temp %>% filter(runoff.catalog < 1))
+cor(temp)
+
+```
+
+
+```{r}
+## fit a distribution to Qp
+norm.fit <- fitdist(data = combined$Qp.catalog, distr = 'norm')
+# gamma.fit <- fitdist(data = combined$Qp.catalog, distr = 'gamma')
+lnorm.fit <- fitdist(data = combined$Qp.catalog, distr = 'lnorm')
+gumbel.fit <- fitdist(data = combined$Qp.catalog, distr = 'gumbel', start = list(loc = 0, scale = 1))
+weibull.fit <- fitdist(data = combined$Qp.catalog, distr = 'weibull')
+
+df <- data.frame(Qp = sort(combined$Qp.catalog), i = 1:length(combined$Qp.catalog)) %>% 
+  mutate(p = i/(length(Qp)+1)) %>% 
+  mutate(norm = qnorm(p, mean = norm.fit$estimate[1], sd = norm.fit$estimate[2]),
+         # gamma = qgamma(p, shape = gamma.fit$estimate[1], rate = gamma.fit$estimate[2]), 
+         lnorm = qlnorm(p, meanlog = lnorm.fit$estimate[1], sdlog = lnorm.fit$estimate[2]),
+         gumbel = qgumbel(p, loc = gumbel.fit$estimate[1], scale = gumbel.fit$estimate[2]),
+         weibull = qweibull(p, shape = weibull.fit$estimate[1], scale = weibull.fit$estimate[2])) %>% 
+  pivot_longer(cols = c('norm', 'lnorm', 'gumbel', 'weibull'), names_to = 'dist')
+ggplot(df) + 
+  geom_point(aes(x = p, y = Qp)) + 
+  geom_line(aes(x = p, y = value, color = dist, group = dist))
+
+## could be lognormal or weibull -> use lognormal for now
+Qp.fit <- lnorm.fit
+
+```
+
+```{r}
+#### look at modifying the CN method to go from precip --> Qp ####
+
+## turns out this doesn't work
+ggplot(wateryear.df) + geom_point(aes(x = volume, y = Qp)) + 
+  scale_x_origin('Average Precipitation Volume (cfs)', labels = comma) + 
+  scale_y_origin('Peak Flow (cfs)', labels = comma) + 
+  geom_parity() + coord_fixed()
+ggplot(wateryear.df) + geom_point(aes(x = precip, y = runoff)) + 
+  scale_x_origin('Total Precipitation (in)', labels = comma) + 
+  scale_y_origin('Total Runoff (in)', labels = comma) + 
+  geom_parity() + coord_fixed()
+
+```
+
+
+```{r}
+ggplot(catalog) + 
+  geom_density(aes(x = Qp, group = AR %in% combined$AR, fill = AR %in% combined$AR), 
+               alpha = 0.5) + 
+  scale_x_origin() + scale_y_origin()
+
+# ggplot(hydrographs) + 
+#   geom_density(aes(x = tp3, group = is.na(tp1), fill = is.na(tp1)),
+#                alpha = 0.5) + 
+#   scale_x_origin() + scale_y_origin()
+# ggplot(hydrographs) + 
+#   geom_density(aes(x = tp3, group = is.na(tp2), fill = is.na(tp2)),
+#                alpha = 0.5) + 
+#   scale_x_origin() + scale_y_origin()
+
+ggplot(hydrographs) + 
+  geom_density(aes(x = quality, group = !is.na(tp1), fill = !is.na(tp1)),
+               alpha = 0.5) + 
+  scale_x_origin() + scale_y_origin()
+ggplot(hydrographs) + 
+  geom_density(aes(x = quality, group = !is.na(tp2), fill = !is.na(tp2)),
+               alpha = 0.5) + 
+  scale_x_origin() + scale_y_origin()
+
+```
+
+
+

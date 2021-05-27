@@ -1,0 +1,160 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+## remake graphic elements for Jack
+
+ggplot() +
+  # geom_ribbon(
+  #   data = data.frame(IVT_max = seq(0, 1500, 250),
+  #                     duration = quantile(catalog$duration, 0.05)) %>%
+  #     mutate(pred.lwr = predict(mod, .)) %>%
+  #     mutate(duration = quantile(catalog$duration, 0.95)) %>%
+  #     mutate(pred.upr = predict(mod, .)),
+  #   aes(x = IVT_max, ymin = pred.lwr/25.4, ymax = pred.upr/25.4), fill = 'grey90') +
+  # geom_line(
+  #   data = data.frame(IVT_max = seq(0, 1500, 250), duration = median(catalog$duration)) %>%
+  #     mutate(prediction = predict(mod, .)),
+  #   aes(x = IVT_max, y = prediction/25.4), size = 1, color = 'red') +
+  geom_line(data = catalog, aes(x = IVT_max, y = predict(mod)/25.4), color = 'grey70') +
+  geom_point(data = catalog, aes(x = IVT_max, y = precip/25.4), size = 1) +
+  geom_line(
+    data = data.frame(IVT_max = seq(0, 1500, 50)) %>%
+      mutate(duration = qlnorm(((1:nrow(.))/(nrow(.)+3))^(1/3), meanlog = 3.1254, sdlog = 0.7124)) %>%
+      mutate(prediction = predict(mod, .)),
+    aes(x = IVT_max, y = prediction/25.4), size = 1 , color = ggcolor(2)[1]) +
+  scale_x_continuous('Max IVT', expand = expansion(mult = c(0, 0.025))) +
+  scale_y_continuous('Precipitation', expand = expansion(mult = c(0, 0.025))) +
+  coord_cartesian(xlim = c(250, max(catalog$IVT_max)), ylim = c(0, NA))
+ggsave('prcp_model.jpg', width = 3, height = 3)
+
+precip <- generate_precip(
+  AR = catalog %>% transmute(n.AR = 1:nrow(.), IVT_max, duration),
+  catalog = catalog,
+  probabilistic = TRUE, n.precip = 1e3)
+
+precip %>%
+  group_by(n.AR, IVT_max, duration) %>%
+  summarize(precip.lwr = quantile(precip_mm, 0.05),
+            precip.med = median(precip_mm),
+            precip.upr = quantile(precip_mm, 0.95)) %>%
+  left_join(catalog %>% transmute(n.AR = 1:nrow(.), precip.obs = precip)) %>%
+  ggplot() +
+  geom_point(aes(x = IVT_max, y = precip.obs, color = duration)) +
+  geom_smooth(aes(x = IVT_max, y = precip.lwr), se = FALSE) +
+  geom_smooth(aes(x = IVT_max, y = precip.med)) +
+  geom_smooth(aes(x = IVT_max, y = precip.upr), se = FALSE)
+
+```
+
+```{r}
+load('C:/Users/cbowers/Desktop/foundations.Rdata')
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+load('C:/Users/cbowers/Desktop/catalog.Rdata')
+load('C:/Users/cbowers/Desktop/dem.Rdata')
+res.buildings <- res.buildings[-11654,] 
+NAD <- 4269
+
+mft <- 3.28084
+hydrograph.2006 <- catalog %>% 
+  transmute(IVT_max, duration, precip_mm = precip, runoff_mm = runoff, Qp_m3s = Qp/mft^3) %>% 
+  .[194,] %>% 
+  cbind(n.AR = 1, n.precip = 1, n.runoff = 1, n.hydro = 1, tp_hrs = 39)
+
+inun <- generate_inundation(
+  hydrograph = hydrograph.2006, 
+  catalog, 
+  buildings = res.buildings, 
+  foundations = nsi1.found, 
+  probabilistic = TRUE, n.inun = 100
+)
+
+inundation %>% do.call(cbind, .) %>% apply(1, mean) %>% cbind(buildings[wet.bldg,], inun = .) %>% 
+  ggplot() + geom_sf(aes(color = inun)) + geom_sf(data = russian %>% st_crop(aoi))
+
+temp <- surrogate(
+          Qp = hydrograph$Qp_m3s[i], tp = hydrograph$tp_hrs[i],
+          sample.table = samples_scale,
+          # sample.loc = '/scratch/users/cbowers/LISFLOOD/grid/results/max/',
+          sample.loc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-02-21 gridded/results/',
+          n, p, alpha) 
+
+raster.df <- function(x) x %>% as.data.frame(xy = TRUE) %>% setNames(c('x','y','value'))
+ggplot(overlay(temp, dem, fun = function(x, y) ifelse(y < 1, 0, x)) %>% 
+         raster.df %>% filter(value > 0)) + 
+  geom_sf(data = aoi %>% st_transform(crs(dem)), fill = 'grey70') + 
+  geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(dem)), fill = 'white', color = 'grey60') +
+  geom_raster(aes(x=x, y=y), fill = 'dodgerblue') + 
+  # geom_sf(data = buildings %>% mutate(flood = 1:nrow(.) %in% wet.bldg),
+  #         aes(color = flood), size = 0.5, show.legend = FALSE) +
+  # scale_color_manual(values = c('grey80', 'red')) + 
+  geom_sf(data = russian %>% st_crop(aoi) %>% st_transform(crs(dem))) + 
+  coord_sf(xlim = c(1902500, 1930000), ylim = c(580000, 605000)) + 
+  theme_void() + theme(panel.border = element_rect(fill = NA, color = 'grey50'))
+
+ggplot(overlay(temp, dem, fun = function(x, y) ifelse(y < 1, 0, x)) %>% 
+         raster.df %>% filter(value > 0)) + 
+  geom_sf(data = aoi %>% st_transform(crs(dem)), fill = 'grey70') +
+  geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(dem)), fill = 'white', color = 'grey60') +
+  geom_raster(aes(x=x, y=y), fill = 'dodgerblue') + 
+  # geom_sf(data = buildings %>% mutate(flood = 1:nrow(.) %in% wet.bldg),
+  #         aes(color = flood), size = 0.5, show.legend = FALSE) +
+  scale_color_manual(values = c('grey80', 'red')) + 
+  geom_sf(data = russian %>% st_crop(aoi) %>% st_transform(crs(dem))) + 
+  coord_sf(xlim = c(1905000, 1920000), ylim = c(583500, 596000)) + 
+  theme_void() + theme(panel.border = element_rect(fill = NA, color = 'grey50'))
+
+```
+
+```{r}
+damage <- generate_damage(inundation, curve = 'average', probabilistic = FALSE, n.damage = 100)
+
+sonoma.cbg <- block_groups('CA', 'Sonoma')
+
+res.buildings <- res.buildings %>% 
+  mutate(id = 1:nrow(.)) %>% 
+  select(id, V601TotalL) %>% 
+  st_intersection(sonoma.cbg %>% select(GEOID))
+  
+res.buildings <- res.buildings %>% 
+  transmute(id, value = V601TotalL, value.sd = 0, group = GEOID)
+
+# loss.cbg <- generate_losses(damage, res.buildings, aggregate = 'group', probabilistic = TRUE, n.loss = 5)
+
+sonoma.cbg %>% left_join(loss.cbg, by = c('GEOID' = 'group')) %>% st_transform(crs(dem)) %>% 
+  ggplot() + 
+  geom_sf(aes(fill = loss)) + 
+  geom_sf(data = russian %>% st_transform(crs(dem))) + 
+  geom_sf(data = buildings %>% mutate(flood = 1:nrow(.) %in% wet.bldg),
+          aes(color = flood), size = 0.5, show.legend = FALSE) +
+  scale_color_manual(values = c('grey80', 'red')) +
+  coord_sf(xlim = c(1905000, 1920000), ylim = c(583500, 596000)) + 
+  theme_void() + theme(panel.border = element_rect(fill = NA, color = 'grey50'))
+
+
+res.buildings %>% 
+  left_join(losses.bldg, by = c('id' = 'bldg')) %>% 
+  st_drop_geometry %>% 
+  group_by(group) %>% 
+  summarize(loss = Mean(loss)) %>% 
+  filter(loss > 0) %>% 
+  right_join(sonoma.cbg, ., by = c('GEOID' = 'group')) %>% 
+  st_transform(crs(dem)) %>% 
+  ggplot() + 
+  geom_sf(data = aoi %>% st_transform(crs(dem)), fill = 'grey70') + 
+  geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(dem)), fill = 'white', color = 'grey60') +
+  geom_sf(aes(fill = loss)) + 
+  # geom_sf(data = buildings %>% mutate(flood = 1:nrow(.) %in% wet.bldg),
+  #         aes(color = flood), size = 0.5, show.legend = FALSE) +
+  # scale_color_manual(values = c('grey80', 'red')) +
+  geom_sf(data = res.buildings, color = 'grey70', size = 1) + 
+  geom_sf(data = res.buildings %>% left_join(losses.bldg, by = c('id' = 'bldg')) %>% filter(loss > 0)) + 
+  geom_sf(data = russian %>% st_transform(crs(dem))) + 
+  coord_sf(xlim = c(1902500, 1930000), ylim = c(580000, 605000)) + 
+  scale_fill_scico('Loss ($K)', palette = 'davos', direction = -1, label = comma_format(scale = 1e-3)) + 
+  theme_void() + theme(panel.border = element_rect(fill = NA, color = 'grey50'))
+  
+require(scico)
+```

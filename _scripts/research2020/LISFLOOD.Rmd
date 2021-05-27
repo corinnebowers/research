@@ -65,64 +65,142 @@ wbd12 <- st_read('./_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.
 
 ```
 
-ArcGIS vignette: use the Project Raster tool to convert the SonomaVegMap merged dataset (proj = NAD 1983 2011 StatePlane California II FIPS 0402 Ft US) to meters (NAD 1983 2011 StatePlane California II FIPS 0402 Meters)
+ArcGIS vignette: 
+
+* download Hydro DEMs from SonomaVegMap: http://sonomavegmap.org/data-downloads/
+* combine in ArcGIS using the Mosaic to New Raster tool
+  + new raster name = SonomaVegMap
+  + spatial reference = NAD_1983_2011_StatePlane_California_II_FIPS_0402_US_Feet
+  + pixel type = 32-bit float
+  + cell size = N/A (native resolution = 3 feet)
+  + bands = 1
+  + mosaic operator = blend
+  + environment: turn off build pyramids, turn off raster statistics, 
+    resample = bilinear, parallel processing factor = 5
+    
+* open TopoBathy: https://www.arcgis.com/home/item.html?id=c753e5bfadb54d46b69c3e68922483bc
+* download ocean elevations
+  + used aoi.shp as a guide & downloaded lower-left corner @ 10m elevation 
+    (has to be under 5000x5000)
+
 ```{r}
-## step 1) generate the DEM 
-hydro_1m <- raster('C:/Users/cbowers/Downloads/watersheds/HYDRO_DEM_1m.tif') #1-meter resolution
-hydro <- raster('C:/Users/cbowers/Downloads/watersheds/HYDRO_DEM_meters.tif') #50-meter resolution
+## define CA zone 2 projection (6417 = meters, 6418 = US feet)
+crs_dem <- st_crs(6417)
 
-## crop to area of interest (defined by topobathy, the values don't actually matter)
-topobathy <- raster('C:/Users/cbowers/Downloads/watersheds/Topobathy_save.tif')
-dem <- hydro %>% 
-  projectRaster(topobathy) %>% 
-  overlay(topobathy, fun = function(x, y) ifelse(is.na(x) & y < 10, y, x)) %>%
-  crop(topobathy) %>% 
-  projectRaster(hydro) %>% 
-  as.data.frame(xy = TRUE) %>% 
-  setNames(c('x', 'y', 'value')) %>% 
-  filter(!is.na(value)) %>% 
-  filter(!(y %in% unique(y)[1:4])) %>% 
-  rasterFromXYZ(crs = crs(hydro))
+## define area of interest (aoi)
+ext <- extent(1895000, 1935000, 579500, 616500)
+aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(crs_dem)
 
-## check dimensions & resolution
-prod(dim(dem))/1e6
-crs(dem)
-res(dem)
+## create blank raster with desired resolution
+blank <- raster(ext, resolution = c(40,40), crs = projection(aoi))
 
-## save out 
+## load SonomaVegMap file (takes about half an hour)
+## horizontal: resolution = 3x3 feet, units = feet
+## vertical: RMSE = 0.03 meters (see metadata), units = feet 
+hydro <- raster('D:/Research/_gis/watersheds/SonomaVegMap_temp.tif') 
+hydro <- hydro %>% aggregate(10) %>% projectRaster(blank)
+
+## convert vertical units from feet to meters
+dem.hydro <- hydro / mft
+
+## check vertical units
+# aoi %>% 
+#   st_sample(10) %>% st_sf %>% 
+#   elevatr::get_elev_point(.) %>% 
+#   mutate(hydro = terra::extract(rast(temp2), st_coordinates(.)) %>% unlist %>% unname) %>% 
+#   mutate(hydro_m = hydro / mft)
+
+## load topobathy file for ocean elevation
+topobathy <- raster('C:/Users/cbowers/Desktop/topobathy.tif') %>% 
+  projectRaster(blank)
+
+## check topobathy location
+# ggplot() +
+#   geom_raster(data = raster.df(topobathy) %>% filter(!is.na(value)),
+#               aes(x=x, y=y), fill = 'blue') +
+#   geom_raster(data = raster.df(dem) %>% filter(!is.na(value)),
+#               aes(x=x, y=y), fill = 'red', alpha = 0.5) +
+#   coord_sf(crs = crs_dem)
+
+## check topobathy elevation
+# raster.df(topobathy) %>% rename(topobathy = value) %>% 
+#   left_join(raster.df(dem) %>% rename(dem = value), by = c('x', 'y')) %>% 
+#   filter(!is.na(topobathy) & !is.na(dem)) %>% 
+#   ggplot() + geom_point(aes(x = dem, y = topobathy), color = 'grey70') + geom_parity()
+  
+## add topobathy file to dem
+dem <- dem.hydro %>% overlay(topobathy, fun = function(x,y) ifelse(is.na(x), y, x))
+
+## save out
+save(hydro, dem.hydro, dem, file = 'C:/Users/cbowers/Desktop/dem_save.Rdata')
 writeRaster(dem, format = 'ascii', overwrite = TRUE,
             filename = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.dem.asc')
 
 ```
 
 ```{r}
+## check new DEM
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+res.buildings <- res.buildings %>% st_transform(crs_dem) %>% st_crop(aoi)
+
+elev <- sample(1:nrow(res.buildings), size = 100) %>% 
+  elevatr::get_elev_point(res.buildings[.,]) %>% 
+  mutate(dem = dem %>% rast %>% 
+           terra::extract(., st_coordinates(elev)) %>% 
+           unlist %>% unname)
+ggplot(elev) + 
+  geom_point(aes(x = elevation, y = dem)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
+
+```
+
+```{r}
 ## step 2) get the channel width 
-hydropoly <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
-                     layer = 'NHDArea', quiet = TRUE)
-fcode <- st_read('./_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
-                 layer = 'NHDFCode', quiet = TRUE)
+hydropoly <- 
+  st_read('D:/Research/_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb',
+          layer = 'NHDArea', quiet = TRUE) %>% st_transform(crs_dem)
+fcode <- 
+  st_read('D:/Research/_gis/California/_hydrology/NHD_H_California_State_GDB/NHD_H_California_State_GDB.gdb', 
+          layer = 'NHDFCode', quiet = TRUE)
 hydropoly_rr <- hydropoly %>% 
-  left_join(fcode %>% dplyr::select('FCODE', 'DESCRIPTION'), by = c('FCode' = 'FCODE')) %>% 
+  left_join(fcode %>% select('FCODE', 'DESCRIPTION'), by = c('FCode' = 'FCODE')) %>% 
   subset(grepl('Stream/River', DESCRIPTION)) %>% 
   subset(row.names(.) == '2104') %>%  #get Russian River only
-  st_transform(crs(hydro_1m)) %>% 
-  st_intersection(st_transform(wbd12, crs(.))) %>% 
+  sfheaders::sf_remove_holes(.) %>% 
+  st_intersection(st_transform(wbd12, crs_dem)) %>% 
   mutate(feature_id = row.names(.)) %>% 
-  subset(!(feature_id %in% c('2104', '2104.12', '2104.20'))) %>% 
-  dplyr::select(feature_id, Shape) %>% 
+  subset(!(feature_id %in% c('2104', '2104.11', '2104.12', '2104.20'))) %>% 
+  select(feature_id, Shape) 
+
+hydropoly_rr <- hydropoly_rr %>%
+  filter(feature_id %in% c('2104.16', '2104.17')) %>% 
+  st_union %>% st_sf %>%
+  transmute(feature_id = '2104.17', Shape = geometry) %>%
+  st_drop_geometry %>%
+  rbind(hydropoly_rr %>% filter(!(feature_id %in% c('2104.16', '2104.17')))) %>%
+  st_sf %>% 
+  st_crop(extent(blank)) %>% 
+  st_cast('MULTIPOLYGON') %>% st_cast('POLYGON') %>% 
+  mutate(feature_id = row.names(.)) %>% 
+  filter(feature_id != '2104.14') %>% 
   mutate(AREA = st_area(.), 
-         PERIMETER = lwgeom::st_perimeter(.),
-         WIDTH = 2*AREA/PERIMETER) %>%  
-  st_transform(crs(dem)) %>% 
-  st_crop(extent(dem))
-width <- rasterize(x = hydropoly_rr %>% st_cast(to = 'MULTILINESTRING'), y = dem, field = 'WIDTH')
-proj4string(width) <- proj4string(dem)
+       PERIMETER = lwgeom::st_perimeter(.),
+       WIDTH = 2*AREA/PERIMETER)
+
+width <- rasterize(x = hydropoly_rr %>% st_cast(to = 'MULTILINESTRING'), y = blank, field = 'WIDTH')
 
 ## get boundary edges for .bci file
 width.df <- as.data.frame(width, xy = TRUE) %>% subset(!is.na(layer))
 edge.in <- width.df[which(width.df$y == max(width.df$y)),]
 edge.out <- width.df[which(width.df$x == min(width.df$x)),]
 
+# require(leaflet)
+# require(mapboxapi)
+# temp <- hydropoly_rr %>% st_transform(st_crs(sonoma))
+# leaflet(temp) %>%
+#   addMapboxTiles(style_id = "light-v9", username = "mapbox") %>%
+#   addPolygons(label = ~feature_id)
+ 
 ## save out
 writeRaster(width, format = 'ascii', overwrite = TRUE, 
             filename = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.width.asc')
@@ -133,9 +211,9 @@ writeRaster(width, format = 'ascii', overwrite = TRUE,
 ## step 3) get the floodplain roughness
 
 ## get LULC codes
-lulc <- raster('./_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img')
+lulc <- raster('D:/Research/_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img')
 lulc.att <- lulc@data@attributes[[1]]
-lulc.n <- sonoma %>% as('Spatial') %>% get_nlcd(label = 'value')
+lulc.n <- get_nlcd(blank, label = 'value')
 vals <- unique(lulc.n[])
 
 ## decide on roughness values for floodplain
@@ -144,7 +222,6 @@ manning <- readxl::read_xlsx('C:/Users/cbowers/Desktop/LISFLOOD/lisflood runs.xl
   setNames(c('name', 'code', 'KS', 'KS_min', 'KS_max', 'JSH', 'HECRAS', 'MWR')) %>% 
   mutate(name = factor(name, levels = rev(name)))
 ggplot(manning) + 
-  geom_hline(yintercept = (1:2)/10, color = 'grey90') + 
   geom_point(aes(x = name, y = KS, color = 'KS', shape = 'KS'), size = 3) + 
   # geom_errorbar(aes(x = name, ymin = KS_min, ymax = KS_max, color = 'KS'), width = 0.25) + 
   geom_segment(aes(x = name, xend = name, y = KS_min, yend = KS_max, color = 'KS'), size = 2, alpha = 0.25) + 
@@ -153,14 +230,15 @@ ggplot(manning) +
   geom_point(aes(x = name, y = MWR, color = 'MWR', shape = 'MWR'), size = 3) + 
   geom_point(aes(x = name, y = rowMeans(cbind(KS, HECRAS, MWR))), color = 'black', size = 2) + 
   labs(x = '', y = 'Manning\'s Roughness Coefficient', color = 'Source', shape = 'Source') + 
-  scale_y_continuous(expand = c(0,0)) + 
+  scale_y_origin(breaks = seq(0, 1, 0.05), minor_breaks = seq(0, 1, 0.05)) + 
   scale_shape_manual(values = 15:18) + 
   scale_color_manual(values = c('#800000', '#f58231', '#000075', '#4389d8')) + 
-  coord_flip(clip = 'off')
+  coord_flip(clip = 'off') + theme(panel.grid.major.x = element_line(color = 'grey90'))
 manning_values <- manning %>% 
   mutate(values = rowMeans(cbind(KS, HECRAS, MWR))) %>% 
   dplyr::select(code, values)
 manning_values[1,2] <- 0.035
+manning_values <- manning_values %>% mutate(values = cbind(0.035, values) %>% apply(1, max))
 
 ## change LULC codes to roughness values
 lulc.n <- lulc.n %>% 
@@ -168,7 +246,7 @@ lulc.n <- lulc.n %>%
   reclassify(manning_values)
 
 ## reformat raster to match DEM
-lulc.dem <- projectRaster(lulc.n, dem)
+lulc.dem <- projectRaster(lulc.n, blank)
 
 ## save out
 writeRaster(lulc.dem, format = 'ascii', overwrite = TRUE, 
@@ -199,18 +277,19 @@ sites <- whatNWISsites(stateCd = 'CA', parameterCD = param, hasDataTypeCd = 'dv'
   subset(site_no != 11457002) %>%  #subset to gauges with cfs only
   subset(!(site_no %in% c(11463980, 11465390)))  #keep gauges with long records only
 ggplot() + 
-  geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70') + 
-  geom_sf(data = polygon_from_extent(dem) %>% st_as_sf, fill = 'black', alpha = 0.1) +
-  geom_sf(data = russian %>% st_crop(sonoma) %>% st_transform(crs(topobathy))) + 
-  geom_sf(data = sites %>% st_transform(crs(topobathy)), 
-          aes(color = site_no), size = 3) + 
+  geom_sf(data = sonoma %>% st_transform(crs_dem), color = 'grey70') + 
+  geom_sf(data = aoi, fill = 'black', alpha = 0.1) +
+  geom_sf(data = russian %>% st_crop(sonoma) %>% st_transform(crs_dem)) + 
+  geom_sf(data = sites %>% st_transform(crs_dem), aes(color = site_no), size = 3) + 
   theme_void()
 
+```
+
+```{r}
 ## find baseflow
-data <- readNWISdv(c(11463682, 11463500), parameterCd = param, startDate = '2000-01-01') %>% 
+data <- readNWISdv(11463500, parameterCd = param, startDate = '2000-01-01') %>% 
   renameNWISColumns %>% 
-  mutate(flow_m3s = Flow/(mft^3)) %>% 
-  filter(Date >= today()-years(6) & Date <= today())
+  mutate(flow_m3s = Flow/(mft^3))
 timeseries <- data %>% 
   group_by(Date) %>% 
   summarize(flow_m3s = mean(flow_m3s), .groups = 'drop') %>% 
@@ -222,110 +301,49 @@ for (i in 1:60) {
   medians[i] <- lfstat::baseflow(timeseries, block.len = i) %>% median(na.rm = TRUE)
 }
 ggplot() + 
-  geom_line(aes(x = 1:60, y = means, color = 'mean')) + 
-  geom_line(aes(x = 1:60, y = medians, color = 'median'))
+  geom_line(aes(x = 1:60, y = means, color = 'mean'), size = 1) + 
+  geom_line(aes(x = 1:60, y = medians, color = 'median'), size = 1) + 
+  geom_hline(yintercept = 3:4, linetype = 'dashed') + 
+  scale_x_origin() + scale_y_origin() + theme_bw()
 means; medians
 
-## find appropriate HFIX at outlet
-stage <- readNWISdata(siteNumbers = 11467002, parameterCd = '00065', startDate = '2001-01-01') %>% 
-  renameNWISColumns
-ggplot(stage) + 
-  geom_path(aes(x = dateTime, y = GH_Max)) + 
-  geom_hline(yintercept = 2.5*mft, color = 'red') + 
-  scale_y_continuous(limits = c(5,10))
+```
+```{r}
+## generate gauge files
 
-## generate bci file for baseflow
-baseflow <- 3.5
-bci <- data.frame(matrix(
-  c('N', round(min(edge.in$x)), round(max(edge.in$x)), 'QFIX', baseflow/mean(edge.in$layer),
-    'W', round(min(edge.out$y)), round(max(edge.out$y)), 'HFIX', 2.5),
-                         nrow = 2, byrow = TRUE))
-write.table(bci, file = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/baseflow_3.5cfs_fixed.bci', 
-            row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t')
 
 ```
 
 ```{r}
-## step 5) choose a startfile 
-floods <- raster::stack()
-for (i in 1:8) {
-  floods <- raster(paste0('C:/Users/cbowers/Desktop/LISFLOOD/', 
-                             'sonoma_sherlock/21-01-06 baseflow/results/baseflow', i, '.max')) %>% 
-    stack(floods, .)
-}
+raster.df <- function(x) as.data.frame(x, xy = TRUE) %>% setNames(c('x', 'y', 'value'))
+ggplot() + 
+  geom_raster(data = raster.df(width), aes(x=x, y=y, fill = value)) + 
+  geom_point(data = edge.in, aes(x = x, y = y))
 
-temp <- floods %>% Mean %>% as.data.frame(xy = TRUE) %>% 
-  setNames(c('x', 'y', 'value')) %>% filter(value > 0) %>% 
-  rasterFromXYZ(crs = crs(dem))
-# ggplot() + 
-#   geom_raster(data = dem %>% as.data.frame(xy = TRUE), aes(x = x, y = y)) + 
-#   geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70', fill = NA) + 
-#   geom_sf(data = russian %>% st_crop(st_union(sonoma)) %>% st_transform(crs(dem))) + 
-#   geom_raster(data = temp %>% as.data.frame(xy = TRUE), aes(x = x, y = y, fill = value))
-mapview::mapview(hydropoly_rr %>% st_transform(crs(dem))) + mapview::mapview(temp)
-
-id <- read.table('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-01-06 baseflow/parfiles/lisflood_log.txt', 
-           header = TRUE)
-
-floods %>% stackApply(indices = c(rep(1,4), rep(2,4)), mean)  #effect of SGCn
-floods %>% stackApply(indices = c(1,1,2,2,1,1,2,2), mean)  #effect of baseflow
-floods %>% stackApply(indices = c(1,2,1,2,1,2,1,2), mean)  #effect of fixed/free
-
-## std dev: bigger numbers mean this factor has less effect
-floods %>% stackApply(indices = c(rep(1,4), rep(2,4)), sd)  #effect of SGCn
-floods %>% stackApply(indices = c(1,1,2,2,1,1,2,2), sd)  #effect of baseflow
-floods %>% stackApply(indices = c(1,2,1,2,1,2,1,2), sd)  #effect of fixed/free
-
-bankfull %>% stackApply(indices = rep(1,8), sd)
-
-
-## subtract off river channel file, to see how much standing water is present
-channel <- raster::stack()
-bankfull <- raster::stack()
-for (i in 1:8) {
-  channel <- raster(paste0('C:/Users/cbowers/Desktop/LISFLOOD/', 
-                             'sonoma_sherlock/21-01-06 baseflow/results/baseflow', 
-                           i, '_SGC_bedZ.asc')) %>% 
-    stack(channel, .)
-  bankfull <- raster(paste0('C:/Users/cbowers/Desktop/LISFLOOD/', 
-                             'sonoma_sherlock/21-01-06 baseflow/results/baseflow', 
-                            i, '_SGC_bfdepth.asc')) %>% 
-    stack(bankfull, .)
-}
-
-flood.mean <- floods %>% Mean %>% as.data.frame(xy = TRUE) %>% 
-  # setNames(c('x', 'y', 'value')) %>% filter(value > 0) %>% 
-  rasterFromXYZ(crs = crs(dem))
-channel.mean <- channel %>% Mean %>% as.data.frame(xy = TRUE) %>% 
-  setNames(c('x', 'y', 'value')) %>% filter(value > 0) %>% 
-  rasterFromXYZ(crs = crs(dem))
-bankfull.mean <- bankfull %>% Mean %>% as.data.frame(xy = TRUE) %>% 
-  # setNames(c('x', 'y', 'value')) %>% filter(value > 0) %>% 
-  rasterFromXYZ(crs = crs(dem))
-
-mapview::mapview(hydropoly_rr %>% st_transform(crs(dem))) + mapview::mapview(flood.mean - bankfull.mean)
 
 ```
 
-```{r}
-## write out mean startfile
-writeRaster(flood.mean, format = 'ascii', overwrite = TRUE,
-            filename = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/startfile.asc')
 
-```
 
+
+
+
+I think a lot of the stuff below this is duplicated in hydrographs.Rmd 
 
 ```{r}
 ## hand-pick good candidate events for calculating m & tp
 pb <- txtProgressBar(min = 1987, max = 2020, style = 3)
 flow <- readNWISdata(sites = 11464000, parameterCd = param,
-                     startDate = '2019-10-01', endDate = '2020-04-01',
+                     startDate = '2005-10-01', endDate = '2006-04-01',
                      service = 'iv', tz = 'America/Los_Angeles') %>% 
   renameNWISColumns %>% 
   mutate(Flow = Flow_Inst, Date = dateTime)
 
 g.flow <- ggplot(flow) + geom_line(aes(x = Date, y = Flow)) 
 ggplotly(g.flow)
+
+
+as.numeric(ymd_hm('2005-12-31 23:30') - ymd_hm('2005-12-30 08:30')) * 24
 
 ```
 
@@ -372,6 +390,7 @@ for (i in 1:nrow(hydrographs)) {
 ```{r}
 ## plot all hydrographs together
 hydrographs <- hydrographs %>% mutate(keep = ifelse(m < 20 & quality > 0.75, TRUE, FALSE))
+sum(hydrographs$keep)
 fig <- plot_ly()
 for (i in 1:nrow(hydrographs)) {
   if (hydrographs$keep[i]) {
@@ -464,22 +483,22 @@ ggplot(data = data.frame(tp)) + geom_histogram(aes(x = tp/3600), color = 'black'
 ## alternatively: try to fit a gamma distribution to all data
 hydrographs <- hydrographs %>% mutate(alpha = NA, beta = NA)
 means <- c()
-# for (i in 1:nrow(hydrographs)) {
-#   df <- flow[[i]] %>% filter(t_adj <= 5 & !is.na(q)) %>% 
-#     mutate(q_adj = (q-min(q))/(1-min(q))) %>% 
-#     mutate(t_pos = (t-min(t))/3600) %>% 
-#     filter(t_pos <= 1.7*t_pos[which.max(q)])
-#   fit <- nls(q ~ t_pos^a * exp(-b*t_pos) * b^(a+1) / gamma(a), data = df, 
-#              start = list(a = df$t_pos[which.max(df$q)], b = 1), control = nls.control(maxiter = 1000))
-#   hydrographs$alpha[i] <- coef(fit)[1]
-#   hydrographs$beta[i] <- coef(fit)[2]
-#   means <- c(means, mean(df$t_pos))
-#   # g <- ggplot(df) +
-#   #   geom_line(aes(x = t_pos, y = q_adj)) +
-#   #   geom_line(aes(x = t_pos, y = predict(fit)), color = 'red') +
-#   #   ggtitle(paste0('ID = ', i))
-#   # print(g)
-# }
+for (i in 1:nrow(hydrographs)) {
+  df <- flow[[i]] %>% filter(t_adj <= 5 & !is.na(q)) %>%
+    mutate(q_adj = (q-min(q))/(1-min(q))) %>%
+    mutate(t_pos = (t-min(t))/3600) %>%
+    filter(t_pos <= 1.7*t_pos[which.max(q)])
+  fit <- nls(q ~ t_pos^a * exp(-b*t_pos) * b^(a+1) / gamma(a), data = df,
+             start = list(a = df$t_pos[which.max(df$q)], b = 1), control = nls.control(maxiter = 1000))
+  hydrographs$alpha[i] <- coef(fit)[1]
+  hydrographs$beta[i] <- coef(fit)[2]
+  means <- c(means, mean(df$t_pos))
+  # g <- ggplot(df) +
+  #   geom_line(aes(x = t_pos, y = q_adj)) +
+  #   geom_line(aes(x = t_pos, y = predict(fit)), color = 'red') +
+  #   ggtitle(paste0('ID = ', i))
+  # print(g)
+}
 
 good.tp <- c(2:4, 7, 12, 17, 18, 21, 24, 30:32, 40:42, 46, 50, 
              54, 56, 57, 60, 62, 65, 72, 73, 75, 79, 85, 86, 90:94, 96:99,
@@ -543,6 +562,109 @@ load('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/fitobjects.Rdata')
 load('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/edges.Rdata')
 
 ```
+
+```{r}
+## come back to examine hydrograph further
+
+## 1. can I calculate tp in a different way?
+hydrographs$tp_new <- flow %>% lapply(function(x) x$t_diff[1]/3600) %>% unlist
+
+lm(tp_new ~ tp+0, data = hydrographs) %>% summary
+ggplot(hydrographs) + 
+  geom_point(aes(x = tp, y = tp_new)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + 
+  coord_fixed()
+
+ggplot(hydrographs %>% filter(!is.na(tp)) %>% arrange(tp) %>% mutate(p = (1:nrow(.))/(1+nrow(.)))) + 
+  geom_point(aes(x = plnorm(tp, meanlog = tp.fit$estimate['meanlog'], sdlog = tp.fit$estimate['sdlog']),
+                 y = p)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + 
+  coord_fixed()
+
+ggplot(hydrographs %>% arrange(tp_new) %>% mutate(p = (1:nrow(.))/(1+nrow(.)))) + 
+  geom_point(aes(x = plnorm(tp_new/0.966173, 
+                            meanlog = tp.fit$estimate['meanlog'], 
+                            sdlog = tp.fit$estimate['sdlog']), y = p)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + 
+  coord_fixed()
+
+```
+
+
+```{r}
+## need to match hydrographs to catalog
+hydrographs$Qp <- lapply(flow, function(x) max(x$flow)) %>% unlist
+hydrograph.dates <- 
+  map2(.x = mdy(hydrographs$start_date),
+       .y = mdy(hydrographs$end_date),
+       .f = ~ seq(.x, .y, 'days'))
+
+load('C:/Users/cbowers/Desktop/catalog.Rdata')
+combined <- 
+  foreach (ar = 1:nrow(catalog), .combine = 'rbind') %do% {
+    setTxtProgressBar(pb, ar)
+    index <- 
+      hydrograph.dates %>% 
+      lapply(function(x) any(x %in% seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days'))) %>% 
+      unlist %>% which
+    if (length(index) >= 1) {
+      data.frame(AR = ar, hydrograph = index)
+    } else {
+      data.frame(AR = NA, hydrograph = NA)[-1,]
+    }
+  }
+
+combined <- combined %>% 
+  left_join(catalog %>% select(AR, runoff, duration), by = 'AR') %>% 
+  left_join(hydrographs %>% mutate(hydrograph = 1:nrow(.)) %>% select(hydrograph, Qp, tp = tp_new, m), 
+            by = 'hydrograph')
+ggplot(combined) + 
+  geom_point(aes(x = runoff, y =tp)) + 
+  scale_x_origin() + scale_y_origin() 
+
+ggplot(combined) + 
+  geom_point(aes(x = runoff, y = Qp, color = tp)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'batlow')
+
+ggplot(combined) + 
+  geom_point(aes(x = runoff*inlet$DRNAREA^2/duration, y = Qp, color = tp)) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_scico(palette = 'batlow')
+ggplot(combined) + 
+  geom_point(aes(x = (runoff/25.4/12) * (inlet$DRNAREA*5280^2) / (duration*3600), 
+                 y = Qp, color = duration)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed() + 
+  scale_color_scico(palette = 'batlow')
+## why are these not the same? I think I calculated them the same way 
+
+ggplot(combined) + 
+  geom_point(aes(x = tp, y = duration)) + 
+  scale_x_origin() + scale_y_origin()
+
+temp <- readNWISdata(sites = 11464000, parameterCd = param,
+                       startDate = mdy(hydrographs$start_date[i]), 
+                       endDate = mdy(hydrographs$end_date[i]) + days(1),
+                       service = 'iv', tz = 'America/Los_Angeles')
+
+attributes(temp)
+
+## 2. is m a function of seasonality/soil moisture?
+## actually, don't go down this rabbit hole
+
+inlet
+
+inlet %>% st_transform(albers) %>% st_area
+
+(1730205265 - 1729631396)/1729631396
+
+
+
+```
+
+
+
+
 
 
 ```{r}
@@ -616,28 +738,98 @@ grid.arrange(g1, g2, g3, g4)
 ```
 
 ```{r}
-## gridded simulation: 
-## tp & SGCn: use same distributions
+## generate values for gridded simulation
 
-runoff.levels <- c(1:99, seq(100, 199, 2), seq(200, 499, 5), seq(500, 1000, 10))  #n=260
-
-
-?optimumLHS
-
-
-samples <- optimumLHS(n = 1000, k = 3, maxSweeps = 5, eps = 0.05) 
-samples <- samples %>% 
-  as.data.frame %>%
-  setNames(paste0('x', 1:4)) %>%
-  mutate(SGCn = qunif(x1, min = 0.035, max = 0.075),
-         tp = qlnorm(x2, meanlog = tp.fit$estimate[1], sdlog = tp.fit$estimate[2]),
-         runoff = runoff.levels[ceiling(x3*260)])
-
-write.table(samples, file = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/samples_grid.txt', 
-            col.names = TRUE, row.names = FALSE)
+require(lhs)
+samples <- improvedLHS(n = 5000, k = 3)
+samples <- samples %>%
+ as.data.frame %>%
+ setNames(paste0('x', 1:3)) %>%
+ mutate(SGCn = qunif(x1, min = 0.035, max = 0.075),
+        tp = (x2*2) %>% exp %>% punif(min = 1, max = exp(2)) %>% qunif(min = 0, max = 200),
+        Qp = (x3*2) %>% exp %>% punif(min = 1, max = exp(2)) %>% qunif(min = 0, max = 4000)) %>%
+ select(SGCn, tp, r)
 
 
-(ceiling(runif(1e5)*78) %>% factor %>% summary)/(1e5/78)
+
+ggplot(catalog) + 
+  geom_histogram(aes(x = Qp/mft^3))
+
+
+
+#write.table(samples, file = 'samples_grid.txt',
+#            row.names = FALSE, quote = FALSE, sep = '\t')
+
+samples <- read.table('samples_grid.txt', header = TRUE, sep = '\t')
+```
+
+```{r}
+## add gaugefiles
+
+temp <- whatNWISsites(stateCd = 'CA', countyCd = 'Sonoma') %>% 
+  filter(grepl('RUSSIAN', station_nm))
+temp <- temp %>% st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma))
+
+temp2 <- readNWISdv(siteNumbers = temp$site_no, parameterCd = param, statCd = statcode,
+           startDate = '2005-12-01', endDate = '2006-01-15') %>% 
+  renameNWISColumns()
+
+temp3 <- readNWISdata(sites = temp$site_no, parameterCd = param, 
+                      startDate = '2005-12-01', endDate = '2006-01-15',
+                      service = 'iv', tz = 'America/Los_Angeles') %>% 
+  renameNWISColumns()
+
+temp2 %>% filter(site_no %in% c(11463980, 11467002))
+
+unique(temp2$site_no)
+unique(temp3$site_no)
+
+
+gauges <- c(11464000, 11467000)
+stages <- 11467002
+
+temp %>% filter(site_no %in% gauges) %>% st_coordinates()
+        
+
+```
+
+```{r}
+ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70', fill = 'grey90') + 
+  geom_sf(data = russian %>% st_crop(sonoma) %>% st_transform(crs(dem))) + 
+  geom_raster(data = raster.df(dem), aes(x = x, y = y), fill = 'red', alpha = 0.15) + 
+  geom_sf(data = temp) + 
+  geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), color = 'red')
+
+rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) 
+creeks <- st_read('./_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) 
+russian <- rivers %>% 
+  subset(grepl('Russian', GNIS_Name))
+
+rivers <- rivers %>% st_transform(st_crs(sonoma)) %>% st_crop(sonoma)
+creeks <- creeks %>% st_transform(st_crs(sonoma)) %>% st_crop(sonoma)
+
+ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70', fill = 'grey90') + 
+  geom_sf(data = russian %>% st_crop(sonoma), color = ggcolor(4)[4]) + 
+  geom_sf(data = rivers %>% 
+            filter(grepl('Russian', GNIS_Name)) %>% 
+            st_transform(crs(dem)) %>% st_crop(dem), 
+          aes(color = GNIS_Name), size = 1) + 
+  geom_sf(data = creeks %>% 
+            filter(grepl('Dry', GNIS_Name) | grepl('Mill', GNIS_Name) | grepl('Mark', GNIS_Name)) %>% 
+            st_transform(crs(dem)) %>% st_crop(dem),
+          aes(color = GNIS_Name), size = 1) + 
+  geom_raster(data = raster.df(dem), aes(x = x, y = y), fill = 'grey50', alpha = 0.15) + 
+  geom_sf(data = temp, size = 1.5, color = 'black') + 
+  geom_sf(data = temp, size = 1, color = 'grey80') + 
+  geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), size = 1.5, color = 'red') + 
+  geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), size = 1, color = 'black') + 
+  theme_void()
+ggsave('C:/Users/cbowers/Desktop/test.jpg', height = 6)
+  
 
 ```
 

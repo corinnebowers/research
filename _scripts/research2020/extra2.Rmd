@@ -1,0 +1,121 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+load('C:/Users/cbowers/Desktop/catalog.Rdata')
+AR <- catalog[220,] %>% transmute(n.AR = 1, IVT_max, duration)
+precip <- 
+  generate_precip(
+    AR = AR, 
+    catalog = catalog,
+    probabilistic = TRUE,
+    n.precip = 100)
+
+ggplot(precip) + 
+  geom_histogram(aes(x = precip_mm/25.4, y = ..count../nrow(precip)), 
+                 color = 'black', fill = 'grey90', boundary = 0) + 
+  geom_vline(xintercept = catalog[411, 'precip']/25.4, size = 1, linetype = 'dashed') + 
+  scale_x_origin('Precipitation (in)', labels = comma) + 
+  scale_y_origin(label = percent_format(accuracy = 1))
+
+```
+
+```{r}
+mft <- 3.28084
+runoff <- 
+  generate_runoff(
+    precip = precip, 
+    catalog = catalog, 
+    probabilistic = TRUE,
+    n.runoff = 1000)
+hydrograph <- 
+  generate_hydrograph(
+    precip = precip,
+    runoff = runoff, 
+    catalog = catalog, 
+    probabilistic = TRUE,
+    n.hydro = 1)
+
+ggplot(hydrograph) + 
+  geom_histogram(aes(x = Qp_m3s*mft^3, y = ..count../nrow(hydrograph)), 
+                 color = 'black', fill = 'grey90', boundary = 0) + 
+  geom_vline(xintercept = catalog[411, 'Qp'], size = 1, linetype = 'dashed') + 
+  scale_x_origin('Streamflow (cfs)', labels = comma) + 
+  scale_y_origin(label = percent_format(accuracy = 1))
+
+```
+
+```{r}
+load('C:/Users/cbowers/Desktop/dem.Rdata')
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+res.buildings <- res.buildings[-11654,] 
+NAD <- 4269
+buildings.coord <- res.buildings %>% st_set_crs(NAD) %>% 
+  st_transform(crs(dem)) %>% st_coordinates
+
+## get "true" inundation at each building
+## 2006: flood crest = 41.8 feet (https://www.cnrfc.noaa.gov/storm_summaries/dec2005storms.php)
+load('C:/Users/cbowers/Desktop/flood_sonoma.Rdata')
+# flood.sonoma <- flood41*0.2 + flood42*0.8
+flood.sonoma <- flood45*0.64 + flood46*0.36
+res.buildings$inundation <- 
+  flood.sonoma %>% projectRaster(dem) %>% rast %>% 
+  terra::extract(buildings.coord) %>% unlist
+res.buildings <- res.buildings %>% 
+  mutate(inundation = ifelse(is.na(inundation), 0, inundation))
+
+
+## get simulated inundation
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', 2019, '/n25/INUN.Rdata'))
+
+res.buildings <- res.buildings %>% 
+  # mutate(ecdf = NA) %>% 
+  mutate(parra.05 = 0, parra.med = 0, parra.95 = 0)
+pb <- txtProgressBar(min = 0, max = nrow(attributes(inundation)$buildings), style = 3)
+for (i in 1:nrow(attributes(inundation)$buildings)) {
+  bldg.id <- attributes(inundation)$buildings[,'id'][i]
+  bldg.inun <- res.buildings[bldg.id, 'inundation'] %>% st_drop_geometry %>% unlist
+  
+  temp <- inundation %>% 
+    lapply(function(inun) inun[i,]) %>% do.call(rbind, .) %>% c
+  # res.buildings$ecdf[bldg.id] <- ecdf(temp)(bldg.inun)
+  res.buildings$parra.med[bldg.id] <- median(temp)
+  res.buildings$parra.05[bldg.id] <- quantile(temp, 0.05)
+  res.buildings$parra.95[bldg.id] <- quantile(temp, 0.95)
+  
+  setTxtProgressBar(pb, i)
+}
+
+ggplot(res.buildings) + 
+  geom_segment(aes(x = inundation, xend = inundation, 
+                   y = parra.05, yend = parra.95), color = 'grey70') + 
+  geom_point(aes(x = inundation, y = parra.med)) + 
+  scale_x_origin('Sonoma County HEC-RAS Map, 41.8 ft @ 11467002') + 
+  scale_y_origin('PARRA Simulations') + geom_parity() + coord_fixed()
+
+res.buildings %>% 
+  st_drop_geometry %>% 
+  filter(parra.med > 0 | inundation > 0) %>% 
+  ggplot(aes(y = (1:nrow(.))/(nrow(.)+1))) + 
+  geom_step(aes(x = sort(inundation), color = 'Sonoma'), size = 1) +
+  geom_step(aes(x = sort(parra.med), color = 'PARRA'), size = 1) + 
+  scale_x_origin() + scale_y_continuous(expand = c(0,0)) + 
+  coord_cartesian(ylim = c(0,1), clip = 'off')
+
+```
+
+```{r}
+## get simulated inundation
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', 2019, '/n25/DV.Rdata'))
+
+ggplot(loss.sim) + 
+  geom_histogram(aes(x = loss, y = ..count../nrow(loss.sim)), 
+                 color = 'black', fill = 'grey90') + 
+  geom_vline(xintercept = 91.6e6, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin(labels = percent_format(accuracy = 1))
+
+```
+

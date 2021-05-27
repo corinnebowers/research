@@ -1,0 +1,560 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "3/22/2021"
+output: html_document
+---
+
+```{r packages, include = FALSE}
+require(lubridate)
+require(raster)
+require(sf)
+require(scales)
+require(tigris); options(tigris_use_cache = TRUE)
+require(tidyverse); theme_set(theme_bw())
+
+```
+
+```{r functions, include = FALSE}
+toNumber <- function(x) as.numeric(paste(x))
+sum.na <- function(x) sum(is.na(x))
+ggcolor <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+log_breaks <- function(min, max) rep(1:9, (max-min+1))*(10^rep(min:max, each = 9))
+scale_x_origin <- function(...) {
+  scale_x_continuous(expand = expansion(mult = c(0, 0.01)), limits = c(0,NA), ...) }
+scale_y_origin <- function(...) {
+  scale_y_continuous(expand = expansion(mult = c(0, 0.01)), limits = c(0,NA), ...) }
+geom_parity <- function() geom_abline(slope = 1, intercept = 0, linetype = 'dashed')
+
+Mean <- function(x) mean(x, na.rm = TRUE)
+Sum <- function(x) sum(x, na.rm = TRUE)
+Max <- function(x) max(x, na.rm = TRUE)
+Min <- function(x) min(x, na.rm = TRUE)
+
+## meters to feet conversion factor
+mft <- 3.28084
+
+raster.df <- function(x) x %>% as.data.frame(xy = TRUE) %>% setNames(c('x', 'y', 'value'))
+
+# ## R built-in colors
+# df <- expand.grid(i = 1:73, j = 1:9)
+# df$colors <- grDevices::colors()
+# df$colors <- factor(df$colors, levels = df$colors)
+# df$value <- DescTools::ColToHsv(df$colors)['v',]
+# ggplot(df) +
+#   geom_tile(aes(x = j, y = i, fill = colors), show.legend = FALSE) +
+#   scale_fill_manual(values = paste(df$colors)) +
+#   geom_text(aes(x = j, y = i, label = colors, color = value>0.5), size = 3, show.legend = FALSE) +
+#   scale_color_manual(values = c('white', 'black')) +
+#   theme_void()
+
+```
+
+```{r geometries}
+CONUS <- states() %>% filter(STATEFP < 60) %>% filter(!(STUSPS %in% c('AK', 'HI')))
+california <- counties(state = 'CA')
+sonoma <- tracts(state = 'CA', county = 'Sonoma') %>% filter(TRACTCE != '990100')
+sonoma_cbgs <- block_groups(state = 'CA', county = 'Sonoma') %>% filter(TRACTCE != '990100')
+
+```
+
+
+goal: to find out which combination of building information is the most accurate
+
+we're going to compare against NSI 2.0 --> load that first
+```{r}
+nsi2 <- read.csv('C:/Users/cbowers/Downloads/NSI_Sonoma.csv/NSI_sonoma.csv') %>%
+  st_as_sf(coords = c('X', 'Y'), crs = st_crs(CONUS))
+
+```
+
+1. Microsoft building footprints
+https://drive.google.com/drive/folders/1-XGvS25tQKKQ3HTqWjAfLJ4PaeXJ9yyY
+```{r}
+microsoft_sonoma <- st_read('D:/Research/_data/buildings/ca_06097_footprints.csv', 
+                          crs = st_crs(sonoma), quiet = TRUE)
+
+```
+
+2. OpenStreetMap
+http://download.geofabrik.de/north-america/us/california/norcal.html
+```{r}
+osm_bldg <- st_read('D:/Research/_data/buildings/OSM_norcal/gis_osm_buildings_a_free_1.shp', quiet = TRUE)
+osm_sonoma <- osm_bldg %>% st_transform(st_crs(sonoma)) %>% .[sonoma,]
+
+```
+
+3. SonomaVegMap LIDAR data
+http://sonomavegmap.org/data-downloads/
+```{r}
+vegmap_sonoma <- 
+  st_read('D:/Research/_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
+          layer = 'CartographicBuildingFootprints', quiet = TRUE) %>% 
+  st_transform(st_crs(sonoma)) %>% st_centroid
+
+```
+
+4. Sonoma County GIS building outlines
+https://gis-sonomacounty.hub.arcgis.com/datasets/0f5982c3582d4de0b811e68d7f0bff8f
+```{r}
+bldg_sonoma <- st_read('https://socogis.sonomacounty.ca.gov/map/rest/services/BASEPublic/Buildings/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson', quiet = TRUE) %>% 
+  st_transform(st_crs(sonoma))
+
+```
+
+5. Sonoma county parcels
+https://hub.arcgis.com/datasets/355b1002325d47e580d57c478778c97f_0
+https://gis-sonomacounty.hub.arcgis.com/datasets/parcels-public-shapefile (newer)
+```{r}
+## older version
+# parcels_old <-
+#   st_read('https://opendata.arcgis.com/datasets/355b1002325d47e580d57c478778c97f_0.geojson', quiet = TRUE) %>%
+#   st_transform(st_crs(sonoma))
+
+## newer version
+parcels_new <- 
+  st_read('https://opendata.arcgis.com/datasets/2202c1cd6708441f987ca5552f2d9659_0.geojson', quiet = TRUE) %>% 
+  st_transform(st_crs(sonoma))
+
+```
+
+6. NSI 1.0
+```{r}
+nsi1 <- read.csv('C:/Users/cbowers/Downloads/NSI1_Sonoma.csv/NSI1_sonoma.csv') %>%
+  st_as_sf(coords = c('X', 'Y'), crs = st_crs(sonoma))
+
+```
+
+
+
+compare all the datasets
+```{r}
+#### how many buildings does each of these count in Sonoma?
+data.frame(
+  nsi2 = nrow(nsi2),
+  microsoft = nrow(microsoft_sonoma),
+  openstreetmap = nrow(osm_sonoma),
+  sonomavegmap = nrow(vegmap_sonoma),
+  parcels = nrow(parcels_sonoma),
+  nsi1 = nrow(nsi1)
+) %>% 
+  pivot_longer(cols = everything(), names_to = 'source', values_to = 'buildings') %>% 
+  mutate(source = factor(source, levels = c('nsi2', 'microsoft', 'nsi1', 'openstreetmap', 
+                                            'parcels', 'sonomavegmap'))) %>% 
+  ggplot() + 
+  geom_col(aes(x = source, y = buildings, fill = source=='nsi2'), show.legend = FALSE) + 
+  scale_y_origin('Number of Buildings Recorded', labels = comma) + 
+  scale_fill_manual(values = c('grey70', rep('grey30', 5))) + 
+  theme_classic() + theme(axis.title.x = element_blank())
+
+## okay, neglect openstreetmap from now on
+```
+
+```{r}
+#### repeat the above, comparing Sonoma GIS vs. other buildings & parcels
+data.frame(
+  bldg_vegmap = nrow(vegmap_sonoma),
+  bldg_gis = nrow(bldg_sonoma),
+  parcel_old = nrow(parcels_old),
+  parcel_gis = nrow(parcels_new)
+) %>% 
+  pivot_longer(cols = everything(), names_to = 'source', values_to = 'buildings') %>% 
+  mutate(source = factor(
+    source, levels = c('bldg_vegmap', 'bldg_gis', 'parcel_old', 'parcel_gis'))) %>% 
+  ggplot() + 
+  geom_col(aes(x = source, y = buildings), fill = 'grey70', show.legend = FALSE) + 
+  scale_y_origin('Number of Buildings Recorded', labels = comma) + 
+  # scale_fill_manual(values = c('grey70', rep('grey30', 5))) + 
+  theme_classic() + theme(axis.title.x = element_blank())
+
+```
+
+
+```{r}
+#### what fields do they have?
+
+## nsi1, nsi2, parcels have information on building type (e.g. residential)
+## microsoft, sonomavegmap do not
+
+## nsi1, nsi2, parcels have valuation information
+
+## nsi1, nsi2 have stories, basement, building material, foundation height
+
+```
+
+```{r}
+# guerneville <- data.frame(lat = 38.507930, long = -122.985860, city = 'Guerneville') %>% 
+#   st_as_sf(coords = c('long', 'lat'), crs = NAD) %>% 
+#   st_transform(albers) %>% 
+#   st_buffer(1000) %>% 
+#   st_transform(st_crs(sonoma))
+# 
+# vegmap_toy <- vegmap_sonoma[guerneville,]
+# parcels_toy <- parcels_sonoma[guerneville,]
+# 
+# mapview(parcels_toy) + mapview(vegmap_toy)
+  
+```
+
+```{r}
+#### decision: merge sonomavegmap with sonoma parcels, 
+#      then randomly assign structural information based on NSI1 ratios
+
+# ## crop both shapefiles to nonzero.buffer
+# load('C:/Users/cbowers/OneDrive/classes/old/GEOLSCI240 data science for geoscience/geolsci240/hw5_checkpoint.Rdata')
+# nonzero.buffer <- nonzero.buffer %>% 
+#   rasterToPolygons %>% 
+#   st_as_sf %>%
+#   st_union %>% 
+#   st_transform(st_crs(sonoma))
+# vegmap_buffer <- vegmap_sonoma[nonzero.buffer,]
+# parcels_buffer <- parcels_sonoma[nonzero.buffer,] %>% st_buffer(0)
+# 
+# ## intersect
+# buildings <- st_intersection(vegmap_buffer, parcels_buffer)
+# 
+# ## what's going on with the weird points?
+# buildings <- buildings %>% filter(st_coordinates(.)[,1] != 0 & st_coordinates(.)[,2] != 0)
+
+```
+
+```{r}
+## update with Sonoma County GIS building + parcel information
+load('C:/Users/cbowers/OneDrive/classes/old/GEOLSCI240 data science for geoscience/geolsci240/hw5_checkpoint.Rdata')
+nonzero.buffer <- nonzero.buffer %>% 
+  rasterToPolygons %>% 
+  st_as_sf %>%
+  st_union %>% 
+  st_transform(st_crs(sonoma))
+crs_ca2 <- '+proj=lcc +lat_1=38.33333333333334 +lat_2=39.83333333333334 +lat_0=37.66666666666666 +lon_0=-122 +x_0=2000000 +y_0=500000.0000000002 +datum=NAD83 +units=us-ft +no_defs' 
+bldg_buffer <- bldg_sonoma[nonzero.buffer,] %>% 
+  st_transform(crs_ca2) %>% mutate(bldg_sqft = st_area(.)) %>% 
+  st_transform(st_crs(sonoma)) %>% st_centroid
+# parcels_buffer <- parcels_new[nonzero.buffer,] %>% st_buffer(0)
+
+## intersect
+buildings <- st_intersection(bldg_buffer, parcels_buffer)
+
+## what's going on with the weird points?
+buildings <- buildings %>% filter(st_coordinates(.)[,1] != 0 & st_coordinates(.)[,2] != 0)
+
+```
+
+```{r}
+## identify residential buildings
+residential <- c(
+  "ATTACHED UNIT",
+  "CONDOMINIUM UNIT",
+  "DETACHED UNIT IN A PUD",
+  "DUET",
+  "ENFORCEABLY RESTRICTED DWELLING",
+  "MANUFACTURED HOME CONDOMINIUM LOT",
+  "MANUFACTURED HOME ON URBAN LOT",
+  "ONE DUPLEX (ONE STRUCTURE)",
+  "RURAL RES SFD W/GRANNY UNIT",
+  "RURAL RES W/MISC RES IMP",
+  "RURAL RES/2 OR MORE RES",
+  "RURAL RES/MANUFACTURED HOME",
+  "RURAL RES/SECONDARY USE",
+  "RURAL RES/SINGLE RES",
+  "SFD SECONDARY USE",
+  "SFD W/GRANNY UNIT",
+  "SINGLE FAMILY DWELLING",
+  "SINGLE LIVE/WORK UNIT",
+  "TAXABLE MANUFACTURED HOME/CONDO LOT",
+  "TAXABLE MANUFACTURED HOME/RENTED SITE",
+  "TWO SFD ON SINGLE PARCEL",
+  "WILDCAT SUBDIVISION LOT"
+  )
+
+## keep relevant columns & valuation codes
+res.buildings <- buildings %>%
+  filter(UseCType == 'Residential') %>%
+  filter(UseCDesc %in% residential) %>% 
+  select("APN", "TxbltyDesc", "UseCDesc", "UseCType", "LndSzSF", "V601RollYr",
+         "V601Land", "V601Stru", "V601Fix", "V601FixRP", "V601Grow", "V601TotalL",
+         "bldg_sqft") %>% 
+  mutate(bldg_sqft = as.numeric(bldg_sqft))
+
+```
+
+```{r}
+## filter out cases when a parcel has multiple structures
+res.buildings <- res.buildings %>% 
+  cbind(st_coordinates(.)) %>% 
+  st_drop_geometry %>% 
+  group_by(APN) %>% 
+  summarize(across(everything(), ~.x[which.max(bldg_sqft)])) %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = NAD)
+
+```
+
+```{r}
+#### match to NSI information 
+
+## summarize NSI foundation info by CBG
+nsi1.found <- nsi1 %>% 
+  st_intersection(sonoma) %>% 
+  st_drop_geometry #%>% 
+  
+nsi1.found <- nsi1.found %>% 
+  mutate(GEOID = toNumber(GEOID)) %>% 
+  mutate(counter = 1) %>% 
+  group_by(GEOID, Found_Ht, Found_Type) %>% 
+  summarize(n = sum(counter), .groups = 'drop') %>% 
+  mutate(foundation = paste(Found_Type, Found_Ht, sep = '_')) %>% 
+  pivot_wider(id_cols = 'GEOID', names_from = 'foundation', values_from = 'n') %>% 
+  dplyr::select(-`SolidWall_7`)
+nsi1.found[is.na(nsi1.found)] <- 0
+nsi1.found[,-1] <- nsi1.found[,-1] / apply(nsi1.found[,-1], 1, sum)
+
+save(nsi1.found, file = 'C:/Users/cbowers/Desktop/foundations.Rdata')
+
+## randomly assign foundation info to buildings
+res.buildings <- res.buildings %>% 
+  st_intersection(sonoma_cbgs %>% select(GEOID))
+found <- names(nsi1.found)[-1]
+for (geoid in unique(res.buildings$GEOID)) {
+  n <- res.buildings %>% st_drop_geometry %>% filter(GEOID == geoid) %>% nrow
+  res.buildings[res.buildings$GEOID == geoid, c('found_type', 'found_ht')] <- 
+    nsi1.found %>% 
+    filter(GEOID == geoid) %>% 
+    .[,-1] %>% 
+    sample(x = found, size = n, prob = ., replace = TRUE) %>% 
+    str_split(pattern = '_') %>% 
+    do.call(rbind, .) %>% 
+    as.data.frame %>% 
+    set_names(c('found_type', 'found_ht')) %>% 
+    mutate(found_type = paste(found_type), 
+           found_ht = toNumber(found_ht))
+}
+
+```
+
+```{r}
+## find ACS median value of owner-occupied units by census tract
+require(censusapi)
+Sys.setenv(CENSUS_KEY = 'f2e090156b02ced027d4ed756f82c9a3a1aa38c9')
+acs <- 
+  getCensus(name = "acs/acs5", vintage = 2018, region = "tract:*", 
+            regionin = "state:06+county:097", vars = "group(B25077)") %>%
+  mutate(GEOID = paste0(state, county, tract) %>% toNumber) %>% 
+  select(-c(GEO_ID, state, county, tract, NAME)) %>% 
+  transmute(GEOID, value = B25077_001E, MOE = B25077_001M) %>% 
+  mutate(sd = MOE/qnorm(0.95)) %>% 
+  filter(value > 0)
+
+## merge with building data
+res.buildings %>% 
+  st_intersection(sonoma %>% select(GEOID)) %>% 
+  mutate(GEOID = toNumber(GEOID)) %>% 
+  left_join(acs %>% transmute(CT_median = value, CT_sd = sd, GEOID), by = 'GEOID')
+
+## save out
+save(res.buildings, file = 'C:/Users/cbowers/Desktop/buildings.Rdata')
+
+```
+
+```{r}
+## compare to building data
+res.buildings %>%
+  st_drop_geometry %>%
+  group_by(GEOID) %>%
+  summarize(median_value = median(V601Stru, na.rm = TRUE), .groups = 'drop') %>%
+  select(GEOID, median_value) %>%
+  mutate(GEOID = toNumber(GEOID)) %>%
+  filter(median_value < 1e6) %>%
+  left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID') %>%
+  ggplot() +
+  geom_point(aes(x = median_acs, y = median_value)) +
+  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  # scale_x_log10() + scale_y_log10() +
+  geom_parity()
+  
+parcels_new <- parcels_new %>% st_centroid %>% st_intersection(sonoma %>% select(GEOID))
+parcels_new %>%
+  st_drop_geometry %>%
+  group_by(GEOID) %>%
+  summarize(median_value = median(V601Stru+V601Fix, na.rm = TRUE), .groups = 'drop') %>%
+  select(GEOID, median_value) %>%
+  mutate(GEOID = toNumber(GEOID)) %>%
+  filter(median_value < 1e6) %>%
+  left_join(acs %>% rename(median_acs = value, sd_acs = sd), by = 'GEOID') %>%
+  ggplot() +
+  geom_point(aes(x = median_acs, y = median_value)) +
+  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  # scale_x_log10() + scale_y_log10() +
+  geom_parity()
+parcels_new %>%
+  st_drop_geometry %>%
+  group_by(GEOID) %>%
+  summarize(median_value = median(V601TotalL, na.rm = TRUE), 
+            sd_value = sd(V601TotalL, na.rm = TRUE), .groups = 'drop') %>%
+  select(GEOID, median_value, sd_value) %>%
+  mutate(GEOID = toNumber(GEOID)) %>%
+  filter(median_value < 1e6) %>%
+  left_join(acs %>% rename(median_acs = value, sd_acs = sd), by = 'GEOID') %>%
+  ggplot() +
+  geom_segment(aes(x = median_acs-sd_acs, xend = median_acs+sd_acs, 
+                   y = median_value, yend = median_value), color = 'grey70') + 
+  # geom_segment(aes(x = median_acs, xend = median_acs, 
+  #                  y = median_value-sd_value, yend = median_value+sd_value), color = 'grey70') + 
+  geom_point(aes(x = median_acs, y = median_value)) +
+  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+  # scale_x_log10() + scale_y_log10() +
+  geom_parity() + theme_classic()
+
+temp <- parcels_new %>%
+  st_drop_geometry %>%
+  group_by(GEOID) %>%
+  summarize(median_value = median(V601TotalL, na.rm = TRUE), .groups = 'drop') %>%
+  select(GEOID, median_value) %>%
+  mutate(GEOID = toNumber(GEOID)) %>%
+  filter(median_value < 1e6) %>%
+  left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID')
+
+lm(median_value ~ median_acs+0, data = temp)
+
+## conclusions: the full value of the structure + land is more accurate, 
+## and it looks really good if you apply a multiplicative conversion factor
+
+```
+
+```{r}
+ggplot(buildings %>% mutate(id = 1:nrow(.))) + 
+  geom_sf(aes(color = id==11654))
+
+```
+
+```{r include = FALSE}
+ggplot(flemo) + 
+  geom_line(aes(x = ft, y = HQ_SFH/100, color = 'SFH')) + 
+  geom_line(aes(x = ft, y = PQ_SFH/100, color = 'SFH')) + 
+  geom_line(aes(x = ft, y = HQ_Detached/100, color = 'Detached')) + 
+  geom_line(aes(x = ft, y = PQ_Detached/100, color = 'Detached')) + 
+  geom_line(aes(x = ft, y = HQ_MFH/100, color = 'MFH')) + 
+  geom_line(aes(x = ft, y = PQ_MFH/100, color = 'MFH')) + 
+  geom_ribbon(aes(x = ft, ymin = HQ_SFH/100, ymax = PQ_SFH/100, fill = 'SFH'), alpha = 0.5) + 
+  geom_ribbon(aes(x = ft, ymin = HQ_Detached/100, ymax = PQ_Detached/100, fill = 'Detached'), alpha = 0.5) + 
+  geom_ribbon(aes(x = ft, ymin = HQ_MFH/100, ymax = PQ_MFH/100, fill = 'MFH'), alpha = 0.5) + 
+  ggtitle('FLEMO Curves') + 
+  labs(color = 'Type', fill = 'Type') + 
+  scale_x_origin('Feet of Inundation') + 
+  scale_y_continuous('Damage Ratio', labels = percent_format(accuracy = 1), expand = c(0,0)) + 
+  coord_cartesian(xlim = c(0, 10), ylim = c(0,1))
+
+ggplot(hazus) + 
+  geom_line(aes(x = ft, y = x1/100, color = 'One Story')) + 
+  geom_line(aes(x = ft, y = x2/100, color = 'One Story')) +
+  geom_line(aes(x = ft, y = x3/100, color = 'Split Story')) +
+  geom_line(aes(x = ft, y = x4/100, color = 'Split Story')) + 
+  geom_line(aes(x = ft, y = x5/100, color = '2+ Stories')) +
+  geom_line(aes(x = ft, y = x6/100, color = '2+ Stories')) +
+  geom_ribbon(aes(x = ft, ymin = x2/100, ymax = x1/100, fill = 'One Story'), alpha = 0.5) + 
+  geom_ribbon(aes(x = ft, ymin = x4/100, ymax = x3/100, fill = 'Split Story'), alpha = 0.5) + 
+  geom_ribbon(aes(x = ft, ymin = x6/100, ymax = x5/100, fill = '2+ Stories'), alpha = 0.5) + 
+  ggtitle('HAZUS Curves') + 
+  labs(color = 'Type', fill = 'Type') + 
+  scale_x_origin('Feet of Inundation') + 
+  scale_y_continuous('Damage Ratio', labels = percent_format(accuracy = 1), expand = c(0,0)) + 
+  coord_cartesian(xlim = c(0, 10), ylim = c(0,1))
+hazus <- hazus %>% 
+  mutate(xmin = apply(hazus %>% dplyr::select(-ft), 1, min),
+         xmax = apply(hazus %>% dplyr::select(-ft), 1, max))
+  
+ggplot(beta.dist) + 
+  geom_ribbon(aes(x = water_ft, ymin = mu-sd, ymax = mu+sd), fill = 'grey95') + 
+  geom_line(aes(x = water_ft, y = mu), size = 1) + 
+  ggtitle('Wing et al. (2020) Curves') + 
+  scale_x_origin('Feet of Inundation') + 
+  scale_y_continuous('Damage Ratio', labels = percent_format(accuracy = 1), expand = c(0,0)) + 
+  coord_cartesian(xlim = c(0, 10), ylim = c(0,1))
+
+ggplot() + 
+  geom_ribbon(data = beta.dist, alpha = 0.25,
+              aes(x = water_ft, ymin = mu-sd, ymax = mu+sd, fill = 'Wing et al.')) + 
+  geom_line(data = beta.dist, aes(x = water_ft, y = mu, color = 'Wing et al.'), size = 1) + 
+  geom_line(data = flemo, aes(x = ft, y = HQ_SFH/100, color = 'FLEMO')) + 
+  geom_line(data = flemo, aes(x = ft, y = PQ_SFH/100, color = 'FLEMO')) + 
+  geom_ribbon(data = flemo, alpha = 0.5,
+              aes(x = ft, ymin = HQ_SFH/100, ymax = PQ_SFH/100, fill = 'FLEMO')) + 
+  geom_line(data = hazus, aes(x = ft, y = xmin/100, color = 'HAZUS')) + 
+  geom_line(data = hazus, aes(x = ft, y = xmax/100, color = 'HAZUS')) + 
+  geom_ribbon(data = hazus, alpha = 0.5,
+              aes(x = ft, ymin = xmin/100, ymax = xmax/100, fill = 'HAZUS')) + 
+  labs(color = 'Type', fill = 'Type') + 
+  scale_x_origin('Feet of Inundation', breaks = 0:10) + 
+  scale_y_continuous('Damage Ratio', labels = percent_format(accuracy = 1), expand = c(0,0)) + 
+  coord_cartesian(xlim = c(0, 10), ylim = c(0,1)) + 
+  scale_fill_scico_d(palette = 'batlow') +
+  scale_color_scico_d(palette = 'batlow')
+   
+```
+
+```{r}
+ggplot(loss.sim) + 
+  geom_histogram(aes(x = loss, y = ..density..), color = 'black', fill = 'white', bins = 100) + 
+  geom_vline(xintercept = 71.6e6, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin() + theme_classic()
+ggsave('hist.jpg', width = 5, height = 4)
+
+# loss.merged <- loss.sim %>% 
+#   full_join(precip %>% select(n.precip, IVT_max, duration, precip_mm), 
+#             by = 'n.precip') %>% 
+#   full_join(hydrograph %>% select(n.precip, n.runoff, n.hydro, runoff_mm, Qp_m3s, tp_hrs), 
+#             by = c('n.precip', 'n.runoff', 'n.hydro')) %>% 
+#   mutate(loss = ifelse(is.na(loss), 0, loss))
+
+loss.merged %>% 
+  group_by(n.precip) %>% 
+  summarize(
+    precip_mm = precip_mm[1], loss.mean = mean(loss), 
+    loss.lower = quantile(loss, 0.05), loss.upper = quantile(loss, 0.95),
+    .groups = 'drop') %>% 
+  ggplot() + 
+  geom_segment(aes(x = precip_mm, xend = precip_mm, 
+                   y = loss.lower, yend = loss.upper), color = 'grey70') + 
+  geom_point(aes(x = precip_mm, y = loss.mean)) + 
+  geom_hline(yintercept = 71.6e6, size = 1, linetype = 'dashed') + 
+  geom_vline(xintercept = catalog[194, 'precip'], color = 'red') + 
+  scale_x_origin('Precipitation (in)', labels = comma_format(scale = 1/25.4, accuracy = 1), 
+                 breaks = seq(0, 10*25.4, 25.4)) + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  theme_classic()
+ggsave('precip.jpg', width = 5, height = 4)
+
+mft <- 3.28084
+loss.merged %>% 
+  group_by(n.precip, n.runoff, n.hydro) %>% 
+  summarize(
+    Qp_m3s = Qp_m3s[1], loss.mean = mean(loss), 
+    loss.lower = quantile(loss, 0.05), loss.upper = quantile(loss, 0.95),
+    .groups = 'drop') %>% 
+  ggplot() + 
+  geom_segment(aes(x = Qp_m3s, xend = Qp_m3s, 
+                   y = loss.lower, yend = loss.upper), color = 'grey70') + 
+  geom_point(aes(x = Qp_m3s, y = loss.mean)) + 
+  geom_hline(yintercept = 71.6e6, size = 1, linetype = 'dashed') + 
+  geom_vline(xintercept = catalog[194, 'Qp']/mft^3, color = 'red') + 
+  scale_x_origin('Streamflow (cfs)', labels = comma_format(scale = mft^-3, accuracy = 1),
+                 breaks = seq(0, 50*mft^3, 10*mft^3)) + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  theme_classic()
+ggsave('flow.jpg', width = 5, height = 4)
+
+```
+

@@ -1,0 +1,91 @@
+---
+title: "Untitled"
+author: "Corinne"
+date: "4/6/2021"
+output: html_document
+---
+
+goal: calculate LISFLOOD validation metrics
+```{r functions}
+raster.df <- function(x) x %>% as.data.frame(xy = TRUE) %>% setNames(c('x', 'y', 'value'))
+
+```
+
+
+```{r}
+## load dem
+load('C:/Users/cbowers/Desktop/dem.Rdata')
+
+## load russian rivr
+russian <- st_read('D:/Research/_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+  st_zm(st_transform(albers)) %>% 
+  subset(grepl('Russian', GNIS_Name))
+
+```
+
+
+```{r obs}
+#### load observed floodplain #### 
+
+## load 100-year floodplain
+NFHL <- st_read('D:/Research/_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp', quiet = TRUE) %>%
+  st_transform(albers)
+floodzone <- function(x) {
+  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO')) {
+    return('YES')
+  } else if (x %in% c('V', 'VE')) {
+    return('WAVE')
+  } else if (x %in% c('D', 'X')) {
+    return('NO')
+  } else if (x == 'OPEN WATER') {
+    return('WATER')
+  } else {
+    return(NA)
+  }
+}
+NFHL <- NFHL %>% 
+  mutate(FLOODPLAIN = factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))) %>% 
+  dplyr::select(FLOODPLAIN, geometry) %>% 
+  subset(FLOODPLAIN == 'YES') %>% 
+  mutate(NFHL = 1)
+
+## get rid of additional floodplain pixels
+remove.pixels <-
+  st_read('D:/Research/_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp',
+          quiet = TRUE) %>%
+  st_zm %>%
+  st_transform(st_crs(sonoma)) %>%
+  st_crop(sonoma) %>%
+  filter(GNIS_Name %in% c('Dry Creek', 'Mark West Creek', 'Austin Creek')) %>%
+  filter(!(OBJECTID %in% c(1294,1297,1298,42552,106984,1263,1264,106986,20379,57388,1653,1652,116351))) %>%
+  st_transform(proj4string(dem)) %>%
+  st_union %>%
+  st_buffer(dist = 250) %>%
+  st_difference(russian %>% st_transform(proj4string(dem)) %>% st_buffer(500) %>% st_union) %>%
+  as('Spatial') %>%
+  rasterize(dem)
+
+## create raster of observed values
+obs.full <- NFHL %>%
+  dplyr::select(NFHL) %>%
+  st_transform(crs(dem)) %>%
+  st_cast('POLYGON') %>%
+  st_crop(dem) %>% 
+  as('Spatial') %>% 
+  rasterize(dem, getCover = TRUE)
+obs.full <- obs.full > 0.5
+obs <- obs.full %>% overlay(remove.pixels, fun = function(x, y) ifelse(is.na(y), x, 0))
+
+## save out values
+save(obs, obs.full, remove.pixels, file = './hw3_obs.Rdata')
+
+```
+
+```{r}
+plot(obs.full2)
+plot(obs.full3)
+plot(obs)
+
+```
+
+

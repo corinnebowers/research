@@ -1,4 +1,6 @@
 
+###################################################################################################
+
 ## @param
 ## aoi (sf): polygon bounding region of interest
 ## gauge (vector): list of USGS gauge ID(s) that best represent flows within the study area
@@ -9,19 +11,24 @@
 ## catalog (data.frame): catalog of ARs occurring in region of interest
 
 generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
+  print('getting IVT & duration information...')
+
   ## data needed:
-  load('./_data/grid_catalog.Rdata')  # list of ARs by cell (ar_grid) and a spatial tracker (tracker)
+  load('./_data/grid_catalog.Rdata')  
+  # contains list of ARs by cell (ar_grid) and a spatial tracker (tracker)
 
   ## find which cells cross the area of interest
   tracker.raster <- tracker[,c(2,1,3,4)]
   tracker.raster <- rasterFromXYZ(tracker.raster, crs = "+proj=longlat +datum=NAD83 +no_defs")
-  tracker.id <- rasterize(aoi, tracker.raster, getCover = TRUE) %>%
+  tracker.id <- raster::rasterize(aoi, tracker.raster, getCover = TRUE) %>%
     as.data.frame(xy = TRUE) %>%
     subset(layer > 0) %>%
     left_join(tracker, by = c('x'='lon', 'y'='lat')) %>%
-    select(step) %>%
+    dplyr::select(step) %>%
     unlist %>% unname %>% sort
   tracker.id <- tracker.id[!(tracker.id %in% c(827,1185))]  ## these ones cause issues
+  message('Ignore the errors above, they are artifacts of the terra package')
+  message('(see https://github.com/rspatial/terra/issues/30)')
 
   ## identify all AR storms in the region of interest
   storm.df <- data.frame(date = seq(ymd('1980-01-01'), ymd('2019-12-31'), 'days'))
@@ -64,54 +71,98 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
     catalog$IVT_max[ar] <- max(storm.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)])
     catalog$duration[ar] <- max(apply(hour.df[storm.df$ar == ar, 2:(ncol(storm.df)-2)], 2, sum))
   }
+  
+  print('getting precipitation information...')
 
-  ## set up runoff dataframe
+  ## get precipitation information
+  pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+  catalog$precip <- 
+    foreach (
+      ar = 1:nrow(catalog), 
+      .combine = 'c',
+      .packages = c('rnoaa', 'exactextractr', 'lubridate', 'foreach', 'raster', 'dplyr'),
+      .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
+        datelist <- seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days')
+        foreach (i = 1:length(datelist), .combine = '+') %do% {
+          datelist[i] %>%
+            cpc_prcp %>%
+            mutate(lon = lon-360) %>%
+            rasterFromXYZ(crs = "+proj=longlat +datum=NAD83 +no_defs") %>%
+            exact_extract(aoi, 'mean', progress = FALSE) %>%
+            unlist
+        }
+      }
+  cat('\n')
+
+  print('getting runoff & streamflow information...')
+  
+  ## get runoff information
   param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
   statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
-  site.runoff <- readNWISdv(gauge, parameterCd = param, statCd = statcode, startDate = '1980-01-01') %>%
-    renameNWISColumns() %>%
-    full_join(readNWISsite(gauge), by = 'site_no') %>%
-    mutate(Runoff_mmday = Flow / drain_area_va / 5280^2 * (60*60*24) * (25.4*12)) %>%
-    dplyr::select(Runoff_mmday, Date) %>%
-    group_by(Date) %>%
-    summarize(Runoff_mmday = Mean(Runoff_mmday))
-
-  pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
-  for (ar in 1:nrow(catalog)) {
-    datelist <- seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days')
-    ## get storm-total precip
-    precip <- 0
-    for (i in 1:length(datelist)) {
-      d <- datelist[i]
-      cpc_precip <- cpc_prcp(d)
-      cpc_precip$lon <- cpc_precip$lon-360
-      cpc_precip <- suppressWarnings(rasterFromXYZ(cpc_precip, crs = "+proj=longlat +datum=NAD83 +no_defs"))
-      precip <- precip + 
-        suppressWarnings(exact_extract(cpc_precip, aoi, 'mean', progress = FALSE) %>% unlist)
-    }
-    catalog[ar, 'precip'] <- precip
-
-    ## get storm-total runoff
-    catalog[ar, 'runoff'] <- site.runoff %>%
-      subset(Date %in% datelist) %>%
-      select(Runoff_mmday) %>% Sum
-    setTxtProgressBar(pb, ar)
-  }
+  sites <- readNWISsite(gauge)
+  ar.start <- which(year(catalog$start_day) >= 1987)[1]  #when daily records start for gage 11464000
+  pb <- txtProgressBar(min = 0, max = nrow(catalog)-ar.start, style = 3)
+  flow.catalog <- 
+    foreach(
+      ar = ar.start:nrow(catalog), 
+      .packages = c('lubridate', 'dataRetrieval', 'foreach', 'raster', 'dplyr'), 
+      .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
+        site.runoff <- 
+          readNWISdata(
+            sites = gauge, parameterCd = param,
+            startDate = ymd(catalog$start_day[ar]), 
+            endDate = ymd(catalog$end_day[ar]),
+            service = 'iv', tz = 'America/Los_Angeles') %>% 
+          renameNWISColumns
+        if (nrow(site.runoff) == 0 | !('Flow_Inst' %in% names(site.runoff))) {
+          NA
+        } else {
+          site.runoff %>% filter(!is.na(Flow_Inst))
+        }
+      }
+  cat('\n')
+  
+  ## merge runoff information to catalog
+  bad <- flow.catalog %>% lapply(function(x) is.null(nrow(x))) %>% unlist
+  catalog <- 
+    flow.catalog[!bad] %>% 
+    lapply(function(x) x %>% 
+             group_by(site_no) %>% 
+             summarize(Qp = max(Flow_Inst), 
+                       Qp.date = date(dateTime[which.max(Flow_Inst)]),
+                       sum_flow = sum(Flow_Inst)*60*15, 
+                       .groups = 'drop') %>% 
+             left_join(sites %>% dplyr::select(site_no, drain_area_va), by = 'site_no') %>% 
+             mutate(runoff_ft = sum_flow / (drain_area_va*5280^2),
+                    runoff = runoff_ft*25.4*12) %>% 
+             summarize(Qp = Mean(Qp), 
+                       Qp.date = Qp.date[which.max(Qp)], 
+                       runoff = Mean(runoff))) %>% 
+    do.call(rbind, .) %>% 
+    cbind(AR = (ar.start:nrow(catalog))[!bad]) %>% 
+    as.data.frame %>% 
+    left_join(as.data.frame(catalog), ., by = 'AR')
+  
+  ## keep only good records in the catalog
+  catalog.save <<- catalog
+  catalog <- catalog[complete.cases(catalog),]
+  catalog <- catalog %>% filter(duration > 0)
+  catalog$precip[catalog$precip < 0] <- 0
+  
   return(catalog)
 }
 
 
-
+###################################################################################################
 
 ## @param
 ## catalog (data.frame): catalog of ARs occurring in region of interest
 ## n.AR (integer): number of ARs to generate
 ## intensity.threshold (double): keep only AR events above this percentile (recommended 0.9)
+##  (assumptions: generate 10x more points than needed, then pick the highest ones)
 
 ## @return
 ## AR (data.frame): list of synthetic ARs
-
-## assumptions: generate 10x more points than needed, then pick the highest ones
 
 generate_AR <- function(catalog, n.AR = 1, intensity.threshold = 0.9) {
   ## create the Gaussian copula
@@ -139,13 +190,13 @@ generate_AR <- function(catalog, n.AR = 1, intensity.threshold = 0.9) {
                                      meanlog = param_duration['meanlog'],
                                      sdlog = param_duration['sdlog']),
                    IVT_max = qgumbel(u[,2],
-                                     loc = param_IVT['loc'],
+                                     loc = param_IVT['alpha'],
                                      scale = param_IVT['scale']))
   return(AR)
 }
 
 
-
+###################################################################################################
 
 ## @param
 ## catalog (data.frame): catalog of ARs occurring in region of interest
@@ -171,9 +222,9 @@ create_AR_copula <- function(catalog) {
   param_duration <<- c('meanlog' = meanlog, 'sdlog' = sdlog)
 
   ## find Gumbel parameters for IVT
-  alpha <- pi/(sd(catalog$IVT_max)*sqrt(6))
-  u <- mean(catalog$IVT_max) - 0.5772/alpha
-  param_IVT <<- c('loc' = u, 'scale' = 1/alpha)
+  rate <- pi/(sd(catalog$IVT_max)*sqrt(6))
+  alpha <- mean(catalog$IVT_max) - 0.5772/rate
+  param_IVT <<- c('alpha' = alpha, 'scale' = 1/rate)
 
   ## do the fits pass the K-S test?
   fit <- c()
@@ -186,7 +237,7 @@ create_AR_copula <- function(catalog) {
 
   x <- sort(catalog$IVT_max)
   cdf_x <- (1:length(x))/(length(x)+1)
-  cdf_gumbel <- pgumbel(x, loc = u, scale = 1/alpha)
+  cdf_gumbel <- pgumbel(x, loc = alpha, scale = 1/rate)
   fit['IVT'] <- max(abs(cdf_gumbel - cdf_x)) / d_crit
 
   if (fit['duration'] > 1) {
@@ -197,7 +248,7 @@ create_AR_copula <- function(catalog) {
 }
 
 
-
+###################################################################################################
 
 ## @param
 ## catalog (data.frame): catalog of ARs occurring in region of interest
