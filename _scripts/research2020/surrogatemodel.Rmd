@@ -15,6 +15,7 @@ library(scico)
 library(ggpubr)
 library(grid)
 library(gridExtra)
+library(terra)
 
 library(doSNOW)
 library(parallel)
@@ -75,10 +76,16 @@ russian <-
 
 ```{r dem, echo = FALSE}
 ## load dem file
-load('C:/Users/cbowers/Desktop/LISFLOOD/raster_files.Rdata')
-dem2 <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-01-28 rp100/russian.dem.asc')
-crs(dem2) <- crs(dem); dem <- dem2
-rm(width, lulc.dem, dem2)
+# load('C:/Users/cbowers/Desktop/LISFLOOD/raster_files.Rdata')
+# dem2 <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-01-28 rp100/russian.dem.asc')
+# crs(dem2) <- crs(dem); dem <- dem2
+# rm(width, lulc.dem, dem2)
+
+ext <- extent(1895000, 1935000, 579500, 616500)
+aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(6417)
+
+dem <- raster('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.dem.asc')
+crs(dem) <- projection(aoi)
 
 ```
 
@@ -86,43 +93,89 @@ goal 1: repeat Hw#5 from Jef Caers's class, using newly updated simulations + no
 ```{r good, echo = FALSE}
 ## remove simulations that errored out in Sherlock
 files <- list.files(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                           '21-02-21 gridded/results'))
+                           '21-05-31 gridded/results'))
 sims <- files %>% gsub('gridded', '', .) %>% gsub('.max', '', .) %>% toNumber
 bad1 <- (1:5000)[!(1:5000 %in% sims)]
 
 ## remove simulations that do not reach the ocean
-pt <- data.frame(x = 1902000, y = 587250) %>% st_as_sf(coords = c('x', 'y'))
-files <- list.files(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                           '21-02-21 gridded/results_redo'), full.names = TRUE)
+pt <- data.frame(lat = 38.45064279, lon = -123.12917330) %>% 
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326) %>% 
+  st_transform(6417) %>% 
+  st_coordinates
+# ggplot() + 
+#   geom_sf(data = sonoma %>% st_transform(crs_dem)) + 
+#   geom_sf(data = aoi, fill = NA, color = 'red') + 
+#   geom_sf(data = pt)
+filenames <- list.files(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
+                           '21-05-31 gridded/results'), full.names = TRUE)
 start <- Sys.time()
 pb <- txtProgressBar(min = 0, max = length(files), style = 3)
 cl <- parallel::makeCluster(round(detectCores()*2/3))
 registerDoSNOW(cl)
 badfile <-
   foreach (
-    file = files, .combine = 'c',
-    .packages = c('raster', 'sf', 'dplyr'), .inorder = FALSE,
+    file = filenames, .combine = 'c',
+    .packages = c('raster', 'terra', 'sf', 'dplyr'), .inorder = FALSE,
     .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
-      if ((raster(file) %>% raster::extract(pt)) == 0) {
-        which(file == files)
+      if (rast(file) %>% terra::extract(pt) == 0) {
+        which(file == filenames)
       }
     }
 stopCluster(cl)
 Sys.time() - start
-bad2 <- list.files(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                  '21-02-21 gridded/results'))[badfile] %>%
-  gsub('gridded', '', .) %>% gsub('.max', '', .) %>% toNumber
+bad2 <- files[badfile] %>% 
+  str_remove('gridded') %>% str_remove('.max') %>% 
+  toNumber %>% sort
+# write.table(bad2, file = 'C:/Users/cbowers/Desktop/id.txt', row.names = FALSE, col.names = FALSE)
 
 ## keep successful simulations
-good <- (1:5000)[-c(bad1, bad2)]
+good <- c((1:5000)[-c(bad1, bad2)], 5001)
 
 ```
 
-```{r}
-plot(raster(files[4]))
+```{r samples}
+## load samples
+samples <-
+  read.table(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
+                    '21-05-31 gridded/samples_grid.txt'), header = TRUE) %>%
+  mutate(sim = 1:nrow(.)) %>% 
+  rbind(c(tp = 1e-6, Qp = 1e-6, sim = 5001))  #add a lower bound point
+
+## plot failed simulations
+g <- ggplot(samples %>% arrange(!(sim %in% good))) + 
+  geom_point(aes(x = Qp, y = tp, color = !sim %in% good)) + 
+  scale_color_manual('Failed \nSimulations', values = c('grey80', 'red')) + 
+  scale_x_origin('Peak Flow, Qp (m3/s)', labels = comma) + 
+  scale_y_origin('Time to Peak Flow, tp (hrs)', labels = comma)
+# g
+
+ggplot(samples %>% filter(sim %in% good)) +
+  geom_point(aes(x = Qp, y = tp)) + 
+  geom_point(data = catalog, aes(x = Qp/mft^3, y = tp), color = ggcolor(3)[2])
+
+## compare against real values
+## (get combined dataframe from hydrographs.Rmd)
+g + geom_point(data = catalog, aes(x = Qp/mft^3, y = tp))
+
+## look at the random number generation
+g2 <- ggplot(samples %>% filter(sim %in% good)) +
+  geom_point(aes(x = Qp, y = tp, color = good)) +
+  scale_color_scico(palette = 'hawaii') +
+  scale_x_origin() + scale_y_origin()
+plotly::ggplotly(g2)
+
+
+## add a CV column
+cv <- sample(1:10, size = length(good), replace = TRUE)
+samples <- samples %>% 
+  mutate(cv = replace(NA, sim %in% good, cv))
+
+## save out for Sherlock
+save(samples, file = 'C:/Users/cbowers/Desktop/samples.Rdata')
+
+length(good)/5000
 
 ```
-
 
 ```{r nonzero}
 ## find nonzero cells (cells that flooded in at least one simulation)
@@ -132,11 +185,11 @@ cl <- parallel::makeCluster(round(detectCores()*2/3))
 registerDoSNOW(cl)
 nonzero <-
   foreach (
-    i = 1:5000, .combine = '+', .packages = 'raster', .inorder = FALSE,
+    i = 1:5001, .combine = '+', .packages = 'raster', .inorder = FALSE,
     .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
       if (i %in% good) {
         file <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                       '21-02-21 gridded/results/gridded', i, '.max')
+                       '21-05-31 gridded/results/gridded', i, '.max')
         raster(file) > 0
       } else {
         dem*0
@@ -158,17 +211,19 @@ nonzero.buffer <- nonzero %>%
   rasterToPolygons %>%
   st_as_sf %>%
   st_union %>%
-  st_set_crs(crs(dem)) %>%
+  st_set_crs(6417) %>%
   st_cast(to = 'POLYGON') %>%
   lapply(function(x) x[1]) %>%
   st_multipolygon %>%
   st_buffer(100) %>%
   as('Spatial') %>%
-  rasterize(dem)
+  rasterize(dem) %>% 
+  overlay(dem, fun = function(x, y) ifelse(y<=1, NA, x))
 
 ## define target points
 points <- which(!is.na(nonzero.buffer[]))
 
+## gut-check plot
 ggplot() + 
   geom_raster(data = raster.df(nonzero.buffer) %>% filter(!is.na(value)), 
               aes(x=x, y=y, fill='buffer')) + 
@@ -177,61 +232,17 @@ ggplot() +
   scale_fill_discrete(na.value = NA) + 
   coord_sf(crs = crs(dem))
 
-```
-
-```{r samples}
-## load samples
-samples <-
-  read.table(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-02-21 gridded/samples_grid.txt'), header = TRUE) %>%
-  mutate(sim = 1:nrow(.))
-
-## add a CV column
-cv <- sample(1:10, size = length(good), replace = TRUE)
-samples$cv[good] <- cv
-
-## perform normal score transformation
-samples_scale <- samples %>% 
-  arrange(Qp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), Qp.norm = qnorm(p)) %>% 
-  arrange(tp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), tp.norm = qnorm(p)) %>% 
-  arrange(SGCn) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), n.norm = qnorm(p))
-
-## plot failed simulations
-g <- ggplot(samples) + 
-  geom_point(aes(x = Qp, y = tp, color = !sim %in% good)) + 
-  scale_color_manual('Failed \nSimulations', values = c('grey80', 'red')) + 
-  scale_x_origin('Peak Flow, Qp (m3/s)', labels = comma) + 
-  scale_y_origin('Time to Peak Flow, tp (hrs)', labels = comma)
-g
-
-## compare against real values
-## (get combined dataframe from hydrographs.Rmd)
-# g + geom_point(data = combined, aes(x = Qp.catalog/mft^3, y = tp3))
-
-save(good, points, samples, samples_scale, file = 'C:/users/cbowers/Desktop/samples.Rdata')
+## save out for Sherlock
+save(nonzero, nonzero.buffer, points, file = 'C:/Users/cbowers/Desktop/nonzero.Rdata')
 
 ```
-
-note: we're going to have to go back and fix the low-value Qp errors
 
 ```{r}
-# ## look at the random number generation 
-# ggplot(samples) + 
-#   geom_point(aes(x = Qp, y = tp, color = 1:5000)) + 
-#   scale_color_scico(palette = 'hawaii') + 
-#   scale_x_origin() + scale_y_origin()
-
 ## split data into train & test
 train.id <- sort(sample(1:length(good), size = 0.8*length(good)))
 test.id <- (1:length(good))[-train.id]
 train.sim <- good[train.id]
 test.sim <- good[test.id]
-
-# cv <- samples$cv[good]
-# train.id <- (1:length(good))[cv!=1]
-# test.id <- (1:length(good))[cv==1]
-# train.sim <- good[train.id]
-# test.sim <- good[test.id]
 
 ```
 
@@ -243,9 +254,36 @@ dist.1 <- samples %>%
 dist.2 <- samples %>% 
   filter(sim %in% good) %>% arrange(sim) %>% select(tp) %>% 
   dist(method = 'euclidean') %>% as.matrix
-dist.3 <- samples %>% 
-  filter(sim %in% good) %>% arrange(sim) %>% select(SGCn) %>% 
-  dist(method = 'euclidean') %>% as.matrix
+# dist.3 <- samples %>% 
+#   filter(sim %in% good) %>% arrange(sim) %>% select(SGCn) %>% 
+#   dist(method = 'euclidean') %>% as.matrix
+
+## define functions
+get.sim <- function(dist.matrix, i, n, p, plot = TRUE) {
+  ## get the closest maps + associated weights
+  distances <-
+    data.frame(id = train.id, sim = train.sim,
+               dist = dist.matrix[train.id, test.id[i]]) %>% arrange(dist)
+  nearest <- distances[1:n, 'sim']
+  weights <- 1/(distances[1:n, 'dist']^p)
+  weights <- weights/sum(weights)
+  
+  ## plot nearest points to check accuracy
+  if (plot) {
+    g <- ggplot() + 
+      geom_point(data = samples, aes(x = Qp, y = tp), color = 'grey90') + 
+      geom_point(data = samples[nearest,], aes(x = Qp, y = tp), color = 'red') + 
+      geom_point(data = samples[test.sim[i],], aes(x = Qp, y = tp), color = 'black') + 
+      scale_x_origin() + scale_y_origin()
+    print(g)
+  }
+
+  ## find the prediction based on weighted average
+  files <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
+                  '21-05-31 gridded/results/gridded', nearest, '.max')
+  sim <- foreach(ii = 1:n, .combine = '+') %do% (raster(files[ii])*weights[ii])
+  return(sim)
+}
 
 ## choose n & p values to test
 ## (stick with the best-fit ones from the homework)
@@ -261,49 +299,20 @@ error <-
   foreach (i = 1:length(test.id),
     .options.snow = list(progress = function(n) setTxtProgressBar(pb, n)),
     .combine = 'rbind',
+    .export = c('Sum', 'get.sim'),
     .packages = c('raster', 'dplyr', 'tidyr', 'foreach'), .inorder = FALSE) %dopar% {
       obs <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-02-21 gridded/results/gridded', test.sim[i], '.max') %>% raster
-
-      get.sim <- function(dist.matrix, i, n, p, plot = TRUE) {
-        ## get the closest maps + associated weights
-        distances <-
-          data.frame(id = train.id, sim = train.sim,
-                     dist = dist.matrix[train.id, test.id[i]]) %>% arrange(dist)
-        nearest <- distances[1:n, 'sim']
-        weights <- 1/(distances[1:n, 'dist']^p)
-        weights <- weights/sum(weights)
-        
-        ## plot nearest points to check accuracy
-        if (plot) {
-          g <- ggplot() + 
-            geom_point(data = samples, aes(x = Qp, y = tp), color = 'grey90') + 
-            geom_point(data = samples[nearest,], aes(x = Qp, y = tp), color = 'red') + 
-            geom_point(data = samples[test.sim[i],], aes(x = Qp, y = tp), color = 'black') + 
-            scale_x_origin() + scale_y_origin()
-          print(g)
-        }
-
-        ## find the prediction based on weighted average
-        files <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                        '21-02-21 gridded/results/gridded', nearest, '.max')
-        sim <- foreach(ii = 1:n, .combine = '+') %do% (raster(files[ii])*weights[ii])
-        return(sim)
-      }
-      Sum <- function(x) sum(x, na.rm = TRUE)
-
+                    '21-05-31 gridded/results/gridded', test.sim[i], '.max') %>% raster
       foreach (n = n.list, .packages = c('raster', 'dplyr', 'tidyr'),
-        .combine = 'rbind', .inorder = FALSE) %:%
+        .combine = 'rbind', .export = c('Sum', 'get.sim'), .inorder = FALSE) %:%
       foreach (p = p.list, .packages = c('raster', 'dplyr', 'tidyr'),
-        .combine = 'rbind', .inorder = FALSE) %do% {
-          sim.1 <- get.sim(dist.1, i, n, p, plot = FALSE)
+        .combine = 'rbind', .export = c('Sum', 'get.sim'), .inorder = FALSE) %do% {
+          sim.1 <- get.sim(dist.1, i, n, p, plot = TRUE)
           sim.2 <- get.sim(dist.2, i, n, p, plot = FALSE)
-          sim.3 <- obs #get.sim(dist.3, i, n, p, plot = FALSE)
           data.frame(
             sim = test.sim[i], n = n, p = p,
-            param = c('Qp', 'tp', 'SGCn'),
-            RSS = sqrt(c(Sum((sim.1-obs)[points]^2), Sum((sim.2-obs)[points]^2),
-                         Sum((sim.3-obs)[points]^2))))
+            param = c('Qp', 'tp'),
+            RSS = sqrt(c(Sum((sim.1-obs)[points]^2), Sum((sim.2-obs)[points]^2))))
         }
     }
 stopCluster(cl)
@@ -312,7 +321,7 @@ Sys.time() - start
 error <- error %>%
   mutate(n = factor(n, levels = rev(n.list)),
          p = factor(p, levels = rev(p.list)),
-         param = factor(param, levels = c('SGCn', 'tp', 'Qp')))
+         param = factor(param, levels = c('tp', 'Qp')))
 
 ```
 
@@ -333,11 +342,11 @@ g2 <- ggplot(error.df %>% select(sim, error = tp) %>% left_join(samples, by = 's
   geom_point(aes(x = tp, y = error)) + 
   scale_x_origin('Time to Peak Flow, tp (hrs)') + scale_y_origin('RSS Error') + 
   coord_cartesian(clip = 'off')
-g3 <- ggplot(error.df %>% select(sim, error = SGCn) %>% left_join(samples, by = 'sim')) + 
-  geom_point(aes(x = SGCn, y = error)) + 
-  scale_x_continuous('Channel Roughness, SGCn') + scale_y_origin('RSS Error') + 
-  coord_cartesian(clip = 'off')
-grid.arrange(g1, g2, g3, nrow = 2, 
+# g3 <- ggplot(error.df %>% select(sim, error = SGCn) %>% left_join(samples, by = 'sim')) + 
+#   geom_point(aes(x = SGCn, y = error)) + 
+#   scale_x_continuous('Channel Roughness, SGCn') + scale_y_origin('RSS Error') + 
+#   coord_cartesian(clip = 'off')
+grid.arrange(g1, g2, ncol = 2, 
              top = textGrob('Error Distribution by Parameter Value', 
                             gp = gpar(fontsize = 12, fontface = 'bold')))
 
@@ -348,11 +357,11 @@ g.cdf <- ggplot() +
   geom_step(data = error.df %>% select(sim, error = tp) %>% 
               arrange(error) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
             aes(x = error, y = p, color = 'tp')) + 
-  geom_step(data = error.df %>% select(sim, error = SGCn) %>% 
-              arrange(error) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
-            aes(x = error, y = p, color = 'SGCn')) + 
+  # geom_step(data = error.df %>% select(sim, error = SGCn) %>% 
+  #             arrange(error) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
+  #           aes(x = error, y = p, color = 'SGCn')) + 
   scale_y_continuous('Empirical CDF', limits = c(0,1), expand = c(0,0)) + 
-  scale_color_manual('', values = scico(n = 4, palette = 'bamako')[-4])
+  scale_color_manual('', values = scico(n = 3, palette = 'bamako')[-3])
 g1 <- g.cdf + 
   scale_x_origin('RSS Error') + 
   theme(legend.position = c(0.7, 0.5),
@@ -375,69 +384,61 @@ param_scale
 samples_scale <- samples %>% 
   arrange(Qp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), Qp.norm = qnorm(p)) %>% 
   arrange(tp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), tp.norm = qnorm(p)) %>% 
-  arrange(SGCn) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), n.norm = qnorm(p)) %>% 
+  arrange(SGCn) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), n.norm = qnorm(p)) %>%
   mutate(Qp.scale = Qp.norm*param_scale[1],
          tp.scale = tp.norm*param_scale[2],
          n.scale = n.norm*param_scale[3])
 
+samples_scale <- samples %>%
+  mutate(Qp.std = Qp %>% punif(min = 0, max = 8000) %>%
+           qunif(min = 1, max = exp(2)) %>% log,
+         Qp.norm = qnorm(Qp.std/2)) %>%
+  mutate(tp.std = tp %>% punif(min = 0, max = 200) %>%
+           qunif(min = 1, max = exp(2)) %>% log,
+         tp.norm = qnorm(tp.std/2)) %>%
+  mutate(sim = 1:nrow(.))
+
 ```
 
 ```{r error.joint.df}
-## create joint distance matrices
-dist.12 <- samples_scale %>% 
-  filter(sim %in% good) %>% arrange(sim) %>% 
-  select(Qp.scale, tp.scale) %>% 
-  dist(method = 'euclidean') %>% as.matrix
-dist.23 <- samples_scale %>% 
-  filter(sim %in% good) %>% arrange(sim) %>% 
-  select(tp.scale, n.scale) %>% 
-  dist(method = 'euclidean') %>% as.matrix
-dist.13 <- samples_scale %>% 
-  filter(sim %in% good) %>% arrange(sim) %>% 
-  select(Qp.scale, n.scale) %>% 
-  dist(method = 'euclidean') %>% as.matrix
-
-## define functions
-get.sim <- function(dist.matrix, i, n = 5, p = 1) {
-  ## get the closest maps + associated weights
-  distances <-
-    data.frame(id = train.id, sim = train.sim,
-               dist = dist.matrix[train.id, test.id[i]]) %>% arrange(dist)
-  nearest <- distances[1:n, 'sim']
-  weights <- 1/(distances[1:n, 'dist']^p)
-  weights <- weights/sum(weights)
-  
-  ## find the prediction based on weighted average
-  files <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                  '21-02-21 gridded/results/gridded', nearest, '.max')
-  sim <- foreach(ii = 1:n, .combine = '+') %do% (raster(files[ii])*weights[ii])
-  return(sim)
-}
-
-## find errors for jointly distributed parameters
-start <- Sys.time()
-pb <- txtProgressBar(min = 0, max = length(test.id), style = 3)
-cl <- parallel::makeCluster(round(detectCores()*2/3))
-registerDoSNOW(cl)
-error.joint.df <-
-  foreach (i = 1:length(test.id),
-    .combine = 'rbind',
-    .export = c('Sum', 'get.sim'),
-    .options.snow = list(progress = function(n) setTxtProgressBar(pb, n)),
-    .packages = c('raster', 'dplyr', 'tidyr', 'foreach')) %dopar% {
-      obs <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-02-21 gridded/results/gridded', test.sim[i], '.max') %>% raster
-      sim.12 <- get.sim(dist.12, i)
-      sim.23 <- obs #get.sim(dist.23, i)
-      sim.13 <- obs #get.sim(dist.13, i)
-      data.frame(
-        sim = test.sim[i],
-        param = c('Qp_tp', 'tp_SGCn', 'Qp_SGCn'),
-        RSS = sqrt(c(Sum((sim.12-obs)[points]^2), Sum((sim.23-obs)[points]^2),
-                     Sum((sim.13-obs)[points]^2))))
-    }
-stopCluster(cl)
-Sys.time() - start
+# ## create joint distance matrices
+# dist.12 <- samples_scale %>% 
+#   filter(sim %in% good) %>% arrange(sim) %>% 
+#   select(Qp.scale, tp.scale) %>% 
+#   dist(method = 'euclidean') %>% as.matrix
+# dist.23 <- samples_scale %>% 
+#   filter(sim %in% good) %>% arrange(sim) %>% 
+#   select(tp.scale, n.scale) %>% 
+#   dist(method = 'euclidean') %>% as.matrix
+# dist.13 <- samples_scale %>% 
+#   filter(sim %in% good) %>% arrange(sim) %>% 
+#   select(Qp.scale, n.scale) %>% 
+#   dist(method = 'euclidean') %>% as.matrix
+# 
+# ## find errors for jointly distributed parameters
+# start <- Sys.time()
+# pb <- txtProgressBar(min = 0, max = length(test.id), style = 3)
+# cl <- parallel::makeCluster(round(detectCores()*2/3))
+# registerDoSNOW(cl)
+# error.joint.df <-
+#   foreach (i = 1:length(test.id),
+#     .combine = 'rbind',
+#     .export = c('Sum', 'get.sim'),
+#     .options.snow = list(progress = function(n) setTxtProgressBar(pb, n)),
+#     .packages = c('raster', 'dplyr', 'tidyr', 'foreach')) %dopar% {
+#       obs <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
+#                     '21-02-21 gridded/results/gridded', test.sim[i], '.max') %>% raster
+#       sim.12 <- get.sim(dist.12, i)
+#       sim.23 <- obs #get.sim(dist.23, i)
+#       sim.13 <- obs #get.sim(dist.13, i)
+#       data.frame(
+#         sim = test.sim[i],
+#         param = c('Qp_tp', 'tp_SGCn', 'Qp_SGCn'),
+#         RSS = sqrt(c(Sum((sim.12-obs)[points]^2), Sum((sim.23-obs)[points]^2),
+#                      Sum((sim.13-obs)[points]^2))))
+#     }
+# stopCluster(cl)
+# Sys.time() - start
 
 ## note: foreach with %dopar% is much faster than map_dbl()
 
@@ -446,60 +447,60 @@ Sys.time() - start
 ```{r echo = FALSE}
 #### plot results ####
 
-## error vs. parameter value
-g1 <- ggplot(error.joint.df %>% filter(param=='Qp_tp') %>% 
-         left_join(samples, by = 'sim') %>% arrange(RSS)) + 
-  geom_point(aes(x = Qp, y = tp, color = RSS)) + 
-  scale_color_scico('RSS Error', palette = 'lajolla', 
-                    limits = c(0,max(error.joint.df$RSS))) + 
-  scale_x_origin('Qp (m3/s)') + scale_y_origin('tp (hrs)')
-g2 <- ggplot(error.joint.df %>% filter(param=='tp_SGCn') %>% 
-         left_join(samples, by = 'sim') %>% arrange(RSS)) + 
-  geom_point(aes(x = tp, y = SGCn, color = RSS)) + 
-  scale_color_scico('RSS Error', palette = 'lajolla', 
-                    limits = c(0,max(error.joint.df$RSS))) + 
-  scale_x_origin('tp (hrs)')
-g3 <- ggplot(error.joint.df %>% filter(param=='Qp_SGCn') %>% 
-         left_join(samples, by = 'sim') %>% arrange(RSS)) + 
-  geom_point(aes(x = Qp, y = SGCn, color = RSS)) + 
-  scale_color_scico('RSS Error', palette = 'lajolla', 
-                    limits = c(0,max(error.joint.df$RSS))) + 
-  scale_x_origin('Qp (m3/s)')
-ggarrange(g3, g2, g1, common.legend = TRUE, legend = 'bottom') %>% 
-  grid.arrange(top = textGrob('Error Distribution by Parameter Value',
-                              gp = gpar(fontsize = 12, fontface = 'bold')))
-
-ggplot(error.joint.df %>% filter(param=='Qp_tp') %>% 
-         left_join(samples, by = 'sim') %>% 
-         filter(RSS < 2000) %>% 
-         arrange(RSS)) + 
-  geom_point(aes(x = Qp, y = tp, color = RSS)) + 
-  scale_color_scico('RSS Error', palette = 'lajolla') + 
-  scale_x_origin('Qp (m3/s)') + scale_y_origin('tp (hrs)')
-
-## create an interaction plot
-interactions <- diag(param_scale)
-interactions[1,2] <- error.joint.df %>% filter(param=='Qp_tp') %>% .$RSS %>% median
-interactions[2,1] <- error.joint.df %>% filter(param=='Qp_tp') %>% .$RSS %>% median
-interactions[2,3] <- error.joint.df %>% filter(param=='tp_SGCn') %>% .$RSS %>% median
-interactions[3,2] <- error.joint.df %>% filter(param=='tp_SGCn') %>% .$RSS %>% median
-interactions[1,3] <- error.joint.df %>% filter(param=='Qp_SGCn') %>% .$RSS %>% median
-interactions[3,1] <- error.joint.df %>% filter(param=='Qp_SGCn') %>% .$RSS %>% median
-interactions <- interactions %>% 
-  as.data.frame %>% 
-  setNames(c('Qp', 'tp', 'SGCn')) %>% 
-  mutate(left = c('Qp', 'tp', 'SGCn')) %>% 
-  pivot_longer(cols = c('Qp', 'tp', 'SGCn'), names_to = 'right', values_to = 'error') %>% 
-  mutate(left = factor(left, levels = c('Qp', 'tp', 'SGCn')),
-         right = factor(right, levels = c('SGCn', 'tp', 'Qp')))
-ggplot(interactions) + 
-  geom_tile(aes(x = left, y = right, fill = error)) + 
-  ggtitle('Interactions Plot') + 
-  scale_fill_scico('Median \nRSS Error', palette = 'lajolla') + 
-  theme(axis.title = element_blank())
-
-interactions %>% pivot_wider(id_cols = 'left', names_from = 'right', values_from = 'error')
-interactions.save %>% pivot_wider(id_cols = 'left', names_from = 'right', values_from = 'error')
+# ## error vs. parameter value
+# g1 <- ggplot(error.joint.df %>% filter(param=='Qp_tp') %>% 
+#          left_join(samples, by = 'sim') %>% arrange(RSS)) + 
+#   geom_point(aes(x = Qp, y = tp, color = RSS)) + 
+#   scale_color_scico('RSS Error', palette = 'lajolla', 
+#                     limits = c(0,max(error.joint.df$RSS))) + 
+#   scale_x_origin('Qp (m3/s)') + scale_y_origin('tp (hrs)')
+# g2 <- ggplot(error.joint.df %>% filter(param=='tp_SGCn') %>% 
+#          left_join(samples, by = 'sim') %>% arrange(RSS)) + 
+#   geom_point(aes(x = tp, y = SGCn, color = RSS)) + 
+#   scale_color_scico('RSS Error', palette = 'lajolla', 
+#                     limits = c(0,max(error.joint.df$RSS))) + 
+#   scale_x_origin('tp (hrs)')
+# g3 <- ggplot(error.joint.df %>% filter(param=='Qp_SGCn') %>% 
+#          left_join(samples, by = 'sim') %>% arrange(RSS)) + 
+#   geom_point(aes(x = Qp, y = SGCn, color = RSS)) + 
+#   scale_color_scico('RSS Error', palette = 'lajolla', 
+#                     limits = c(0,max(error.joint.df$RSS))) + 
+#   scale_x_origin('Qp (m3/s)')
+# ggarrange(g3, g2, g1, common.legend = TRUE, legend = 'bottom') %>% 
+#   grid.arrange(top = textGrob('Error Distribution by Parameter Value',
+#                               gp = gpar(fontsize = 12, fontface = 'bold')))
+# 
+# ggplot(error.joint.df %>% filter(param=='Qp_tp') %>% 
+#          left_join(samples, by = 'sim') %>% 
+#          filter(RSS < 2000) %>% 
+#          arrange(RSS)) + 
+#   geom_point(aes(x = Qp, y = tp, color = RSS)) + 
+#   scale_color_scico('RSS Error', palette = 'lajolla') + 
+#   scale_x_origin('Qp (m3/s)') + scale_y_origin('tp (hrs)')
+# 
+# ## create an interaction plot
+# interactions <- diag(param_scale)
+# interactions[1,2] <- error.joint.df %>% filter(param=='Qp_tp') %>% .$RSS %>% median
+# interactions[2,1] <- error.joint.df %>% filter(param=='Qp_tp') %>% .$RSS %>% median
+# interactions[2,3] <- error.joint.df %>% filter(param=='tp_SGCn') %>% .$RSS %>% median
+# interactions[3,2] <- error.joint.df %>% filter(param=='tp_SGCn') %>% .$RSS %>% median
+# interactions[1,3] <- error.joint.df %>% filter(param=='Qp_SGCn') %>% .$RSS %>% median
+# interactions[3,1] <- error.joint.df %>% filter(param=='Qp_SGCn') %>% .$RSS %>% median
+# interactions <- interactions %>% 
+#   as.data.frame %>% 
+#   setNames(c('Qp', 'tp', 'SGCn')) %>% 
+#   mutate(left = c('Qp', 'tp', 'SGCn')) %>% 
+#   pivot_longer(cols = c('Qp', 'tp', 'SGCn'), names_to = 'right', values_to = 'error') %>% 
+#   mutate(left = factor(left, levels = c('Qp', 'tp', 'SGCn')),
+#          right = factor(right, levels = c('SGCn', 'tp', 'Qp')))
+# ggplot(interactions) + 
+#   geom_tile(aes(x = left, y = right, fill = error)) + 
+#   ggtitle('Interactions Plot') + 
+#   scale_fill_scico('Median \nRSS Error', palette = 'lajolla') + 
+#   theme(axis.title = element_blank())
+# 
+# interactions %>% pivot_wider(id_cols = 'left', names_from = 'right', values_from = 'error')
+# interactions.save %>% pivot_wider(id_cols = 'left', names_from = 'right', values_from = 'error')
 
 ```
 
@@ -529,7 +530,7 @@ error.alpha.df <-
     .packages = c('raster', 'dplyr', 'tidyr', 'foreach')) %:% 
   foreach (i = 1:length(test.id), .combine = 'rbind', .inorder = FALSE) %dopar% {
       obs <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-02-21 gridded/results/gridded', test.sim[i], '.max') %>% raster
+                    '21-05-31 gridded/results/gridded', test.sim[i], '.max') %>% raster
       sim <- get.sim(dist.alpha[[alpha]], i)
       data.frame(
         sim = test.sim[i], alpha = alpha,
@@ -578,6 +579,43 @@ ggplot() +
 
 ```
 
+goal 2: write a function for the PARRA Sherlock implementation
+```{r}
+## create distance matrix
+r.new <- 100
+tp.new <- 48
+
+surrogate <- function(Qp.new, tp.new, n = 5, p = 1, alpha = 0.5) {
+  ## load samples, good, param_scale
+  
+  ## convert variables to standard normal & calculate distances
+  samples_scale <- samples[good,] %>% 
+    select(sim, Qp, tp) %>% 
+    rbind(c(sim = 0, Qp = Qp.new, tp = tp.new)) %>% 
+    arrange(Qp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), Qp.norm = qnorm(p)) %>% 
+    arrange(tp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), tp.norm = qnorm(p)) %>% 
+    mutate(Qp.scale = Qp.norm*alpha, tp.scale = tp.norm*(1-alpha)) %>% 
+    arrange(sim) %>% 
+    select(Qp.scale, tp.scale)
+  
+  ## find the nearest maps
+  distances <- data.frame(
+    sim = samples_scale$sim[-1],
+    dist = as.matrix(dist(samples_scale, method = 'euclidean'))[1,-1]) %>% 
+    arrange(dist)
+  nearest <- distances[1:n, 'sim']
+  
+  ## calculate the weighted average of the nearest maps
+  weights <- 1/(distances[1:n, 'dist']^p)
+  weights <- weights/sum(weights)
+  files <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-02-21 gridded/results_5000/',
+                  'gridded', nearest, '.max')
+  prediction <- foreach (ii = 1:n, .combine = '+') %do% (raster(files[ii])*weights[ii])
+  return(prediction)
+}
+
+```
+
 ```{r}
 ## perform cross-validation in Sherlock --> plot results
 files <- list.files('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-04-06 alpha/results', 
@@ -615,108 +653,97 @@ g +
 
 ```{r}
 ## repeat 10-fold CV for n & p (in Sherlock)
-files <- list.files('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-04-07 np/results', 
-                    full.names = TRUE)
+# files <- list.files('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-04-07 np/results', 
+#                     full.names = TRUE)
+files <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-06-14 fit.npalpha/error', 1:10, '.csv')
+files <- files[-c(6,9)]
 
 error <- 
-  foreach(file = files, .combine = 'cbind') %do% {
+  foreach(file = files) %do% {
     read_csv(file) %>% 
-      group_by(n,p) %>% arrange(n,p) %>% 
-      summarize(RSS_50 = median(RSS)) %>%
-      pull(RSS_50)
-  }
-error <- read_csv(file) %>% 
-  group_by(n,p) %>% arrange(n,p) %>% 
-  dplyr::select(n,p) %>% 
-  cbind(error)
-error <- error %>% 
-  pivot_longer(cols = -(1:2), names_to = 'results') %>% 
-  group_by(n, p) %>% 
-  summarize(RSS_50 = median(results)) 
-ggplot(error) + 
-  geom_tile(aes(x = factor(n), y = factor(p), fill = RSS_50)) +
+      group_by(n, p, alpha) %>% 
+      # arrange(n, p, alpha) %>% 
+      summarize(RSS = mean(RSS), .groups = 'drop')
+  } %>% 
+  reduce(full_join, by = c('n', 'p', 'alpha')) %>% 
+  setNames(c(names(.)[1:3], (1:10)[-c(6,9)])) %>% 
+  pivot_longer(cols = -(1:3), names_to = 'cv', values_to = 'RSS') %>% 
+  group_by(n, p, alpha) %>% 
+  summarize(RSS = mean(RSS))
+
+ggplot(error %>% group_by(n,p) %>% summarize(RSS = mean(RSS), .groups = 'drop')) + 
+  geom_tile(aes(x = factor(n), y = factor(p), fill = RSS)) +
   scale_x_discrete('Search Neighborhood Size') + 
   scale_y_discrete('Power Function Coefficient') + 
-  scale_fill_scico('Median RSS \nError (m)', palette = 'lajolla')
+  scale_fill_scico('Mean RSS \nError (m)', palette = 'lajolla')
+ggplot(error %>% group_by(n,alpha) %>% summarize(RSS = mean(RSS), .groups = 'drop')) + 
+  geom_tile(aes(x = factor(n), y = alpha, fill = RSS)) +
+  scale_x_discrete('Search Neighborhood Size') + 
+  scale_y_continuous('Anisotropy Coefficient', expand = c(0.025,0.025)) + 
+  coord_cartesian(ylim = c(0,1), clip = 'off') + 
+  scale_fill_scico('Mean RSS \nError (m)', palette = 'lajolla')
+ggplot(error %>% group_by(p,alpha) %>% summarize(RSS = mean(RSS), .groups = 'drop')) + 
+  geom_tile(aes(x = factor(p), y = alpha, fill = RSS)) +
+  scale_x_discrete('Power Function Coefficient') + 
+  scale_y_continuous('Anisotropy Coefficient', expand = c(0.025,0.025)) + 
+  coord_cartesian(ylim = c(0,1), clip = 'off') + 
+  scale_fill_scico('Mean RSS \nError (m)', palette = 'lajolla')
 
-n.best <- error$n[which.min(error$RSS_50)]
-p.best <- error$p[which.min(error$RSS_50)]
-g.n <- ggplot()
-g.p <- ggplot()
-for (file in files) {
-  temp.n <- read_csv(file) %>% 
-    filter(p == p.best) %>% 
-    group_by(n) %>% 
-    summarize(RSS_10 = quantile(RSS, 0.1), 
-              RSS_50 = median(RSS),
-              RSS_90 = quantile(RSS, 0.9))
-  g.n <- g.n + 
-    geom_line(data = temp, aes(x = n, y = RSS_50, color = 'Median')) + 
-    geom_line(data = temp, aes(x = n, y = RSS_10, color = '10th Perc.')) + 
-    geom_line(data = temp, aes(x = n, y = RSS_90, color = '90th Perc.'))
-  
-  temp.p <- read_csv(file) %>% 
-    filter(n == n.best) %>% 
-    group_by(p) %>% 
-    summarize(RSS_10 = quantile(RSS, 0.1), 
-              RSS_50 = median(RSS),
-              RSS_90 = quantile(RSS, 0.9))
-  g.p <- g.p + 
-    geom_line(data = temp, aes(x = p, y = RSS_50, color = 'Median')) + 
-    geom_line(data = temp, aes(x = p, y = RSS_10, color = '10th Perc.')) + 
-    geom_line(data = temp, aes(x = p, y = RSS_90, color = '90th Perc.'))
-}
+error <- error %>% 
+  filter(n != 1 & n != 25 & alpha != 0 & alpha != 1)
+  # filter(p == 2 & n == 5) %>% 
+  # filter(alpha > 0.25 & alpha < 0.95)
+ggplot(error %>% group_by(n, p) %>% summarize(RSS = mean(RSS), .groups = 'drop')) + 
+  geom_tile(aes(x = factor(n), y = factor(p), fill = RSS)) +
+  scale_x_discrete('Search Neighborhood Size') + 
+  scale_y_discrete('Power Function Coefficient') + 
+  scale_fill_scico('Mean RSS \nError (m)', palette = 'lajolla')
+ggplot(error %>% group_by(n, alpha) %>% summarize(RSS = mean(RSS), .groups = 'drop')) + 
+  geom_tile(aes(x = factor(n), y = alpha, fill = RSS)) +
+  scale_x_discrete('Search Neighborhood Size') + 
+  scale_y_continuous('Anisotropy Coefficient', expand = c(0.025,0.025)) + 
+  coord_cartesian(ylim = c(0,1), clip = 'off') + 
+  scale_fill_scico('Mean RSS \nError (m)', palette = 'lajolla')
+ggplot(error %>% group_by(p, alpha) %>% summarize(RSS = mean(RSS), .groups = 'drop')) + 
+  geom_tile(aes(x = factor(p), y = alpha, fill = RSS)) +
+  scale_x_discrete('Power Function Coefficient') + 
+  scale_y_continuous('Anisotropy Coefficient', expand = c(0.025,0.025)) + 
+  coord_cartesian(ylim = c(0,1), clip = 'off') + 
+  scale_fill_scico('Mean RSS \nError (m)', palette = 'lajolla')
 
-g.n + 
-  # geom_point(aes(x = min.alpha, y = min.RSS), color = 'red', size = 2) + 
-  scale_color_manual(name = '', values = c('grey70', 'grey70', 'black')) + 
-  scale_x_origin('Search Neighborhood Size') + 
-  scale_y_log10('RSS Error', labels = comma, minor_breaks = log_breaks(0,4))
-g.p + 
-  # geom_point(aes(x = min.alpha, y = min.RSS), color = 'red', size = 2) + 
-  scale_color_manual(name = '', values = c('grey70', 'grey70', 'black')) + 
-  scale_x_origin('Power Function Coefficient') + 
-  scale_y_log10('RSS Error', labels = comma, minor_breaks = log_breaks(0,4))
+## final decision: n = 5, p = 2, alpha = 0.7
 
 ```
 
-
-
-goal 2: write a function for the PARRA Sherlock implementation
 ```{r}
-## create distance matrix
-r.new <- 100
-tp.new <- 48
-
-surrogate <- function(Qp.new, tp.new, n = 5, p = 1, alpha = 0.5) {
-  ## load samples, good, param_scale
-  
-  ## convert variables to standard normal & calculate distances
-  samples_scale <- samples[good,] %>% 
-    select(sim, Qp, tp) %>% 
-    rbind(c(sim = 0, Qp = Qp.new, tp = tp.new)) %>% 
-    arrange(Qp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), Qp.norm = qnorm(p)) %>% 
-    arrange(tp) %>% mutate(p = (1:nrow(.))/(nrow(.)+1), tp.norm = qnorm(p)) %>% 
-    mutate(Qp.scale = Qp.norm*alpha, tp.scale = tp.norm*(1-alpha)) %>% 
-    arrange(sim) %>% 
-    select(Qp.scale, tp.scale)
-  
-  ## find the nearest maps
-  distances <- data.frame(
-    sim = samples_scale$sim[-1],
-    dist = as.matrix(dist(samples_scale, method = 'euclidean'))[1,-1]) %>% 
-    arrange(dist)
-  nearest <- distances[1:n, 'sim']
-  
-  ## calculate the weighted average of the nearest maps
-  weights <- 1/(distances[1:n, 'dist']^p)
-  weights <- weights/sum(weights)
-  files <- paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-02-21 gridded/results_5000/',
-                  'gridded', nearest, '.max')
-  prediction <- foreach (ii = 1:n, .combine = '+') %do% (raster(files[ii])*weights[ii])
-  return(prediction)
-}
+error.best <- 
+  foreach(file = files, .combine = 'rbind') %do% {
+    read_csv(file) %>% 
+      filter(n == 5 & p == 2 & alpha == 0.7) %>% 
+      select(-X1, -n, -p, -alpha) %>% 
+      mutate(id = toNumber(str_sub(file, start = -5, end = -5)))
+  }
+ggplot(error.best) + 
+  geom_histogram(aes(x = RSS), color = 'black', fill = 'grey90',
+                 boundary = 0, bins = sqrt(nrow(error.best))*5) + 
+  ggtitle('Distribution of SRSS Error') + 
+  scale_x_origin('Square Root of Sum of Squares (SRSS)') + scale_y_origin('Number of Simulations') + 
+  coord_cartesian(xlim = c(0, 100))
+ggplot(error.best) + 
+  geom_histogram(aes(x = abs(max.resid), group = sign(max.resid), 
+                     fill = factor(sign(max.resid))), 
+                 color = 'black', boundary = 0, bins = sqrt(nrow(error.best))) + 
+  ggtitle('Distribution of Maximum Residuals') + 
+  scale_x_origin('Magnitude of Maximum Residual (m)') + 
+  scale_y_origin('Number of Simulations') +
+  scale_fill_manual('Sign of Maximum \nResidual', labels = c('Negative', 'Postiive'),
+                    values = scico(n = 6, palette = 'batlow')[c(2,5)]) + 
+  theme(legend.position = c(0.9, 0.5)) + 
+  coord_cartesian(xlim = c(0, 8))
 
 ```
+
+
+
 
 

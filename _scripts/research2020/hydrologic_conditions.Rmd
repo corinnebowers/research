@@ -8,7 +8,6 @@ require(ncdf4)
 
 ```
 
-
 ```{r}
 ## soil moisture
 ## data source: https://www.esrl.noaa.gov/psd/data/gridded/data.cpcsoil.html (simulated product)

@@ -67,7 +67,7 @@ generate_precip <- function(AR, catalog, probabilistic = FALSE, n.precip = 1) {
   
   ## return precipitation dataframe
   precip <- precip %>% 
-    full_join(AR, by = 'n.AR') %>% 
-    dplyr::select(n.AR, n.precip, IVT_max, duration, precip_mm = precip)
+    rename(precip_mm = precip) %>% 
+    full_join(AR %>% select(-precip.mean, -precip.sd), ., by = 'n.AR')
   return(precip)
 }

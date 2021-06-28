@@ -3,49 +3,6 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-```{r}
-load('C:/Users/cbowers/Desktop/catalog.Rdata')
-AR <- catalog[220,] %>% transmute(n.AR = 1, IVT_max, duration)
-precip <- 
-  generate_precip(
-    AR = AR, 
-    catalog = catalog,
-    probabilistic = TRUE,
-    n.precip = 100)
-
-ggplot(precip) + 
-  geom_histogram(aes(x = precip_mm/25.4, y = ..count../nrow(precip)), 
-                 color = 'black', fill = 'grey90', boundary = 0) + 
-  geom_vline(xintercept = catalog[411, 'precip']/25.4, size = 1, linetype = 'dashed') + 
-  scale_x_origin('Precipitation (in)', labels = comma) + 
-  scale_y_origin(label = percent_format(accuracy = 1))
-
-```
-
-```{r}
-mft <- 3.28084
-runoff <- 
-  generate_runoff(
-    precip = precip, 
-    catalog = catalog, 
-    probabilistic = TRUE,
-    n.runoff = 1000)
-hydrograph <- 
-  generate_hydrograph(
-    precip = precip,
-    runoff = runoff, 
-    catalog = catalog, 
-    probabilistic = TRUE,
-    n.hydro = 1)
-
-ggplot(hydrograph) + 
-  geom_histogram(aes(x = Qp_m3s*mft^3, y = ..count../nrow(hydrograph)), 
-                 color = 'black', fill = 'grey90', boundary = 0) + 
-  geom_vline(xintercept = catalog[411, 'Qp'], size = 1, linetype = 'dashed') + 
-  scale_x_origin('Streamflow (cfs)', labels = comma) + 
-  scale_y_origin(label = percent_format(accuracy = 1))
-
-```
 
 ```{r}
 load('C:/Users/cbowers/Desktop/dem.Rdata')

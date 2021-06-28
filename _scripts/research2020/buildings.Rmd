@@ -72,64 +72,45 @@ nsi2 <- read.csv('C:/Users/cbowers/Downloads/NSI_Sonoma.csv/NSI_sonoma.csv') %>%
 
 ```
 
-1. Microsoft building footprints
-https://drive.google.com/drive/folders/1-XGvS25tQKKQ3HTqWjAfLJ4PaeXJ9yyY
+load all the others
 ```{r}
-microsoft_sonoma <- st_read('D:/Research/_data/buildings/ca_06097_footprints.csv', 
-                          crs = st_crs(sonoma), quiet = TRUE)
+# # 1. Microsoft building footprints
+# # https://drive.google.com/drive/folders/1-XGvS25tQKKQ3HTqWjAfLJ4PaeXJ9yyY
+# microsoft_sonoma <- st_read('D:/Research/_data/buildings/ca_06097_footprints.csv', 
+#                           crs = st_crs(sonoma), quiet = TRUE)
 
-```
+# # 2. OpenStreetMap
+# # http://download.geofabrik.de/north-america/us/california/norcal.html
+# osm_bldg <- st_read('D:/Research/_data/buildings/OSM_norcal/gis_osm_buildings_a_free_1.shp', quiet = TRUE)
+# osm_sonoma <- osm_bldg %>% st_transform(st_crs(sonoma)) %>% .[sonoma,]
 
-2. OpenStreetMap
-http://download.geofabrik.de/north-america/us/california/norcal.html
-```{r}
-osm_bldg <- st_read('D:/Research/_data/buildings/OSM_norcal/gis_osm_buildings_a_free_1.shp', quiet = TRUE)
-osm_sonoma <- osm_bldg %>% st_transform(st_crs(sonoma)) %>% .[sonoma,]
+# # 3. SonomaVegMap LIDAR data
+# # http://sonomavegmap.org/data-downloads/
+# vegmap_sonoma <- 
+#   st_read('D:/Research/_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
+#           layer = 'CartographicBuildingFootprints', quiet = TRUE) %>% 
+#   st_transform(st_crs(sonoma)) %>% st_centroid
 
-```
-
-3. SonomaVegMap LIDAR data
-http://sonomavegmap.org/data-downloads/
-```{r}
-vegmap_sonoma <- 
-  st_read('D:/Research/_gis/California/_structures/CartographicBuildingFootprints/CartographicBuildingFootprints.gdb',
-          layer = 'CartographicBuildingFootprints', quiet = TRUE) %>% 
-  st_transform(st_crs(sonoma)) %>% st_centroid
-
-```
-
-4. Sonoma County GIS building outlines
-https://gis-sonomacounty.hub.arcgis.com/datasets/0f5982c3582d4de0b811e68d7f0bff8f
-```{r}
+# 4. Sonoma County GIS building outlines
+# https://gis-sonomacounty.hub.arcgis.com/datasets/0f5982c3582d4de0b811e68d7f0bff8f
 bldg_sonoma <- st_read('https://socogis.sonomacounty.ca.gov/map/rest/services/BASEPublic/Buildings/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson', quiet = TRUE) %>% 
   st_transform(st_crs(sonoma))
 
-```
-
-5. Sonoma county parcels
-https://hub.arcgis.com/datasets/355b1002325d47e580d57c478778c97f_0
-https://gis-sonomacounty.hub.arcgis.com/datasets/parcels-public-shapefile (newer)
-```{r}
-## older version
-# parcels_old <-
+# 5. Sonoma county parcels
+# ## older version (https://hub.arcgis.com/datasets/355b1002325d47e580d57c478778c97f_0)
+# parcels_sonoma <-
 #   st_read('https://opendata.arcgis.com/datasets/355b1002325d47e580d57c478778c97f_0.geojson', quiet = TRUE) %>%
 #   st_transform(st_crs(sonoma))
-
-## newer version
-parcels_new <- 
+## newer version (https://gis-sonomacounty.hub.arcgis.com/datasets/parcels-public-shapefile)
+parcels_sonoma <- 
   st_read('https://opendata.arcgis.com/datasets/2202c1cd6708441f987ca5552f2d9659_0.geojson', quiet = TRUE) %>% 
   st_transform(st_crs(sonoma))
 
-```
-
-6. NSI 1.0
-```{r}
+# 6. NSI 1.0
 nsi1 <- read.csv('C:/Users/cbowers/Downloads/NSI1_Sonoma.csv/NSI1_sonoma.csv') %>%
   st_as_sf(coords = c('X', 'Y'), crs = st_crs(sonoma))
 
 ```
-
-
 
 compare all the datasets
 ```{r}
@@ -223,24 +204,27 @@ data.frame(
 ```
 
 ```{r}
-## update with Sonoma County GIS building + parcel information
-load('C:/Users/cbowers/OneDrive/classes/old/GEOLSCI240 data science for geoscience/geolsci240/hw5_checkpoint.Rdata')
-nonzero.buffer <- nonzero.buffer %>% 
+#### updated decision: use the data provided by Sonoma GIS
+
+## get nonzero.buffer from LISFLOOD.Rmd (6/1/21)
+nonzero.sf <- nonzero.buffer %>% 
+  raster.df %>% filter(value > 0) %>% 
+  rasterFromXYZ(crs = crs(nonzero.buffer)) %>% 
   rasterToPolygons %>% 
-  st_as_sf %>%
-  st_union %>% 
+  st_as_sf %>% st_union %>% 
   st_transform(st_crs(sonoma))
-crs_ca2 <- '+proj=lcc +lat_1=38.33333333333334 +lat_2=39.83333333333334 +lat_0=37.66666666666666 +lon_0=-122 +x_0=2000000 +y_0=500000.0000000002 +datum=NAD83 +units=us-ft +no_defs' 
-bldg_buffer <- bldg_sonoma[nonzero.buffer,] %>% 
-  st_transform(crs_ca2) %>% mutate(bldg_sqft = st_area(.)) %>% 
+
+bldg_buffer <- bldg_sonoma[nonzero.sf,] %>% 
+  st_transform(6418) %>% 
+  mutate(bldg_sqft = st_area(.)) %>% 
   st_transform(st_crs(sonoma)) %>% st_centroid
-# parcels_buffer <- parcels_new[nonzero.buffer,] %>% st_buffer(0)
+parcels_buffer <- parcels_new[nonzero.sf,] %>% st_buffer(0)
 
 ## intersect
 buildings <- st_intersection(bldg_buffer, parcels_buffer)
 
-## what's going on with the weird points?
-buildings <- buildings %>% filter(st_coordinates(.)[,1] != 0 & st_coordinates(.)[,2] != 0)
+# ## what's going on with the weird points?
+# buildings <- buildings %>% filter(st_coordinates(.)[,1] != 0 & st_coordinates(.)[,2] != 0)
 
 ```
 
@@ -294,9 +278,165 @@ res.buildings <- res.buildings %>%
 ```
 
 ```{r}
+## add CT information
+res.buildings <- res.buildings %>% 
+  st_intersection(sonoma %>% select(GEOID)) %>% 
+  mutate(GEOID = toNumber(GEOID))
+
+## collapse geospatial info to save as data.frame
+res.buildings <- res.buildings %>% 
+  st_drop_geometry %>% 
+  cbind(st_coordinates(res.buildings))
+
+```
+
+```{r}
+## find ACS median value of owner-occupied units by census tract
+require(censusapi)
+Sys.setenv(CENSUS_KEY = 'f2e090156b02ced027d4ed756f82c9a3a1aa38c9')
+acs <- 
+  getCensus(name = "acs/acs5", vintage = 2018, region = "tract:*", 
+            regionin = "state:06+county:097", vars = "group(B25077)") %>%
+  mutate(GEOID = paste0(state, county, tract) %>% toNumber) %>% 
+  select(-c(GEO_ID, state, county, tract, NAME)) %>% 
+  transmute(GEOID, value = B25077_001E, MOE = B25077_001M) %>% 
+  mutate(sd = MOE/qnorm(0.95)) %>% 
+  filter(value > 0)
+
+# ## merge with building data
+# res.buildings %>% 
+#   st_intersection(sonoma %>% select(GEOID)) %>% 
+#   mutate(GEOID = toNumber(GEOID)) %>% 
+#   left_join(acs %>% transmute(CT_median = value, CT_sd = sd, GEOID), by = 'GEOID')
+
+```
+
+```{r}
+## compare to building data
+acs.buildings <- res.buildings %>%
+  # st_drop_geometry %>%
+  # filter(V601Stru < 2e6) %>% 
+  group_by(GEOID) %>%
+  summarize(sonoma_median = median(V601TotalL, na.rm = TRUE),
+            sonoma_lower = quantile(V601TotalL, 0.05, na.rm = TRUE),
+            sonoma_upper = quantile(V601TotalL, 0.95, na.rm = TRUE),
+            sonoma_sd = sd(V601TotalL, na.rm = TRUE)) %>%
+  mutate(GEOID = toNumber(GEOID)) %>%
+  filter(sonoma_median < 1e6) %>%
+  left_join(acs %>% transmute(acs_median = value, acs_90 = MOE, acs_sd = sd, GEOID), by = 'GEOID') 
+
+ggplot(acs.buildings) +
+  geom_segment(aes(y = acs_median-acs_90, yend = acs_median+acs_90,
+                   x = sonoma_median, xend = sonoma_median), color = 'grey70') + 
+  geom_segment(aes(y = acs_median, yend = acs_median, 
+                   x = sonoma_lower, xend = sonoma_upper), color = 'grey70') + 
+  geom_point(aes(x = sonoma_median, y = acs_median)) +
+  scale_y_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+                 labels = comma_format(prefix = '$', suffix = 'M', scale = 1e-6, accuracy = 0.1)) +
+  scale_x_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+                 labels = comma_format(prefix = '$', suffix = 'M', scale = 1e-6, accuracy = 0.1)) +
+  geom_parity() + coord_fixed()
+
+res.buildings %>% 
+  filter(V601TotalL < 1e7) %>% 
+  left_join(acs, by = 'GEOID') %>% 
+  ggplot() + 
+  geom_point(aes(x = V601TotalL, y = value)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity()
+
+require(ggridges)
+ggplot(res.buildings %>% filter(V601TotalL < 3e6) %>% left_join(acs, by = 'GEOID')) +
+  geom_density_ridges(aes(x = V601TotalL, y = value, group = GEOID, fill = GEOID),
+                      alpha = 0.5, color = NA) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity()
+
+ggplot(acs.buildings) + 
+  geom_point(aes(x = acs_sd, y = sonoma_sd)) + 
+  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
+
+
+sd(res.buildings %>% filter(V601TotalL < 1e7) %>% .$V601TotalL) %>% comma(accuracy = 1)
+mean(res.buildings %>% filter(V601TotalL < 1e7) %>% .$V601TotalL) %>% comma(accuracy = 1)
+median(res.buildings %>% filter(V601TotalL < 1e7) %>% .$V601TotalL) %>% comma(accuracy = 1)
+
+```
+
+```{r}
+# parcels_new <- parcels_new %>% st_centroid %>% st_intersection(sonoma %>% select(GEOID))
+# parcels_new %>%
+#   st_drop_geometry %>%
+#   group_by(GEOID) %>%
+#   summarize(median_value = median(V601Stru+V601Fix, na.rm = TRUE), .groups = 'drop') %>%
+#   select(GEOID, median_value) %>%
+#   mutate(GEOID = toNumber(GEOID)) %>%
+#   filter(median_value < 1e6) %>%
+#   left_join(acs %>% rename(median_acs = value, sd_acs = sd), by = 'GEOID') %>%
+#   ggplot() +
+#   geom_point(aes(x = median_acs, y = median_value)) +
+#   scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+#                  labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+#   scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+#                  labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+#   # scale_x_log10() + scale_y_log10() +
+#   geom_parity()
+# parcels_new %>%
+#   st_drop_geometry %>%
+#   group_by(GEOID) %>%
+#   summarize(median_value = median(V601TotalL, na.rm = TRUE), 
+#             sd_value = sd(V601TotalL, na.rm = TRUE), .groups = 'drop') %>%
+#   select(GEOID, median_value, sd_value) %>%
+#   mutate(GEOID = toNumber(GEOID)) %>%
+#   filter(median_value < 1e6) %>%
+#   left_join(acs %>% rename(median_acs = value, sd_acs = sd), by = 'GEOID') %>%
+#   ggplot() +
+#   geom_segment(aes(x = median_acs-sd_acs, xend = median_acs+sd_acs, 
+#                    y = median_value, yend = median_value), color = 'grey70') + 
+#   # geom_segment(aes(x = median_acs, xend = median_acs, 
+#   #                  y = median_value-sd_value, yend = median_value+sd_value), color = 'grey70') + 
+#   geom_point(aes(x = median_acs, y = median_value)) +
+#   scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
+#                  labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+#   scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
+#                  labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
+#   # scale_x_log10() + scale_y_log10() +
+#   geom_parity() + theme_classic()
+# 
+# temp <- parcels_new %>%
+#   st_drop_geometry %>%
+#   group_by(GEOID) %>%
+#   summarize(median_value = median(V601TotalL, na.rm = TRUE), .groups = 'drop') %>%
+#   select(GEOID, median_value) %>%
+#   mutate(GEOID = toNumber(GEOID)) %>%
+#   filter(median_value < 1e6) %>%
+#   left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID')
+# 
+# lm(median_value ~ median_acs+0, data = temp)
+
+## conclusions: the full value of the structure + land is more accurate, 
+## and it looks really good if you apply a multiplicative conversion factor
+
+```
+
+```{r}
+## add valuation uncertainty info
+res.buildings <- res.buildings %>% 
+  filter(V601TotalL < 1e7) %>% 
+  group_by(GEOID) %>% 
+  summarize(value_sd = sd(V601TotalL)) %>% 
+  left_join(res.buildings, ., by = 'GEOID')
+
+## save out
+buildings.save <- buildings
+buildings <- res.buildings
+save(buildings, file = 'C:/Users/cbowers/Desktop/buildings.Rdata')
+
+```
+
+```{r}
 #### match to NSI information 
 
-## summarize NSI foundation info by CBG
+## summarize NSI foundation info by CT
 nsi1.found <- nsi1 %>% 
   st_intersection(sonoma) %>% 
   st_drop_geometry #%>% 
@@ -314,128 +454,24 @@ nsi1.found[,-1] <- nsi1.found[,-1] / apply(nsi1.found[,-1], 1, sum)
 
 save(nsi1.found, file = 'C:/Users/cbowers/Desktop/foundations.Rdata')
 
-## randomly assign foundation info to buildings
-res.buildings <- res.buildings %>% 
-  st_intersection(sonoma_cbgs %>% select(GEOID))
-found <- names(nsi1.found)[-1]
-for (geoid in unique(res.buildings$GEOID)) {
-  n <- res.buildings %>% st_drop_geometry %>% filter(GEOID == geoid) %>% nrow
-  res.buildings[res.buildings$GEOID == geoid, c('found_type', 'found_ht')] <- 
-    nsi1.found %>% 
-    filter(GEOID == geoid) %>% 
-    .[,-1] %>% 
-    sample(x = found, size = n, prob = ., replace = TRUE) %>% 
-    str_split(pattern = '_') %>% 
-    do.call(rbind, .) %>% 
-    as.data.frame %>% 
-    set_names(c('found_type', 'found_ht')) %>% 
-    mutate(found_type = paste(found_type), 
-           found_ht = toNumber(found_ht))
-}
-
-```
-
-```{r}
-## find ACS median value of owner-occupied units by census tract
-require(censusapi)
-Sys.setenv(CENSUS_KEY = 'f2e090156b02ced027d4ed756f82c9a3a1aa38c9')
-acs <- 
-  getCensus(name = "acs/acs5", vintage = 2018, region = "tract:*", 
-            regionin = "state:06+county:097", vars = "group(B25077)") %>%
-  mutate(GEOID = paste0(state, county, tract) %>% toNumber) %>% 
-  select(-c(GEO_ID, state, county, tract, NAME)) %>% 
-  transmute(GEOID, value = B25077_001E, MOE = B25077_001M) %>% 
-  mutate(sd = MOE/qnorm(0.95)) %>% 
-  filter(value > 0)
-
-## merge with building data
-res.buildings %>% 
-  st_intersection(sonoma %>% select(GEOID)) %>% 
-  mutate(GEOID = toNumber(GEOID)) %>% 
-  left_join(acs %>% transmute(CT_median = value, CT_sd = sd, GEOID), by = 'GEOID')
-
-## save out
-save(res.buildings, file = 'C:/Users/cbowers/Desktop/buildings.Rdata')
-
-```
-
-```{r}
-## compare to building data
-res.buildings %>%
-  st_drop_geometry %>%
-  group_by(GEOID) %>%
-  summarize(median_value = median(V601Stru, na.rm = TRUE), .groups = 'drop') %>%
-  select(GEOID, median_value) %>%
-  mutate(GEOID = toNumber(GEOID)) %>%
-  filter(median_value < 1e6) %>%
-  left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID') %>%
-  ggplot() +
-  geom_point(aes(x = median_acs, y = median_value)) +
-  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
-                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
-  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
-                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
-  # scale_x_log10() + scale_y_log10() +
-  geom_parity()
-  
-parcels_new <- parcels_new %>% st_centroid %>% st_intersection(sonoma %>% select(GEOID))
-parcels_new %>%
-  st_drop_geometry %>%
-  group_by(GEOID) %>%
-  summarize(median_value = median(V601Stru+V601Fix, na.rm = TRUE), .groups = 'drop') %>%
-  select(GEOID, median_value) %>%
-  mutate(GEOID = toNumber(GEOID)) %>%
-  filter(median_value < 1e6) %>%
-  left_join(acs %>% rename(median_acs = value, sd_acs = sd), by = 'GEOID') %>%
-  ggplot() +
-  geom_point(aes(x = median_acs, y = median_value)) +
-  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
-                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
-  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
-                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
-  # scale_x_log10() + scale_y_log10() +
-  geom_parity()
-parcels_new %>%
-  st_drop_geometry %>%
-  group_by(GEOID) %>%
-  summarize(median_value = median(V601TotalL, na.rm = TRUE), 
-            sd_value = sd(V601TotalL, na.rm = TRUE), .groups = 'drop') %>%
-  select(GEOID, median_value, sd_value) %>%
-  mutate(GEOID = toNumber(GEOID)) %>%
-  filter(median_value < 1e6) %>%
-  left_join(acs %>% rename(median_acs = value, sd_acs = sd), by = 'GEOID') %>%
-  ggplot() +
-  geom_segment(aes(x = median_acs-sd_acs, xend = median_acs+sd_acs, 
-                   y = median_value, yend = median_value), color = 'grey70') + 
-  # geom_segment(aes(x = median_acs, xend = median_acs, 
-  #                  y = median_value-sd_value, yend = median_value+sd_value), color = 'grey70') + 
-  geom_point(aes(x = median_acs, y = median_value)) +
-  scale_x_origin(name = 'ACS 2018 5-yr Median Value for \nOwner-Occupied Housing Units (B25077)',
-                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
-  scale_y_origin(name = 'Median Value of Sonoma County \nTax Assessor Roll',
-                 labels = comma_format(prefix = '$', suffix = 'K', scale = 1e-3)) +
-  # scale_x_log10() + scale_y_log10() +
-  geom_parity() + theme_classic()
-
-temp <- parcels_new %>%
-  st_drop_geometry %>%
-  group_by(GEOID) %>%
-  summarize(median_value = median(V601TotalL, na.rm = TRUE), .groups = 'drop') %>%
-  select(GEOID, median_value) %>%
-  mutate(GEOID = toNumber(GEOID)) %>%
-  filter(median_value < 1e6) %>%
-  left_join(acs %>% select(-variable) %>% rename(median_acs = value), by = 'GEOID')
-
-lm(median_value ~ median_acs+0, data = temp)
-
-## conclusions: the full value of the structure + land is more accurate, 
-## and it looks really good if you apply a multiplicative conversion factor
-
-```
-
-```{r}
-ggplot(buildings %>% mutate(id = 1:nrow(.))) + 
-  geom_sf(aes(color = id==11654))
+# ## randomly assign foundation info to buildings
+# res.buildings <- res.buildings %>% 
+#   st_intersection(sonoma_cbgs %>% select(GEOID))
+# found <- names(nsi1.found)[-1]
+# for (geoid in unique(res.buildings$GEOID)) {
+#   n <- res.buildings %>% st_drop_geometry %>% filter(GEOID == geoid) %>% nrow
+#   res.buildings[res.buildings$GEOID == geoid, c('found_type', 'found_ht')] <- 
+#     nsi1.found %>% 
+#     filter(GEOID == geoid) %>% 
+#     .[,-1] %>% 
+#     sample(x = found, size = n, prob = ., replace = TRUE) %>% 
+#     str_split(pattern = '_') %>% 
+#     do.call(rbind, .) %>% 
+#     as.data.frame %>% 
+#     set_names(c('found_type', 'found_ht')) %>% 
+#     mutate(found_type = paste(found_type), 
+#            found_ht = toNumber(found_ht))
+# }
 
 ```
 

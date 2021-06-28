@@ -225,6 +225,48 @@ generate_AR_catalog <- function(aoi, gauge, ar.threshold = 0.5) {
     as.data.frame %>% 
     left_join(as.data.frame(catalog), ., by = 'AR')
   
+  print('getting time to peak information...')
+  
+  #### insert here ####
+  
+  print('getting soil moisture information...')
+  
+  ## open soil moisture file
+  soil_nc <- nc_open('D:/Research/_data/soilmoisture/soilw.mon.mean.v2.nc')
+  soil_lat <- ncvar_get(soil_nc, 'lat')
+  soil_lon <- ncvar_get(soil_nc, 'lon') - 180
+  soil_time <- ymd('1800-01-01') + days(ncvar_get(soil_nc, 'time'))
+  soil_time <- data.frame(month = month(soil_time), year = year(soil_time))
+  soil <- ncvar_get(soil_nc, 'soilw')
+  nc_close(soil_nc)
+  
+  ## attach soil moisture information to catalog events
+  catalog <- catalog %>% mutate(sm = NA)
+  pb <- txtProgressBar(min = 0, max = nrow(catalog), style = 3)
+  for (ar in 1:nrow(catalog)) {
+    start <- catalog$start_day[ar]
+    end <- catalog$end_day[ar]
+    
+    SM_stack <- raster::stack()
+    monthrecord <- ifelse(month(start) <= month(end),
+                          length(month(start):month(end)),
+                          length((month(start)-12):month(end))) - 1
+    startmonth <- ymd(paste(year(start), month(start), '1', sep = '-'))
+    for (i in 0:monthrecord) {
+      mo <- month(startmonth + months(i))
+      yr <- year(startmonth + months(i))
+      index <- (1:nrow(soil_time))[soil_time$month == mo & soil_time$year == yr]
+      SM_raster <- raster(t(soil[,,index]), xmn = min(soil_lon), xmx = max(soil_lon), 
+                          ymn = min(soil_lat), ymx = max(soil_lat))
+      SM_stack <- raster::stack(SM_stack, SM_raster)
+    }
+    SM_avg <- mean(SM_stack)
+    crs(SM_avg) <- projection(california)
+    
+    catalog$sm[ar] <- exact_extract(SM_avg, aoi %>% st_transform(crs(SM_avg)), fun = 'mean')
+    setTxtProgressBar(pb, ar)
+  }
+  
   ## keep only good records in the catalog
   # catalog.save <<- catalog
   catalog <- catalog %>% 
@@ -272,22 +314,17 @@ generate_AR <- function(catalog, n.AR = 1, intensity.threshold = 0.9) {
 
   z <- z %>%
     mutate(id = temp %>% apply(1, function(x) rep(x[1], x[2]+x[3])) %>% unlist %>% c,
-           rank1 = rank(V1), rank2 = rank(V2))
-  z$rank <- rowMeans(z[,c('rank1', 'rank2')])
-  z <- z %>%
+           rank1 = rank(V1), rank2 = rank(V2)) %>% 
+    mutate(rank = rowMeans(select(., rank1, rank2))) %>% 
     group_by(id) %>%
-    summarize(index = which.max(rank),
-              v1 = V1[index], v2 = V2[index]) %>%
-    dplyr::select(v1, v2) %>%
-    as.matrix
+    summarize(index = which.max(rank), v1 = V1[index], v2 = V2[index]) %>%
+    dplyr::select(v1, v2) %>% as.matrix
   u <- pnorm(z)
-  AR <- data.frame(n.AR = 1:n.AR,
-                   duration = qlnorm(u[,1],
-                                     meanlog = param_duration['meanlog'],
-                                     sdlog = param_duration['sdlog']),
-                   IVT_max = qgumbel(u[,2],
-                                     loc = param_IVT['alpha'],
-                                     scale = param_IVT['scale']))
+  AR <- data.frame(
+    n.AR = 1:n.AR,
+    duration = qlnorm(u[,1], meanlog = param_duration['meanlog'], sdlog = param_duration['sdlog']),
+    IVT_max = qgumbel(u[,2], loc = param_IVT['alpha'], scale = param_IVT['scale'])) %>% 
+    mutate(sm = NA)
   return(AR)
 }
 

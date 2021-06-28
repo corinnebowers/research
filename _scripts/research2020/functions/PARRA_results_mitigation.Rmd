@@ -1,0 +1,34 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+## step 1: define the 100-year event
+
+## is the NFHL anywhere close to what USGS thinks the 100-year event is? 
+## no stage-discharge rating curve to translate --> no way to know
+
+## go to LISFLOOD.Rmd to find the best-fit LISFLOOD rp100 model
+load('C:/Users/cbowers/Desktop/NFHL.Rdata')
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+load('C:/Users/cbowers/Desktop/dem_save.Rdata')
+
+## use id = 678
+waterht <- raster('D:/Research/_sherlock/1. PARRA/mitigation/rpflow678.max', crs = projection(aoi))
+waterelev <- raster('D:/Research/_sherlock/1. PARRA/mitigation/rpflow678.mxe', crs = projection(aoi))
+
+## double-check numbers
+plot(waterelev == dem + waterht)
+
+## extract new building heights
+buildings$raised_m <- buildings %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = 4269) %>% 
+  st_transform(6417) %>% 
+  st_coordinates %>% 
+  terra::extract(rast(waterht), .) %>% unlist
+
+
+
+```
+

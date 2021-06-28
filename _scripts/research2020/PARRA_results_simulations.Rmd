@@ -1,0 +1,1223 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+###################################################################################################
+
+goal of this document: to figure out why setting n = a different number of realizations 
+changes the loss distribution
+
+answer: it was because applying a basement foundation in G(DM) created "fake" nonzero water depths
+at structures far away from flooding
+
+###################################################################################################
+
+
+plot PRCP vs. loss and Q vs. loss for all years 
+```{r}
+## is there a universal relationship?
+folder <- 'mc_beta'
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp4/PRCP.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp4/Q.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp4/DV.Rdata'))
+loss1995 <- loss.sim %>% 
+  full_join(precip %>% select(n.precip, IVT_max, duration, precip_mm),
+            by = 'n.precip') %>%
+  full_join(hydrograph %>% select(n.precip, n.runoff, n.hydro, runoff_mm, Qp_m3s, tp_hrs), 
+            by = c('n.precip', 'n.runoff', 'n.hydro')) %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss))
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp4/PRCP.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp4/Q.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp4/DV.Rdata'))
+loss2006 <- loss.sim %>% 
+  full_join(precip %>% select(n.precip, IVT_max, duration, precip_mm),
+            by = 'n.precip') %>%
+  full_join(hydrograph %>% select(n.precip, n.runoff, n.hydro, runoff_mm, Qp_m3s, tp_hrs), 
+            by = c('n.precip', 'n.runoff', 'n.hydro')) %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss))
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp4/PRCP.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp4/Q.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp4/DV.Rdata'))
+loss2019 <- loss.sim %>% 
+  full_join(precip %>% select(n.precip, IVT_max, duration, precip_mm),
+            by = 'n.precip') %>%
+  full_join(hydrograph %>% select(n.precip, n.runoff, n.hydro, runoff_mm, Qp_m3s, tp_hrs), 
+            by = c('n.precip', 'n.runoff', 'n.hydro')) %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss))
+
+alpha <- 0.1 #1, 0.5, 0.1, 0.01
+g1 <- ggplot() + 
+  geom_point(data = loss1995, aes(x = precip_mm, y = loss, color = '1995'), alpha = alpha) + 
+  geom_point(data = loss2006, aes(x = precip_mm, y = loss, color = '2006'), alpha = alpha) + 
+  geom_point(data = loss2019, aes(x = precip_mm, y = loss, color = '2019'), alpha = alpha) + 
+  scale_x_origin('Precipitation (in)', labels = comma_format(scale = 1/25.4, accuracy = 1), 
+                 breaks = seq(0, 50*25.4, 5*25.4)) + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  scale_color_manual('Year', values = baker[1:3],
+    guide = guide_legend(override.aes = list(alpha = 1, size = 2))) + 
+  coord_cartesian(xlim = c(0,30*25.4), ylim = c(0, 750e6), clip = 'off')
+g2 <- ggplot() + 
+  geom_point(data = loss1995, aes(x = Qp_m3s, y = loss, color = '1995'), alpha = alpha) + 
+  geom_point(data = loss2006, aes(x = Qp_m3s, y = loss, color = '2006'), alpha = alpha) + 
+  geom_point(data = loss2019, aes(x = Qp_m3s, y = loss, color = '2019'), alpha = alpha) + 
+  scale_x_origin('Streamflow (m3/s)', labels = comma) + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  scale_color_manual('Year', values = baker[1:3],
+    guide = guide_legend(override.aes = list(alpha = 1, size = 2))) + 
+  coord_cartesian(xlim = c(0, 2500), ylim = c(0, 750e6), clip = 'off')
+ggarrange(g1, g2, ncol = 2, common.legend = TRUE, legend = 'bottom')
+
+
+```
+
+plot histograms of loss vs. number of simulations
+```{r}
+### test the effect of # of simulations
+folder <- 'mc_beta'
+
+## 2019
+year <- 2019
+year.id <- 459
+loss.est <- 91.6 * 1e6
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp2/DV.Rdata')); loss.1e2 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp3/DV.Rdata')); loss.1e3 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp4/DV.Rdata')); loss.1e4 <- loss.sim
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/', folder, '/prcp5/DV.Rdata')); loss.1e5 <- loss.sim
+ggplot() + 
+  geom_density(data = loss.1e2, aes(x = loss, y = ..density.., fill = '1e2'), alpha = 0.5) + 
+  geom_density(data = loss.1e3, aes(x = loss, y = ..density.., fill = '1e3'), alpha = 0.5) + 
+  geom_density(data = loss.1e4, aes(x = loss, y = ..density.., fill = '1e4'), alpha = 0.5) +
+  # geom_density(data = loss.1e5, aes(x = loss, y = ..density.., fill = '1e5'), alpha = 0.5) +
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_x_origin('Estimated Loss', 
+    labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M', accuracy = 1)) + 
+  scale_y_origin('Frequency of Occurrence') + 
+  ggtitle(paste0(year, ' Event')) + 
+  coord_cartesian(xlim = c(0, 200e6))
+
+## 2006
+year <- 2006
+year.id <- 249
+loss.est <- 64.7 * 1.28e6
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp2/DV.Rdata')); loss.1e2 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp3/DV.Rdata')); loss.1e3 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp4/DV.Rdata')); loss.1e4 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2006/', folder, '/prcp5/DV.Rdata')); loss.1e5 <- loss.sim
+ggplot() + 
+  geom_density(data = loss.1e2, aes(x = loss, y = ..density.., fill = '1e2'), alpha = 0.5) + 
+  geom_density(data = loss.1e3, aes(x = loss, y = ..density.., fill = '1e3'), alpha = 0.5) + 
+  geom_density(data = loss.1e4, aes(x = loss, y = ..density.., fill = '1e4'), alpha = 0.5) +
+  geom_density(data = loss.1e5, aes(x = loss, y = ..density.., fill = '1e5'), alpha = 0.5) +
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_x_origin('Estimated Loss', 
+    labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M', accuracy = 1)) + 
+  scale_y_origin('Frequency of Occurrence') + 
+  ggtitle(paste0(year, ' Event')) + 
+  coord_cartesian(xlim = c(0, 300e6))
+
+## 1995
+year <- 1995
+year.id = 89
+loss.est <- 30.5 * 1.68e6
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp2/DV.Rdata')); loss.1e2 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp3/DV.Rdata')); loss.1e3 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp4/DV.Rdata')); loss.1e4 <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_1995/', folder, '/prcp5/DV.Rdata')); loss.1e5 <- loss.sim
+ggplot() + 
+  geom_density(data = loss.1e2, aes(x = loss, y = ..density.., fill = '1e2'), alpha = 0.5) + 
+  geom_density(data = loss.1e3, aes(x = loss, y = ..density.., fill = '1e3'), alpha = 0.5) + 
+  geom_density(data = loss.1e4, aes(x = loss, y = ..density.., fill = '1e4'), alpha = 0.5) +
+  geom_density(data = loss.1e5, aes(x = loss, y = ..density.., fill = '1e5'), alpha = 0.5) +
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_x_origin('Estimated Loss', 
+    labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M', accuracy = 1)) + 
+  scale_y_origin('Frequency of Occurrence') + 
+  ggtitle(paste0(year, ' Event')) + 
+  coord_cartesian(xlim = c(0, 500e6))
+
+
+```
+plot histograms of PRCP & Q vs. number of simulations
+```{r}
+year <- 2019
+year.id <- 459
+loss.est <- 91.6 * 1e6
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/PRCP.Rdata')); prcp.1e2 <- precip
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/PRCP.Rdata')); prcp.1e3 <- precip
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/PRCP.Rdata')); prcp.1e4 <- precip
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/PRCP.Rdata')); prcp.1e5 <- precip
+ggplot() + 
+  geom_density(data = prcp.1e2, aes(x = precip_mm, y = ..density.., fill = '1e2'), alpha = 0.5) + 
+  geom_density(data = prcp.1e3, aes(x = precip_mm, y = ..density.., fill = '1e3'), alpha = 0.5) + 
+  geom_density(data = prcp.1e4, aes(x = precip_mm, y = ..density.., fill = '1e4'), alpha = 0.5) + 
+  geom_density(data = prcp.1e5, aes(x = precip_mm, y = ..density.., fill = '1e5'), alpha = 0.5) + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_x_origin('Precipitation (in)', labels = comma_format(scale = 1/25.4, accuracy = 1), 
+                 breaks = seq(0, 20*25.4, 25.4)) + 
+  scale_y_origin('Frequency of Occurrence') + 
+  ggtitle(paste0(year, ' Event')) 
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/Q.Rdata')); q.1e2 <- hydrograph
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/Q.Rdata')); q.1e3 <- hydrograph
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/Q.Rdata')); q.1e4 <- hydrograph
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/Q.Rdata')); q.1e5 <- hydrograph
+ggplot() + 
+  geom_density(data = q.1e2, aes(x = Qp_m3s, y = ..density.., fill = '1e2'), alpha = 0.5) + 
+  geom_density(data = q.1e3, aes(x = Qp_m3s, y = ..density.., fill = '1e3'), alpha = 0.5) + 
+  geom_density(data = q.1e4, aes(x = Qp_m3s, y = ..density.., fill = '1e4'), alpha = 0.5) + 
+  geom_density(data = q.1e5, aes(x = Qp_m3s, y = ..density.., fill = '1e5'), alpha = 0.5) + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_x_origin('Streamflow (m3/s)', labels = comma) + 
+  scale_y_origin('Frequency of Occurrence') + 
+  ggtitle(paste0(year, ' Event'))
+
+list(prcp.1e3, prcp.1e3, prcp.1e4, prcp.1e5) %>% 
+  lapply(function(x) range(x$precip_mm)/25.4) %>% 
+  reduce(rbind) %>% 
+  as.data.frame %>% 
+  setNames(c('min', 'max')) %>%
+  cbind(sim = paste0('1e', 2:5)) %>% 
+  remove_rownames %>% column_to_rownames('sim') %>% 
+  as.matrix
+
+list(q.1e2, q.1e3, q.1e4, q.1e5) %>% 
+  lapply(function(x) range(x$Qp_m3s)) %>% 
+  reduce(rbind) %>% 
+  as.data.frame %>% 
+  setNames(c('min', 'max')) %>%
+  cbind(sim = paste0('1e', 2:5)) %>% 
+  remove_rownames %>% column_to_rownames('sim') %>% 
+  as.matrix
+
+```
+
+plot scatterplots of building-level inundation by number of simulations
+```{r}
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/INUN.Rdata'))
+inun.1e2 <- inundation[[1]] %>% apply(1, median) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e2', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/INUN.Rdata'))
+inun.1e3 <- inundation[[1]] %>% apply(1, median) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e3', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/INUN.Rdata'))
+inun.1e4 <- inundation[[1]] %>% apply(1, median) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e4', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/INUN.Rdata'))
+inun.1e5 <- inundation[[1]] %>% apply(1, median) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e5', 'bldg.id'))
+inun <- list(inun.1e2, inun.1e3, inun.1e4, inun.1e5) %>% reduce(full_join, by = 'bldg.id')
+inun %>% 
+  mutate(mean.inun = inun %>% select(-bldg.id) %>% apply(1, Mean)) %>% 
+  arrange(mean.inun) %>% 
+  mutate(bldg.id = factor(bldg.id, levels = .$bldg.id)) %>% 
+  filter(mean.inun > 0) %>% 
+  select(-mean.inun) %>%
+  # filter(Sum(inun.1e2, )) %>% 
+  pivot_longer(cols = -bldg.id, names_to = 'sims', values_to = 'median.inun') %>%
+  mutate(sims = str_remove(sims, 'inun.')) %>%
+  ggplot() +
+  geom_point(aes(x = factor(bldg.id), y = median.inun, color = sims)) + 
+  ggtitle('2019 Event') + 
+  scale_x_discrete('Building ID') + 
+  scale_y_origin('Median Inundation (ft)') + 
+  scale_color_manual('Number of \nSimulations', values = baker) + 
+  theme(axis.text.x = element_blank())
+inun %>% 
+  pivot_longer(cols = -bldg.id, names_to = 'sims', values_to = 'median.inun') %>%
+  mutate(sims = str_remove(sims, 'inun.')) %>%
+  ggplot() +
+  geom_density(aes(x = median.inun, y = ..density.., group = sims, fill = sims),
+               alpha = 0.5) + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_x_origin() + scale_y_origin()
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/INUN.Rdata'))
+inun.1e2 <- inundation[[1]] %>% apply(1, max) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e2', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/INUN.Rdata'))
+inun.1e3 <- inundation[[1]] %>% apply(1, max) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e3', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/INUN.Rdata'))
+inun.1e4 <- inundation[[1]] %>% apply(1, max) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e4', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/INUN.Rdata'))
+inun.1e5 <- inundation[[1]] %>% apply(1, max) %>% 
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e5', 'bldg.id'))
+inun <- list(inun.1e2, inun.1e3, inun.1e4, inun.1e5) %>% reduce(full_join, by = 'bldg.id')
+g1 <- inun %>% 
+  mutate(mean.inun = inun %>% select(-bldg.id) %>% apply(1, Mean)) %>% 
+  arrange(mean.inun) %>% 
+  mutate(bldg.id = factor(bldg.id, levels = .$bldg.id)) %>% 
+  filter(mean.inun > 0) %>% 
+  select(-mean.inun) %>%
+  # filter(Sum(inun.1e2, )) %>% 
+  pivot_longer(cols = -bldg.id, names_to = 'sims', values_to = 'median.inun') %>%
+  mutate(sims = str_remove(sims, 'inun.')) %>%
+  ggplot() +
+  geom_point(aes(x = factor(bldg.id), y = median.inun, color = sims)) + 
+  ggtitle('2019 Event') + 
+  scale_x_discrete('Building ID') + 
+  scale_y_origin('Maximum Inundation (ft)') + 
+  scale_color_manual('Number of \nSimulations', values = baker) + 
+  coord_cartesian(clip = 'off') + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+g2 <- ggplot() + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e2)) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
+            aes(x = sort(inun.1e2), y = 1-p, color = '1e2'), size = 1) + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e3)) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
+            aes(x = sort(inun.1e3), y = 1-p, color = '1e3'), size = 1) + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e4)) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
+            aes(x = sort(inun.1e4), y = 1-p, color = '1e4'), size = 1) + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e5)) %>% mutate(p = (1:nrow(.))/(nrow(.)+1)),
+            aes(x = sort(inun.1e5), y = 1-p, color = '1e5'), size = 1) + 
+  scale_x_origin('Maximum Inundation (ft)') + 
+  scale_y_origin('Exceedance Probability') + 
+  scale_color_manual('Number of \nSimulations', values = baker)
+ggarrange(g1, g2, ncol = 2, common.legend = TRUE, legend = 'bottom')  
+
+ggplot() + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e2)) %>% mutate(p = 1:nrow(.)),
+            aes(x = sort(inun.1e2), y = p, color = '1e2'), size = 1) + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e3)) %>% mutate(p = 1:nrow(.)),
+            aes(x = sort(inun.1e3), y = p, color = '1e3'), size = 1) + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e4)) %>% mutate(p = 1:nrow(.)),
+            aes(x = sort(inun.1e4), y = p, color = '1e4'), size = 1) + 
+  geom_step(data = inun %>% filter(!is.na(inun.1e5)) %>% mutate(p = 1:nrow(.)),
+            aes(x = sort(inun.1e5), y = p, color = '1e5'), size = 1) + 
+  scale_x_origin('Maximum Inundation (ft)') + 
+  scale_y_origin('Cumulative Building Count') + 
+  scale_color_manual('Number of \nSimulations', values = baker)
+
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc/prcp2/INUN.Rdata'))
+inun.1e2 <- inundation[[1]] %>% apply(1, sd) %>%
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e2', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc/prcp3/INUN.Rdata'))
+inun.1e3 <- inundation[[1]] %>% apply(1, sd) %>%
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e3', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc/prcp4/INUN.Rdata'))
+inun.1e4 <- inundation[[1]] %>% apply(1, sd) %>%
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e4', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc/prcp5/INUN.Rdata'))
+inun.1e5 <- inundation[[1]] %>% apply(1, sd) %>%
+  cbind(attr(inundation, 'wet.bldg')) %>% as.data.frame %>% setNames(c('inun.1e5', 'bldg.id'))
+inun <- list(inun.1e2, inun.1e3, inun.1e4, inun.1e5) %>% reduce(full_join, by = 'bldg.id')
+inun %>%
+  mutate(mean.inun = inun %>% select(-bldg.id) %>% apply(1, Mean)) %>%
+  arrange(mean.inun) %>%
+  mutate(bldg.id = factor(bldg.id, levels = .$bldg.id)) %>%
+  filter(mean.inun > 1e-2) %>%
+  select(-mean.inun) %>%
+  pivot_longer(cols = -bldg.id, names_to = 'sims', values_to = 'median.inun') %>%
+  mutate(sims = str_remove(sims, 'inun.')) %>%
+  ggplot() +
+  geom_line(aes(x = factor(bldg.id), y = median.inun,
+                group = sims, color = sims), size = 1, alpha = 0.75) +
+  scale_x_discrete('Building ID') +
+  scale_y_origin('Standard Deviation of Inundation (ft)') +
+  scale_color_manual('Number of \nSimulations', values = baker) +
+  theme(axis.text.x = element_blank())
+
+```
+
+plot scatterplots of building-level damage vs. number of simulations
+```{r}
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp2/DM.Rdata'))
+dm.1e2 <- damage[[1]] %>% .[,1:(ncol(.)-3)] %>% apply(1, mean) %>% 
+  cbind(damage[[1]] %>% .[,ncol(.)]) %>% as.data.frame %>% setNames(c('dm.1e2', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp3/DM.Rdata'))
+dm.1e3 <- damage[[1]] %>% .[,1:(ncol(.)-3)] %>% apply(1, mean) %>% 
+  cbind(damage[[1]] %>% .[,ncol(.)]) %>% as.data.frame %>%  setNames(c('dm.1e3', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp4/DM.Rdata'))
+dm.1e4 <- damage[[1]] %>% .[,1:(ncol(.)-3)] %>% apply(1, mean) %>% 
+  cbind(damage[[1]] %>% .[,ncol(.)]) %>% as.data.frame %>% setNames(c('dm.1e4', 'bldg.id'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp5/DM.Rdata'))
+dm.1e5 <- damage[[1]] %>% .[,1:(ncol(.)-3)] %>% apply(1, mean) %>% 
+  cbind(damage[[1]] %>% .[,ncol(.)]) %>% as.data.frame %>% setNames(c('dm.1e5', 'bldg.id'))
+dmg <- list(dm.1e2, dm.1e3, dm.1e4, dm.1e5) %>% reduce(full_join, by = 'bldg.id')
+dmg %>% 
+  filter(!(dm.1e2 == 0 & dm.1e3 == 0 & dm.1e4 == 0 & dm.1e5 == 0)) %>% 
+  mutate(mean.dm = select(., -bldg.id) %>% apply(1, Mean)) %>% 
+  arrange(dm.1e5) %>% 
+  mutate(bldg.id = factor(bldg.id, levels = .$bldg.id)) %>% 
+  select(-mean.dm) %>%
+  pivot_longer(cols = -bldg.id, names_to = 'sims', values_to = 'median.dm') %>%
+  mutate(sims = str_remove(sims, 'dm.')) %>%
+  ggplot() +
+  geom_point(aes(x = factor(bldg.id), y = median.dm, color = sims)) + 
+  scale_x_discrete('Building ID') + 
+  scale_y_origin('Median Damage Ratio (%)') + 
+  scale_color_manual('Number of \nSimulations', values = baker) + 
+  coord_cartesian(clip = 'off') + 
+  theme(axis.text.x = element_blank())
+dmg %>% 
+  filter(!(dm.1e2 == 0 & dm.1e3 == 0 & dm.1e4 == 0 & dm.1e5 == 0)) %>% 
+  pivot_longer(cols = -bldg.id, names_to = 'sims', values_to = 'median.dm') %>%
+  mutate(sims = str_remove(sims, 'dm.')) %>%
+  ggplot() +
+  geom_density(aes(x = median.dm, y = ..density.., group = sims, fill = sims),
+               alpha = 0.5) + 
+  scale_fill_manual('Number of \nSimulations', values = baker) + 
+  scale_y_origin() + 
+  scale_x_continuous(limits = c(0,1), expand = c(0.01,0.01))
+
+# dmg.filter <- dmg %>% filter(!(dm.1e2 == 0 & dm.1e3 == 0 & dm.1e4 == 0 & dm.1e5 == 0))
+ggplot() + 
+  geom_line(data = dmg %>% filter(!is.na(dm.1e2)) %>% 
+              mutate(p = (1:nrow(.))/(nrow(.)+1)), 
+            aes(x = sort(dm.1e2), y = 1-p, color = '1e2'), size = 1) + 
+  geom_line(data = dmg %>% filter(!is.na(dm.1e3)) %>% 
+              mutate(p = (1:nrow(.))/(nrow(.)+1)), 
+            aes(x = sort(dm.1e3), y = 1-p, color = '1e3'), size = 1) + 
+  geom_line(data = dmg %>% filter(!is.na(dm.1e4)) %>% 
+              mutate(p = (1:nrow(.))/(nrow(.)+1)), 
+            aes(x = sort(dm.1e4), y = 1-p, color = '1e4'), size = 1) + 
+  geom_line(data = dmg %>% filter(!is.na(dm.1e5)) %>% 
+              mutate(p = (1:nrow(.))/(nrow(.)+1)), 
+            aes(x = sort(dm.1e5), y = 1-p, color = '1e5'), size = 1) + 
+  scale_x_origin('Mean Damage Ratio', labels = percent_format(accuracy = 1)) + 
+  scale_y_origin('Exceedance Probability') + 
+  scale_color_manual('Number of \nSimulations', values = baker) + 
+  coord_cartesian(ylim = c(0, 0.5))
+
+```
+
+plot general HAZUS & Wing et al. damage functions
+```{r}
+g1 <- hazus %>% 
+  mutate(xmin = cbind(x1,x2,x3,x4,x5,x6) %>% apply(1, min),
+         xmax = cbind(x1,x2,x3,x4,x5,x6) %>% apply(1, max)) %>% 
+  ggplot() + 
+  pammtools::geom_stepribbon(aes(x = ft, ymin = xmin, ymax = xmax),
+                             fill = 'grey80') + 
+  geom_step(aes(x = ft, y = x1), size = 1) + 
+  geom_line(data = beta.dist, aes(x = water_ft, y = mu*100), 
+            linetype = 'dotted', size = 1) + 
+  ggtitle('HAZUS Damage Distributions') + 
+  scale_x_continuous('Inundation Height (ft)',
+                     expand = c(0.01,0.01), breaks = seq(-20, 50, 5)) + 
+  scale_y_origin('Damage Ratio', labels = comma_format(suffix = '%')) + 
+  coord_cartesian(xlim = c(-10,20))
+
+wing2020 <- data.frame(water_ft = c(1:5,7), 
+                       alpha = c(0.42, 0.48, 0.49, 0.53, 0.68, 0.80),
+                       beta = c(0.80, 0.65, 0.52, 0.41, 0.42, 0.38))
+
+plots <- matrix(nrow = 100, ncol = nrow(wing2020))
+for (i in 1:nrow(wing2020)) {
+  plots[,i] <- dbeta(seq(1e-6, 1-1e-6, length.out = 100), 
+                     shape1 = wing2020$alpha[i], shape2 = wing2020$beta[1])
+}
+g2 <- plots %>% 
+  as.data.frame %>% setNames(wing2020$water_ft) %>% 
+  cbind(damage = seq(1e-6, 1-1e-6, length.out = 100)) %>% 
+  pivot_longer(cols = -damage, names_to = 'ft', values_to = 'prob') %>% 
+  mutate(ft = toNumber(ft)) %>% 
+  ggplot() + 
+  geom_line(aes(x = damage, y = prob, group = ft, color = factor(ft)), size = 1) + 
+  ggtitle('Wing et al. (2020) Damage Distributions') + 
+  scale_x_continuous('Damage Ratio', limits = c(0,1), expand = c(0,0),
+                     labels = percent_format(accuracy = 1)) + 
+  scale_y_origin('Probability') + 
+  scale_color_scico_d('Inundation \nHeight (ft)', palette = 'berlin') + 
+  coord_cartesian(ylim = c(0,5))
+
+ggarrange(g1, g2, ncol = 2)
+ggsave('temp.jpg', width = 10, height = 5)
+
+```
+
+plot exceedance plots of damage levels
+```{r}
+## look at damages for n.precip = 1:100
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/DM.Rdata'))
+dm.1e2 <- damage[[1]] %>% .[,-(ncol(.)-(1:2))] %>% 
+  pivot_longer(cols = -bldg, names_to = 'sim', values_to = 'dm.1e2') %>% 
+  mutate(sim = str_remove(sim, 'X') %>% toNumber) %>% 
+  left_join(attr(damage, 'sim') %>% mutate(sim = 1:nrow(.)), by = 'sim') %>% 
+  select(n.precip, bldg, dm.1e2)
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/DM.Rdata'))
+dm.1e3 <- damage[[1]] %>% 
+  .[,c(which(attr(damage, 'sim')$n.precip <= 100), ncol(.))] %>% 
+  filter((select(., -bldg) %>% rowSums) > 0) %>% 
+  pivot_longer(cols = -bldg, names_to = 'sim', values_to = 'dm.1e3') %>% 
+  mutate(sim = str_remove(sim, 'X') %>% toNumber) %>% 
+  left_join(attr(damage, 'sim') %>% mutate(sim = 1:nrow(.)), by = 'sim') %>% 
+  select(n.precip, bldg, dm.1e3)
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/DM.Rdata'))
+dm.1e4 <- damage[[1]] %>% 
+  .[,c(which(attr(damage, 'sim')$n.precip <= 100), ncol(.))] %>% 
+  filter((select(., -bldg) %>% rowSums) > 0) %>% 
+  pivot_longer(cols = -bldg, names_to = 'sim', values_to = 'dm.1e4') %>% 
+  mutate(sim = str_remove(sim, 'X') %>% toNumber) %>% 
+  left_join(attr(damage, 'sim') %>% mutate(sim = 1:nrow(.)), by = 'sim') %>% 
+  select(n.precip, bldg, dm.1e4)
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/DM.Rdata'))
+dm.1e5 <- damage[[1]] %>% 
+  .[,c(which(attr(damage, 'sim')$n.precip <= 100), ncol(.))] %>% 
+  filter((select(., -bldg) %>% rowSums) > 0) %>% 
+  pivot_longer(cols = -bldg, names_to = 'sim', values_to = 'dm.1e5') %>% 
+  mutate(sim = str_remove(sim, 'X') %>% toNumber) %>% 
+  left_join(attr(damage, 'sim') %>% mutate(sim = 1:nrow(.)), by = 'sim') %>% 
+  select(n.precip, bldg, dm.1e5)
+
+dmg <- list(dm.1e2, dm.1e3, dm.1e4, dm.1e5) %>% 
+  reduce(full_join, by = c('bldg', 'n.precip'))
+dmg[is.na(dmg)] <- 0
+dmg %>% 
+  mutate(p = (1:nrow(.))/(nrow(.)+1)) %>% 
+  ggplot() + 
+  geom_step(aes(x = sort(dm.1e2), y = 1-p, color = '1e2'), size = 1) + 
+  geom_step(aes(x = sort(dm.1e3), y = 1-p, color = '1e3'), size = 1) + 
+  geom_step(aes(x = sort(dm.1e4), y = 1-p, color = '1e4'), size = 1) + 
+  geom_step(aes(x = sort(dm.1e5), y = 1-p, color = '1e5'), size = 1) + 
+  scale_x_origin() + scale_y_origin()
+
+```
+plot damage realizations at individual buildings
+```{r}
+## plot by building
+for (b in unique(dmg$bldg)[1:10]) {
+  g <- ggplot(dmg %>% filter(bldg == b) %>% 
+                arrange(rowSums(select(., -c(n.precip, bldg)))) %>% 
+                mutate(n.precip = factor(n.precip, levels = .$n.precip))) +
+    geom_point(aes(x = n.precip, y = dm.1e2, color = '1e2')) + 
+    geom_point(aes(x = n.precip, y = dm.1e3, color = '1e3')) + 
+    geom_point(aes(x = n.precip, y = dm.1e4, color = '1e4')) + 
+    geom_point(aes(x = n.precip, y = dm.1e5, color = '1e5')) + 
+    scale_color_manual(values = baker) + 
+    scale_x_discrete('Simulation ID') + 
+    scale_y_origin('Damage Ratio', labels = percent_format(accuracy = 1)) + 
+    theme(axis.text.x = element_blank()) + 
+    coord_cartesian(clip = 'off')
+  print(g)
+}
+
+```
+
+plot scatterplots of building-average damage for the first 100 simulations (same precip)
+```{r}
+dmg <- dmg %>% 
+  select(-n.precip) %>% 
+  group_by(bldg) %>% 
+  summarize(across(everything(), median))
+dm.max <- apply(dmg[,-(1:2)], 2, max) %>% max
+g.23 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e2, y = dm.1e3)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dm.max), ylim = c(0,dm.max))
+g.24 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e2, y = dm.1e4)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dm.max), ylim = c(0,dm.max))
+g.25 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e2, y = dm.1e5)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dm.max), ylim = c(0,dm.max))
+g.34 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e3, y = dm.1e4)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dm.max), ylim = c(0,dm.max))
+g.35 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e3, y = dm.1e5)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dm.max), ylim = c(0,dm.max))
+g.45 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e4, y = dm.1e5)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dm.max), ylim = c(0,dm.max))
+g.void <- ggplot() + theme_void()
+cowplot::plot_grid(g.45, g.void, g.void, g.35, g.34, g.void, g.25, g.24, g.23,
+                   nrow = 3, ncol = 3, align = 'hv')
+ggsave('test.jpg', width = 6, height = 6)
+
+```
+
+plot scatterplots of total loss for the first 100 simulations (same precip)
+```{r}
+## check G(DV) script 
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp4/INUN.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp4/DM.Rdata'))
+
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+ext <- extent(1895000, 1935000, 579500, 616500)
+aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(6417)
+buildings <- suppressWarnings(
+  buildings %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = 4269) %>%
+  st_transform(6417) %>%  
+  st_intersection(aoi))
+buildings <- buildings %>% 
+  transmute(value = V601TotalL, value.sd = value_sd/5, group = GEOID)
+
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp2/PRCP.Rdata'))
+prcp.1e2 <- precip
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_hazus/prcp4/PRCP.Rdata'))
+prcp.1e4 <- precip
+
+all(prcp.1e4[1:100,] == prcp.1e2)
+## since we started with a set random seed, we should get (relatively) the same results for
+## the first 100 simulations in every case
+
+## look at losses for n.precip = 1:100
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/DV.Rdata'))
+loss.1e2 <- loss.sim %>% select(n.precip, loss)
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/DV.Rdata'))
+loss.1e3 <- loss.sim %>% select(n.precip, loss) %>% filter(n.precip <= 100)
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/DV.Rdata'))
+loss.1e4 <- loss.sim %>% select(n.precip, loss) %>% filter(n.precip <= 100)
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/DV.Rdata'))
+loss.1e5 <- loss.sim %>% select(n.precip, loss) %>% filter(n.precip <= 100)
+loss <- list(loss.1e2, loss.1e3, loss.1e4, loss.1e5) %>% 
+  reduce(full_join, by = 'n.precip') %>% 
+  setNames(c('n.precip', paste0('loss.1e', 2:5)))
+loss[is.na(loss)] <- 0
+
+loss.max <- apply(loss[,-1], 2, max) %>% max
+g.23 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e2, y = loss.1e3)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.24 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e2, y = loss.1e4)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.25 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e2, y = loss.1e5)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.34 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e3, y = loss.1e4)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.35 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e3, y = loss.1e5)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.45 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e4, y = loss.1e5)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.void <- ggplot() + theme_void()
+cowplot::plot_grid(g.45, g.void, g.void, g.35, g.34, g.void, g.25, g.24, g.23,
+                   nrow = 3, ncol = 3, align = 'hv')
+# ggsave('test.jpg', width = 6, height = 6)
+
+```
+
+regenerate losses outside of Sherlock & try the scatterplot again
+(setting all losses to constant values)
+```{r}
+## so something is growing in G(DV). but what?
+buildings <- buildings %>% mutate(value = 1e3, value.sd = 0)
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/DM.Rdata'))
+dm.1e2 <- damage#[[1]]
+loss.1e2 <- generate_losses(damage, buildings, aggregate = 'sim')
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/DM.Rdata'))
+index <- which(attr(damage, 'sim')$n.precip <= 100)
+attr.sim <- attr(damage, 'sim'); attr.bldg <- attr(damage, 'buildings')
+damage <- damage %>% 
+  lapply(function(x) x %>% .[,c(index, ncol(.)-(0:2))] %>% 
+      filter((select(., -c(bldg, n.damage, n.inun)) %>% rowSums) > 0))
+attr(damage, 'sim') <- attr.sim[index,]
+attr(damage, 'buildings') <- attr.bldg[attr.bldg[,'id'] %in% damage[[1]][,'bldg'],]
+dm.1e3 <- damage#[[1]]
+loss.1e3 <- generate_losses(damage, buildings, aggregate = 'sim')
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/DM.Rdata'))
+index <- which(attr(damage, 'sim')$n.precip <= 100)
+attr.sim <- attr(damage, 'sim'); attr.bldg <- attr(damage, 'buildings')
+damage <- damage %>% 
+  lapply(function(x) x %>% .[,c(index, ncol(.)-(0:2))] %>% 
+      filter((select(., -c(bldg, n.damage, n.inun)) %>% rowSums) > 0))
+attr(damage, 'sim') <- attr.sim[index,]
+attr(damage, 'buildings') <- attr.bldg[attr.bldg[,'id'] %in% damage[[1]][,'bldg'],]
+dm.1e4 <- damage#[[1]]
+loss.1e4 <- generate_losses(damage, buildings, aggregate = 'sim')
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/DM.Rdata'))
+index <- which(attr(damage, 'sim')$n.precip <= 100)
+attr.sim <- attr(damage, 'sim'); attr.bldg <- attr(damage, 'buildings')
+damage <- damage %>% 
+  lapply(function(x) x %>% .[,c(index, ncol(.)-(0:2))] %>% 
+      filter((select(., -c(bldg, n.damage, n.inun)) %>% rowSums) > 0))
+attr(damage, 'sim') <- attr.sim[index,]
+attr(damage, 'buildings') <- attr.bldg[attr.bldg[,'id'] %in% damage[[1]][,'bldg'],]
+dm.1e5 <- damage#[[1]]
+# loss.1e5 <- generate_losses(damage, buildings, aggregate = 'sim')
+
+## look only at losses from the first 100 simulations
+loss <- list(loss.1e2 %>% select(n.precip, loss.1e2 = loss), 
+             loss.1e3 %>% select(n.precip, loss.1e3 = loss), 
+             loss.1e4 %>% select(n.precip, loss.1e4 = loss)) %>% 
+  reduce(full_join, by = 'n.precip') %>% 
+  filter(n.precip <= 100)
+loss[is.na(loss)] <- 0
+
+loss.max <- apply(loss[,-1], 2, max) %>% max
+g.23 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e2, y = loss.1e3)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.24 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e2, y = loss.1e4)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.34 <- ggplot(loss) + 
+  geom_point(aes(x = loss.1e3, y = loss.1e4)) + 
+  scale_x_origin(labels = comma_format(scale = 1e-6)) + 
+  scale_y_origin(labels = comma_format(scale = 1e-6)) + 
+  geom_parity() + coord_fixed(xlim = c(0,loss.max), ylim = c(0,loss.max))
+g.void <- ggplot() + theme_void()
+cowplot::plot_grid(g.34, g.void, g.24, g.23,
+                   nrow = 2, ncol = 2, align = 'hv')
+
+```
+
+test: can I go from DM to DV and back again? 
+```{r}
+## try to replicate dmg within the G(DV) model
+buildings <- buildings %>% mutate(value.sd = 0)
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/DM.Rdata'))
+dm.1e2 <- damage[[1]] %>% .[,-(ncol(.)-(1:2))] %>% 
+  pivot_longer(cols = -bldg, names_to = 'sim', values_to = 'dm.1e2') %>% 
+  mutate(sim = str_remove(sim, 'X') %>% toNumber) %>% 
+  left_join(attr(damage, 'sim') %>% mutate(sim = 1:nrow(.)), by = 'sim') %>% 
+  select(n.precip, bldg, dm.1e2)
+
+id.wet <- attr(damage, 'buildings') %>% as.data.frame %>% pull(id)
+buildings.wet <- buildings %>% 
+  mutate(bldg = 1:nrow(.)) %>% 
+  filter(bldg %in% id.wet) %>% 
+  st_drop_geometry
+values <- map2_dbl(.x = buildings.wet$value, .y = buildings.wet$value.sd,
+                   ~rnorm(1, mean = .x, sd = .y)) %>% cbind(0) %>% apply(1, max)
+loss.1e2 <- damage %>% 
+  lapply(function(x) {
+    x %>% as.data.frame %>% 
+      select(-n.inun, -n.damage, -bldg) %>% 
+      sweep(1, values, '*') %>% 
+      cbind(x %>% as.data.frame %>% select(n.inun, n.damage, bldg))
+  }) %>% .[[1]] %>% .[,-(ncol(.)-(1:2))] %>% 
+  # .[,c(which(attr(damage, 'sim')$n.precip <= 100), ncol(.))] %>% 
+  # filter((select(., -bldg) %>% rowSums) > 0) %>% 
+  pivot_longer(cols = -bldg, names_to = 'sim', values_to = 'loss.1e2') %>% 
+  mutate(sim = str_remove(sim, 'X') %>% toNumber) %>% 
+  left_join(attr(damage, 'sim') %>% mutate(sim = 1:nrow(.)), by = 'sim') %>% 
+  select(n.precip, bldg, loss.1e2)
+# all(dm.1e2$dm.1e2 == loss.1e2$loss.1e2/1000)
+
+loss.1e2 %>% 
+  left_join(buildings.wet %>% select(bldg, value), by = 'bldg') %>% 
+  left_join(dm.1e2, by = c('n.precip', 'bldg')) %>% 
+  filter(loss.1e2 != dm.1e2*value)
+
+## no clear smoking gun here either
+
+```
+
+```{r}
+## G(DV) is just a scalar times the sum of damages --> look at the sum of damages
+## (or the mean, it's the same thing)
+ggplot() + 
+  geom_point(aes(y = 1:(ncol(dm.1e2[[1]])-3), 
+                 x = sort(apply(dm.1e2[[1]], 2, mean)[1:(ncol(dm.1e2[[1]])-3)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1:(ncol(dm.1e3[[1]])-3), 
+                 x = sort(apply(dm.1e3[[1]], 2, mean)[1:(ncol(dm.1e3[[1]])-3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1:(ncol(dm.1e4[[1]])-3), 
+                 x = sort(apply(dm.1e4[[1]], 2, mean)[1:(ncol(dm.1e4[[1]])-3)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1:(ncol(dm.1e5[[1]])-3), 
+                 x = sort(apply(dm.1e5[[1]], 2, mean)[1:(ncol(dm.1e5[[1]])-3)]),
+                 color = '1e5')) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_manual(values = baker)
+ggplot() + 
+  geom_point(aes(y = 1 - (1:(ncol(dm.1e2[[1]])-3))/(ncol(dm.1e2[[1]])-3), 
+                 x = sort(apply(dm.1e2[[1]], 2, mean)[1:(ncol(dm.1e2[[1]])-3)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1 - (1:(ncol(dm.1e3[[1]])-3))/(ncol(dm.1e3[[1]])-3), 
+                 x = sort(apply(dm.1e3[[1]], 2, mean)[1:(ncol(dm.1e3[[1]])-3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1 - (1:(ncol(dm.1e4[[1]])-3))/(ncol(dm.1e4[[1]])-3), 
+                 x = sort(apply(dm.1e4[[1]], 2, mean)[1:(ncol(dm.1e4[[1]])-3)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1 - (1:(ncol(dm.1e5[[1]])-3))/(ncol(dm.1e5[[1]])-3), 
+                 x = sort(apply(dm.1e5[[1]], 2, mean)[1:(ncol(dm.1e5[[1]])-3)]),
+                 color = '1e5')) + 
+  ggtitle('Simulation Damage Ratios', 
+          subtitle = 'each point = mean damage ratio from 1 realization (n = 1:100)') +
+  scale_x_origin('Mean Damage Ratio', labels = percent_format(accuracy = 1)) + 
+  scale_y_origin('Probability of Exceedance') + 
+  scale_color_manual(values = baker)
+## conclusion: across all simulations, buildings are experiencing different amounts of damage
+## therefore the problem is not in the G(DV) model
+
+ggplot() + 
+  geom_point(aes(y = 1:nrow(dm.1e2[[1]]), 
+                 x = sort(apply(dm.1e2[[1]][,1:(ncol(dm.1e2[[1]])-3)], 1, mean)),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1:nrow(dm.1e3[[1]]), 
+                 x = sort(apply(dm.1e3[[1]][,1:(ncol(dm.1e3[[1]])-3)], 1, mean)),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1:nrow(dm.1e4[[1]]), 
+                 x = sort(apply(dm.1e4[[1]][,1:(ncol(dm.1e4[[1]])-3)], 1, mean)),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1:nrow(dm.1e5[[1]]), 
+                 x = sort(apply(dm.1e5[[1]][,1:(ncol(dm.1e5[[1]])-3)], 1, mean)),
+                 color = '1e5')) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_manual(values = baker)
+ggplot() + 
+  geom_point(aes(y = 1 - (1:nrow(dm.1e2[[1]]))/nrow(dm.1e2[[1]]), 
+                 x = sort(apply(dm.1e2[[1]][,1:(ncol(dm.1e2[[1]])-3)], 1, mean)),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1 - (1:nrow(dm.1e3[[1]]))/nrow(dm.1e3[[1]]), 
+                 x = sort(apply(dm.1e3[[1]][,1:(ncol(dm.1e3[[1]])-3)], 1, mean)),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1 - (1:nrow(dm.1e4[[1]]))/nrow(dm.1e4[[1]]), 
+                 x = sort(apply(dm.1e4[[1]][,1:(ncol(dm.1e4[[1]])-3)], 1, mean)),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1 - (1:nrow(dm.1e5[[1]]))/nrow(dm.1e5[[1]]), 
+                 x = sort(apply(dm.1e5[[1]][,1:(ncol(dm.1e5[[1]])-3)], 1, mean)),
+                 color = '1e5')) + 
+  ggtitle('Building Damage Ratios', 
+          subtitle = 'each point = mean building damage ratio across all realizations (n = 1:100)') +
+  scale_x_origin('Mean Damage Ratio', labels = percent_format(accuracy = 1)) + 
+  scale_y_origin('Probability of Exceedance') + 
+  scale_color_manual(values = baker)
+
+
+## plot standard deviation of damage
+ggplot() + 
+  geom_point(aes(y = 1:(ncol(dm.1e2[[1]])-3), 
+                 x = sort(apply(dm.1e2[[1]], 2, sd)[1:(ncol(dm.1e2[[1]])-3)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1:(ncol(dm.1e3[[1]])-3), 
+                 x = sort(apply(dm.1e3[[1]], 2, sd)[1:(ncol(dm.1e3[[1]])-3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1:(ncol(dm.1e4[[1]])-3), 
+                 x = sort(apply(dm.1e4[[1]], 2, sd)[1:(ncol(dm.1e4[[1]])-3)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1:(ncol(dm.1e5[[1]])-3), 
+                 x = sort(apply(dm.1e5[[1]], 2, sd)[1:(ncol(dm.1e5[[1]])-3)]),
+                 color = '1e5')) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_manual(values = baker)
+ggplot() + 
+  geom_point(aes(y = 1:nrow(dm.1e2[[1]]), 
+                 x = sort(apply(dm.1e2[[1]][,1:(ncol(dm.1e2[[1]])-3)], 1, sd)),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1:nrow(dm.1e3[[1]]), 
+                 x = sort(apply(dm.1e3[[1]][,1:(ncol(dm.1e3[[1]])-3)], 1, sd)),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1:nrow(dm.1e4[[1]]), 
+                 x = sort(apply(dm.1e4[[1]][,1:(ncol(dm.1e4[[1]])-3)], 1, sd)),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1:nrow(dm.1e5[[1]]), 
+                 x = sort(apply(dm.1e5[[1]][,1:(ncol(dm.1e5[[1]])-3)], 1, sd)),
+                 color = '1e5')) + 
+  scale_x_origin() + scale_y_origin() + 
+  scale_color_manual(values = baker)
+
+
+## compare individual buildings
+## note: each point is the mean damage ratio associated with one building
+dmg <- list(
+  dm.1e2[[1]][,1:(ncol(dm.1e2[[1]])-3)] %>% 
+    apply(1, mean) %>% cbind(dm.1e2[[1]][,'bldg']) %>% 
+    as.data.frame %>% setNames(c('dm.1e2', 'bldg')),
+  dm.1e3[[1]][,1:(ncol(dm.1e3[[1]])-3)] %>% 
+    apply(1, mean) %>% cbind(dm.1e3[[1]][,'bldg']) %>% 
+    as.data.frame %>% setNames(c('dm.1e3', 'bldg')),
+  dm.1e4[[1]][,1:(ncol(dm.1e4[[1]])-3)] %>% 
+    apply(1, mean) %>% cbind(dm.1e4[[1]][,'bldg']) %>% 
+    as.data.frame %>% setNames(c('dm.1e4', 'bldg')),
+  dm.1e5[[1]][,1:(ncol(dm.1e5[[1]])-3)] %>% 
+    apply(1, mean) %>% cbind(dm.1e5[[1]][,'bldg']) %>% 
+    as.data.frame %>% setNames(c('dm.1e5', 'bldg'))) %>% 
+  reduce(full_join, by = 'bldg')
+dmg[is.na(dmg)] <- 0
+
+dmg.max <- apply(dmg %>% select(-bldg), 2, max) %>% max
+g.23 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e2, y = dm.1e3)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dmg.max), ylim = c(0,dmg.max))
+g.24 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e2, y = dm.1e4)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dmg.max), ylim = c(0,dmg.max))
+g.25 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e2, y = dm.1e5)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dmg.max), ylim = c(0,dmg.max))
+g.34 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e3, y = dm.1e4)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dmg.max), ylim = c(0,dmg.max))
+g.35 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e3, y = dm.1e5)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dmg.max), ylim = c(0,dmg.max))
+g.45 <- ggplot(dmg) + 
+  geom_point(aes(x = dm.1e4, y = dm.1e5)) + 
+  scale_x_origin(labels = percent_format(accuracy = 1)) + 
+  scale_y_origin(labels = percent_format(accuracy = 1)) + 
+  geom_parity() + coord_fixed(xlim = c(0,dmg.max), ylim = c(0,dmg.max))
+g.void <- ggplot() + theme_void()
+cowplot::plot_grid(g.45, g.void, g.void, g.35, g.34, g.void, g.25, g.24, g.23,
+                   nrow = 3, ncol = 3, align = 'hv')
+## it seems like they're mostly in alignment, but about 25% of buildings in dm.1e2
+## are (potentially incorrectly) being set to zero? 
+
+
+## for n_prcp = 1:100, plot exceedance plots for individual simulations
+## note: each plot is the exceedance curve for all buildings associated with one realization
+for (n.prcp in 1:10) {
+  temp.1e2 <- dm.1e2[[1]][,which(attr(dm.1e2, 'sim')$n.precip == n.prcp)] %>% sort
+  temp.1e3 <- dm.1e3[[1]][,which(attr(dm.1e3, 'sim')$n.precip == n.prcp)] %>% sort
+  temp.1e4 <- dm.1e4[[1]][,which(attr(dm.1e4, 'sim')$n.precip == n.prcp)] %>% sort
+  temp.1e5 <- dm.1e5[[1]][,which(attr(dm.1e5, 'sim')$n.precip == n.prcp)] %>% sort
+  
+  if(length(temp.1e2)>0 & length(temp.1e3)>0 & length(temp.1e4)>0 & length(temp.1e5)>0) {
+    g <- ggplot() +
+      geom_step(aes(x = 1 - (1:length(temp.1e2))/length(temp.1e2), 
+                    y = temp.1e2, color = '1e2'), size = 1) +
+      geom_step(aes(x = 1 - (1:length(temp.1e3))/length(temp.1e3), 
+                    y = temp.1e3, color = '1e3'), size = 1) +
+      geom_step(aes(x = 1 - (1:length(temp.1e4))/length(temp.1e4), 
+                    y = temp.1e4, color = '1e4'), size = 1) +
+      geom_step(aes(x = 1 - (1:length(temp.1e5))/length(temp.1e5), 
+                    y = temp.1e5, color = '1e5'), size = 1) +
+      ggtitle(paste0('Simulation #', n.prcp)) +
+      scale_x_origin('Damage Ratio', labels = percent_format(accuracy = 1)) + 
+      scale_y_origin('Building Exceedance Curve') + 
+      scale_color_manual(values = baker)
+    print(g)
+  }
+}
+## very consistent curve shape across all realizations
+
+```
+
+```{r}
+## G(DV) is not the culprit
+## but by G(DM), things are funky --> check G(INUN)
+
+## filter inundations to the first 100 simulations
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/INUN.Rdata'))
+inun.1e2 <- inundation[[1]]
+attr(inun.1e2, 'sim') <- attr(inundation, 'sim')
+attr(inun.1e2, 'buildings') <- attr(inundation, 'buildings')
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp3/INUN.Rdata'))
+index <- which(attr(inundation, 'sim')$n.precip <= 100)
+attr.sim <- attr(inundation, 'sim'); attr.bldg <- attr(inundation, 'buildings')
+inundation <- inundation[[1]] %>% .[,index] %>% 
+  cbind(bldg = attr.bldg[,'id']) %>% as.data.frame %>% 
+  .[rowSums(select(., -bldg)) > 0,] %>% select(-bldg) %>% as.matrix
+attr(inundation, 'sim') <- attr.sim[index,]
+attr(inundation, 'buildings') <- 
+  attr.bldg[attr.bldg[,'id'] %in% toNumber(attributes(inundation)$dimnames[[1]]),]
+inun.1e3 <- inundation
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp4/INUN.Rdata'))
+index <- which(attr(inundation, 'sim')$n.precip <= 100)
+attr.sim <- attr(inundation, 'sim'); attr.bldg <- attr(inundation, 'buildings')
+inundation <- inundation[[1]] %>% .[,index] %>% 
+  cbind(bldg = attr.bldg[,'id']) %>% as.data.frame %>% 
+  .[rowSums(select(., -bldg)) > 0,] %>% select(-bldg) %>% as.matrix
+attr(inundation, 'sim') <- attr.sim[index,]
+attr(inundation, 'buildings') <- 
+  attr.bldg[attr.bldg[,'id'] %in% toNumber(attributes(inundation)$dimnames[[1]]),]
+inun.1e4 <- inundation
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp5/INUN.Rdata'))
+index <- which(attr(inundation, 'sim')$n.precip <= 100)
+attr.sim <- attr(inundation, 'sim'); attr.bldg <- attr(inundation, 'buildings')
+inundation <- inundation[[1]] %>% .[,index] %>% 
+  cbind(bldg = attr.bldg[,'id']) %>% as.data.frame %>% 
+  .[rowSums(select(., -bldg)) > 0,] %>% select(-bldg) %>% as.matrix
+attr(inundation, 'sim') <- attr.sim[index,]
+attr(inundation, 'buildings') <- 
+  attr.bldg[attr.bldg[,'id'] %in% toNumber(attributes(inundation)$dimnames[[1]]),]
+inun.1e5 <- inundation
+
+## exceedance probability by simulation
+ggplot() + 
+  geom_point(aes(y = 1 - (1:ncol(inun.1e2))/ncol(inun.1e2), 
+                 x = sort(apply(inun.1e2, 2, mean)[1:ncol(inun.1e2)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1 - (1:ncol(inun.1e3))/ncol(inun.1e3), 
+                 x = sort(apply(inun.1e3, 2, mean)[1:ncol(inun.1e3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1 - (1:ncol(inun.1e4))/ncol(inun.1e4), 
+                 x = sort(apply(inun.1e4, 2, mean)[1:ncol(inun.1e4)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1 - (1:ncol(inun.1e5))/ncol(inun.1e5), 
+                 x = sort(apply(inun.1e5, 2, mean)[1:ncol(inun.1e5)]),
+                 color = '1e5')) + 
+  ggtitle('Simulation Inundation Levels', 
+          subtitle = 'each point = mean inundation from 1 realization (n = 1:100)') +
+  scale_x_origin('Mean Inundation') + 
+  scale_y_origin('Probability of Exceedance') + 
+  scale_color_manual(values = baker)
+
+## exceedance probability by building
+ggplot() + 
+  geom_point(aes(y = 1 - (1:nrow(inun.1e2))/nrow(inun.1e2), 
+                 x = sort(apply(inun.1e2, 1, mean)[1:nrow(inun.1e2)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1 - (1:nrow(inun.1e3))/nrow(inun.1e3), 
+                 x = sort(apply(inun.1e3, 1, mean)[1:nrow(inun.1e3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1 - (1:nrow(inun.1e4))/nrow(inun.1e4), 
+                 x = sort(apply(inun.1e4, 1, mean)[1:nrow(inun.1e4)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1 - (1:nrow(inun.1e5))/nrow(inun.1e5), 
+                 x = sort(apply(inun.1e5, 1, mean)[1:nrow(inun.1e5)]),
+                 color = '1e5')) + 
+  ggtitle('Building Inundation Levels', 
+          subtitle = 'each point = mean building inundation across all realizations (n = 1:100)') +
+  scale_x_origin('Mean Inundation') + 
+  scale_y_origin('Probability of Exceedance') + 
+  scale_color_manual(values = baker)
+
+## compare individual buildings
+## note: each point is the mean damage ratio associated with one building
+inun <- list(
+  inun.1e2 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e2, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('inun.1e2', 'bldg')),
+  inun.1e3 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e3, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('inun.1e3', 'bldg')),
+  inun.1e4 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e4, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('inun.1e4', 'bldg')),
+  inun.1e5 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e5, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('inun.1e5', 'bldg'))) %>% 
+  reduce(full_join, by = 'bldg')
+inun[is.na(inun)] <- 0
+
+inun.max <- apply(inun %>% select(-bldg), 2, max) %>% max
+g.23 <- ggplot(inun) + 
+  geom_point(aes(x = inun.1e2, y = inun.1e3)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,inun.max), ylim = c(0,inun.max))
+g.24 <- ggplot(inun) + 
+  geom_point(aes(x = inun.1e2, y = inun.1e4)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,inun.max), ylim = c(0,inun.max))
+g.25 <- ggplot(inun) + 
+  geom_point(aes(x = inun.1e2, y = inun.1e5)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,inun.max), ylim = c(0,inun.max))
+g.34 <- ggplot(inun) + 
+  geom_point(aes(x = inun.1e3, y = inun.1e4)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,inun.max), ylim = c(0,inun.max))
+g.35 <- ggplot(inun) + 
+  geom_point(aes(x = inun.1e3, y = inun.1e5)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,inun.max), ylim = c(0,inun.max))
+g.45 <- ggplot(inun) + 
+  geom_point(aes(x = inun.1e4, y = inun.1e5)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,inun.max), ylim = c(0,inun.max))
+g.void <- ggplot() + theme_void()
+cowplot::plot_grid(g.45, g.void, g.void, g.35, g.34, g.void, g.25, g.24, g.23,
+                   nrow = 3, ncol = 3, align = 'hv')
+## this is dead on 
+
+```
+
+```{r}
+## so it seems like the problem is definitely G(DM).
+## as a reminder, G(DM) is a two-step process: first randomly assign building heights, 
+## then convert flood heights to flood damage ratios
+
+## let's investigate these separately
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+buildings <- buildings %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = 4269) %>%
+  st_transform(6417) %>%  
+  st_intersection(aoi) %>% 
+  # transmute(value = V601TotalL, value.sd = value_sd/5) %>% 
+  st_drop_geometry
+load('C:/Users/cbowers/Desktop/foundations.Rdata')
+
+depth.1e2 <- 
+  assign_foundations(buildings[attr(inun.1e2, 'buildings')[,'id'],], nsi1.found) %>% 
+  sweep(inun.1e2, 1, ., FUN = '-') %>% 
+  apply(2, function(x) ifelse(x<0, 0, x)) %>% as.matrix
+depth.1e2[] <- ifelse(depth.1e2[]>0 & inun.1e2[]==0, 0, depth.1e2[])
+depth.1e3 <- 
+  assign_foundations(buildings[attr(inun.1e3, 'buildings')[,'id'],], nsi1.found) %>% 
+  sweep(inun.1e3, 1, ., FUN = '-') %>% 
+  apply(2, function(x) ifelse(x<0, 0, x)) %>% as.matrix
+depth.1e3[] <- ifelse(depth.1e3[]>0 & inun.1e3[]==0, 0, depth.1e3[])
+depth.1e4 <- 
+  assign_foundations(buildings[attr(inun.1e4, 'buildings')[,'id'],], nsi1.found) %>% 
+  sweep(inun.1e4, 1, ., FUN = '-') %>% 
+  apply(2, function(x) ifelse(x<0, 0, x)) %>% as.matrix
+depth.1e4[] <- ifelse(depth.1e4[]>0 & inun.1e4[]==0, 0, depth.1e4[])
+depth.1e5 <- 
+  assign_foundations(buildings[attr(inun.1e5, 'buildings')[,'id'],], nsi1.found) %>% 
+  sweep(inun.1e5, 1, ., FUN = '-') %>% 
+  apply(2, function(x) ifelse(x<0, 0, x)) %>% as.matrix
+depth.1e5[] <- ifelse(depth.1e5[]>0 & inun.1e5[]==0, 0, depth.1e5[])
+
+## exceedance probability by simulation
+ggplot() + 
+  geom_point(aes(y = 1 - (1:ncol(depth.1e2))/ncol(depth.1e2), 
+                 x = sort(apply(depth.1e2, 2, mean)[1:ncol(depth.1e2)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1 - (1:ncol(depth.1e3))/ncol(depth.1e3), 
+                 x = sort(apply(depth.1e3, 2, mean)[1:ncol(depth.1e3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1 - (1:ncol(depth.1e4))/ncol(depth.1e4), 
+                 x = sort(apply(depth.1e4, 2, mean)[1:ncol(depth.1e4)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1 - (1:ncol(depth.1e5))/ncol(depth.1e5), 
+                 x = sort(apply(depth.1e5, 2, mean)[1:ncol(depth.1e5)]),
+                 color = '1e5')) + 
+  ggtitle('Simulation Water Depths', 
+          subtitle = 'each point = mean water depth from 1 realization (n = 1:100)') +
+  scale_x_origin('Mean Depth') + 
+  scale_y_origin('Probability of Exceedance') + 
+  scale_color_manual(values = baker)
+
+## exceedance probability by building
+ggplot() + 
+  geom_point(aes(y = 1 - (1:nrow(depth.1e2))/nrow(depth.1e2), 
+                 x = sort(apply(depth.1e2, 1, mean)[1:nrow(depth.1e2)]),
+                 color = '1e2')) + 
+  geom_point(aes(y = 1 - (1:nrow(depth.1e3))/nrow(depth.1e3), 
+                 x = sort(apply(depth.1e3, 1, mean)[1:nrow(depth.1e3)]),
+                 color = '1e3')) + 
+  geom_point(aes(y = 1 - (1:nrow(depth.1e4))/nrow(depth.1e4), 
+                 x = sort(apply(depth.1e4, 1, mean)[1:nrow(depth.1e4)]),
+                 color = '1e4')) + 
+  geom_point(aes(y = 1 - (1:nrow(depth.1e5))/nrow(depth.1e5), 
+                 x = sort(apply(depth.1e5, 1, mean)[1:nrow(depth.1e5)]),
+                 color = '1e5')) + 
+  ggtitle('Building Water Depths', 
+          subtitle = 'each point = mean building water depth across all realizations (n = 1:100)') +
+  scale_x_origin('Mean Depth') + 
+  scale_y_origin('Probability of Exceedance') + 
+  scale_color_manual(values = baker)
+
+## compare individual buildings
+## note: each point is the mean damage ratio associated with one building
+depth <- list(
+  depth.1e2 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e2, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('depth.1e2', 'bldg')),
+  depth.1e3 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e3, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('depth.1e3', 'bldg')),
+  depth.1e4 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e4, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('depth.1e4', 'bldg')),
+  depth.1e5 %>% apply(1, mean) %>% 
+    cbind(attr(inun.1e5, 'buildings')[,'id']) %>% 
+    as.data.frame %>% setNames(c('depth.1e5', 'bldg'))) %>% 
+  reduce(full_join, by = 'bldg')
+depth[is.na(depth)] <- 0
+
+depth.max <- apply(depth %>% select(-bldg), 2, max) %>% max
+g.23 <- ggplot(depth) + 
+  geom_point(aes(x = depth.1e2, y = depth.1e3)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,depth.max), ylim = c(0,depth.max))
+g.24 <- ggplot(depth) + 
+  geom_point(aes(x = depth.1e2, y = depth.1e4)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,depth.max), ylim = c(0,depth.max))
+g.25 <- ggplot(depth) + 
+  geom_point(aes(x = depth.1e2, y = depth.1e5)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,depth.max), ylim = c(0,depth.max))
+g.34 <- ggplot(depth) + 
+  geom_point(aes(x = depth.1e3, y = depth.1e4)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,depth.max), ylim = c(0,depth.max))
+g.35 <- ggplot(depth) + 
+  geom_point(aes(x = depth.1e3, y = depth.1e5)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,depth.max), ylim = c(0,depth.max))
+g.45 <- ggplot(depth) + 
+  geom_point(aes(x = depth.1e4, y = depth.1e5)) + 
+  scale_x_origin() + scale_y_origin() + 
+  geom_parity() + coord_fixed(xlim = c(0,depth.max), ylim = c(0,depth.max))
+g.void <- ggplot() + theme_void()
+cowplot::plot_grid(g.45, g.void, g.void, g.35, g.34, g.void, g.25, g.24, g.23,
+                   nrow = 3, ncol = 3, align = 'hv')
+
+## I think I figured it out!! making the basement a negative number introduces 
+## a lot of nonzero water depths that shouldn't actually be there 
+
+## correction: if a building is dry at the end of G(INUN), G(DM) shouldn't be 
+## able to make it wet
+
+```
+
+```{r}
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_2019/mc_beta/prcp2/INUN.Rdata'))
+
+n.inun <- 1; probabilistic <- TRUE; foundations <- nsi1.found
+wet.bldg <- attr(inundation, 'wet.bldg')
+depth <- 
+  foreach(i = 1:n.inun, 
+    .packages = c('dplyr', 'purrr', 'sf', 'stringr'),
+    .export = c('toNumber', 'assign_foundations'),
+    .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %do% {
+      if (probabilistic) {
+        found_ht <- assign_foundations(buildings[wet.bldg,], foundations)
+      } else {
+        found_ht <- rep(0, length(wet.bldg))
+      }
+      temp <- found_ht %>% sweep(inundation[[i]], 1, ., FUN = '-') %>% 
+        apply(2, function(x) ifelse(x<0, 0, x)) %>% as.matrix
+      temp[] <- ifelse(temp[]>0 & inundation[[n.inun]][]==0, 0, temp[])
+      temp
+    }
+
+```
+
+

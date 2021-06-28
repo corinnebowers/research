@@ -72,8 +72,6 @@ generate_losses <- function(damage, buildings, aggregate, probabilistic = FALSE,
     if (aggregate == 'group') {
       loss.total <- loss.total %>% 
         group_by(group) %>% 
-        # summarize(loss = ifelse(is.na(n.loss), loss, loss[sample(n.loss, 1)]),
-        #            .groups = 'drop')
         summarize(loss = mean(loss), .groups = 'drop')
     }
     return(loss.total)
@@ -90,19 +88,17 @@ generate_losses <- function(damage, buildings, aggregate, probabilistic = FALSE,
 ## losses.group (data.frame): total losses, aggregated by group
 
 generate_group_losses <- function(losses, buildings.wet) {
-  ## find building-level losses
   losses.bldg <- losses %>% 
     lapply(function(x) {
       x %>% 
         group_by(bldg) %>% 
         summarize(across(1:(ncol(.)-3), mean), .groups = 'drop') %>% 
-        pivot_longer(cols = -bldg) %>% 
-        group_by(bldg) %>% 
-        summarize(loss = mean(value))
+        mutate(loss = apply(.[,-1], 1, mean)) %>% 
+        select(bldg, loss)
     }) %>% 
-    do.call(rbind, .) %>% 
-    group_by(bldg) %>% 
-    summarize(loss = mean(loss))
+    reduce(full_join, by = 'bldg') %>% 
+    mutate(loss = apply(.[,-1], 1, mean)) %>% 
+    select(bldg, loss)
   
   ## convert to grouped losses
   losses.group <- losses.bldg %>% 
@@ -125,27 +121,7 @@ generate_group_losses <- function(losses, buildings.wet) {
 ## @return
 ## losses.sim (data.frame): total losses, aggregated by simulation
 
-
 generate_sim_losses <- function(losses, simulations) {
-  # ## find bootstrap estimates of total loss
-  # losses.sim <- 
-  #   map(1:length(losses), function(i) {
-  #     losses[[i]] %>% 
-  #       select(-n.inun, -n.damage, -bldg) %>% 
-  #       apply(2, function(x) {
-  #         map_dbl(1:n.loss, ~sum(sample(x, size = length(x), replace = TRUE)))
-  #       }) %>% 
-  #       as.data.frame %>% 
-  #       cbind(n.loss = 1:n.loss) %>% 
-  #       pivot_longer(cols = -n.loss, names_to = 'n.sim') %>% 
-  #       mutate(n.sim = toNumber(gsub('X', '', n.sim))) %>% 
-  #       left_join(data.frame(attr(damage, 'sim')) %>% 
-  #                   mutate(n.sim = 1:nrow(.)), by = 'n.sim') %>% 
-  #       mutate(n.damage = i) %>% 
-  #       select(-n.sim)
-  #   }) %>% do.call(rbind, .)
-    
-  ## find deterministic total loss
   losses.sim <- losses %>% 
     lapply(function(x) {
       x %>% 
@@ -158,8 +134,7 @@ generate_sim_losses <- function(losses, simulations) {
     }) %>% 
     do.call(rbind, .) %>% 
     mutate(n.loss = NA) %>% 
-    select(n.AR, n.precip, n.runoff, n.hydro, n.inun, n.damage, n.loss, loss)
-    
+    select(n.AR, n.precip, n.runoff, n.hydro, n.inun, n.damage, n.loss, loss) 
   return(losses.sim)
 }
 

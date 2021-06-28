@@ -89,7 +89,7 @@ crs_dem <- st_crs(6417)
 
 ## define area of interest (aoi)
 ext <- extent(1895000, 1935000, 579500, 616500)
-aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(crs_dem)
+aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(6417)
 
 ## create blank raster with desired resolution
 blank <- raster(ext, resolution = c(40,40), crs = projection(aoi))
@@ -213,7 +213,7 @@ writeRaster(width, format = 'ascii', overwrite = TRUE,
 ## get LULC codes
 lulc <- raster('D:/Research/_gis/USA/_landcover/NLCD_2016_Land_Cover_L48_20190424/NLCD_2016_Land_Cover_L48_20190424.img')
 lulc.att <- lulc@data@attributes[[1]]
-lulc.n <- get_nlcd(blank, label = 'value')
+lulc.n <- FedData::get_nlcd(blank, label = 'value')
 vals <- unique(lulc.n[])
 
 ## decide on roughness values for floodplain
@@ -238,7 +238,8 @@ manning_values <- manning %>%
   mutate(values = rowMeans(cbind(KS, HECRAS, MWR))) %>% 
   dplyr::select(code, values)
 manning_values[1,2] <- 0.035
-manning_values <- manning_values %>% mutate(values = cbind(0.035, values) %>% apply(1, max))
+# manning_values <- manning_values %>% 
+#   mutate(values = cbind(0.035, values) %>% apply(1, max))
 
 ## change LULC codes to roughness values
 lulc.n <- lulc.n %>% 
@@ -247,10 +248,11 @@ lulc.n <- lulc.n %>%
 
 ## reformat raster to match DEM
 lulc.dem <- projectRaster(lulc.n, blank)
+# range(lulc.dem[])
 
 ## save out
 writeRaster(lulc.dem, format = 'ascii', overwrite = TRUE, 
-            filename = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.n.asc')
+            filename = 'C:/Users/cbowers/Desktop/russian.n.asc')
 
 ```
 
@@ -308,527 +310,248 @@ ggplot() +
 means; medians
 
 ```
-```{r}
-## generate gauge files
-
-
-```
-
-```{r}
-raster.df <- function(x) as.data.frame(x, xy = TRUE) %>% setNames(c('x', 'y', 'value'))
-ggplot() + 
-  geom_raster(data = raster.df(width), aes(x=x, y=y, fill = value)) + 
-  geom_point(data = edge.in, aes(x = x, y = y))
-
-
-```
-
-
-
-
-
-
-I think a lot of the stuff below this is duplicated in hydrographs.Rmd 
-
-```{r}
-## hand-pick good candidate events for calculating m & tp
-pb <- txtProgressBar(min = 1987, max = 2020, style = 3)
-flow <- readNWISdata(sites = 11464000, parameterCd = param,
-                     startDate = '2005-10-01', endDate = '2006-04-01',
-                     service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns %>% 
-  mutate(Flow = Flow_Inst, Date = dateTime)
-
-g.flow <- ggplot(flow) + geom_line(aes(x = Date, y = Flow)) 
-ggplotly(g.flow)
-
-
-as.numeric(ymd_hm('2005-12-31 23:30') - ymd_hm('2005-12-30 08:30')) * 24
-
-```
-
-```{r}
-## get hydrograph records for each identified event
-hydrographs <- read.csv('C:/Users/cbowers/OneDrive/research/hydrographs.csv') %>% 
-  setNames(c('start', 'end', 'nicest')) %>% 
-  separate(start, into = c('start_date', 'start_time'), sep = ' ', remove = FALSE) %>% 
-  separate(end, into = c('end_date', 'end_time'), sep = ' ', remove = FALSE)
-flow <- list()
-for (i in 1:nrow(hydrographs)) {
-  flow[[i]] <- readNWISdata(sites = 11464000, parameterCd = param,
-                       startDate = mdy(hydrographs$start_date[i]), 
-                       endDate = mdy(hydrographs$end_date[i]) + days(1),
-                       service = 'iv', tz = 'America/Los_Angeles') %>% 
-    renameNWISColumns %>% 
-    rename(flow = Flow_Inst, datetime = dateTime) %>% 
-    filter(datetime >= mdy_hm(hydrographs$start[i], tz = 'America/Los_Angeles') & 
-             datetime <= mdy_hm(hydrographs$end[i], tz = 'America/Los_Angeles'))
-
-}
-flow <- lapply(
-  flow, function(x) x %>% 
-    mutate(q = flow/Max(flow), 
-           t = toNumber(difftime(datetime, datetime[1], units = 'secs') - 
-                          toNumber(difftime(datetime[which.max(flow)], datetime[1], units = 'secs')))) %>% 
-    mutate(t_diff = -min(t),
-           t_adj = q[1] + (1-q[1])*(t+t_diff)/t_diff))
-
-## calculate m for each event
-require(caret)
-hydrographs <- hydrographs %>% mutate(m = NA, quality = NA)
-for (i in 1:nrow(hydrographs)) {
-  df <- flow[[i]] %>% filter(t_adj <= 5 & !is.na(q))
-  fit <- nls(q ~ t_adj^m * exp(m*(1-t_adj)), data = df, 
-             start = list(m = 4), control = nls.control(maxiter = 1000))
-  hydrographs$m[i] <- coef(fit)
-  hydrographs$quality[i] <- R2(predict(fit), df$q)
-}
-
-```
-
-
-```{r}
-## plot all hydrographs together
-hydrographs <- hydrographs %>% mutate(keep = ifelse(m < 20 & quality > 0.75, TRUE, FALSE))
-sum(hydrographs$keep)
-fig <- plot_ly()
-for (i in 1:nrow(hydrographs)) {
-  if (hydrographs$keep[i]) {
-      fig <- fig %>% 
-      add_trace(data = flow[[i]] %>% subset(t_adj <= 5), type = 'scatter',
-                x = ~t_adj, y = ~q, name = i, mode = 'lines', hoverinfo = 'name')
-  }
-}
-fig
-
-ggplot(hydrographs %>% filter(keep)) + 
-  geom_histogram(aes(x = m), color = 'black', fill = 'white', bins = 12)
-ggplot(hydrographs %>% filter(keep)) + 
-  geom_histogram(aes(x = quality), color = 'black', fill = 'white', bins = 12)
-ggplot(hydrographs %>% filter(keep)) + 
-  geom_point(aes(y = m, x = quality, color = nicest)) + 
-  scale_color_manual(values = c('black', 'red'))
-
-hydrographs <- hydrographs %>% mutate(keep = ifelse(m < 20 & quality > 0.75, TRUE, FALSE))
-hydrographs %>% filter(keep) %>% .$m %>% mean
-hydrographs %>% filter(keep) %>% .$m %>% median
-
-hydrographs <- hydrographs %>% mutate(keep = ifelse(m < 20 & quality > 0.8, TRUE, FALSE))
-hydrographs %>% filter(keep) %>% .$m %>% mean
-hydrographs %>% filter(keep) %>% .$m %>% median
-
-hydrographs <- hydrographs %>% mutate(keep = ifelse(m < 20 & quality > 0.95, TRUE, FALSE))
-hydrographs %>% filter(keep) %>% .$m %>% mean
-hydrographs %>% filter(keep) %>% .$m %>% median
-
-hydrographs %>% filter(nicest == 'Y') %>% .$m %>% mean
-hydrographs %>% filter(nicest == 'Y') %>% .$m %>% median
-
-## use m = 4.5
-
-```
-
-```{r}
-## try to fit a distribution to m
-require(evd)
-require(fitdistrplus)
-gamma.fit <- fitdist(data = hydrographs[hydrographs$keep, 'm'], distr = 'gamma')
-lnorm.fit <- fitdist(data = hydrographs[hydrographs$keep, 'm'], distr = 'lnorm')
-gumbel.fit <- fitdist(data = hydrographs[hydrographs$keep, 'm'], distr = 'gumbel', 
-                      start = list(loc = 0, scale = 1))
-weibull.fit <- fitdist(data = hydrographs[hydrographs$keep, 'm'], distr = 'weibull')
-
-df <- data.frame(m = sort(hydrographs %>% filter(keep) %>% .$m), i = 1:sum(hydrographs$keep)) %>% 
-  mutate(p = i/(sum(hydrographs$keep)+1)) %>% 
-  mutate(gamma = qgamma(p, shape = gamma.fit$estimate[1], rate = gamma.fit$estimate[2]), 
-         lnorm = qlnorm(p, meanlog = lnorm.fit$estimate[1], sdlog = lnorm.fit$estimate[2]),
-         gumbel = qgumbel(p, loc = gumbel.fit$estimate[1], scale = gumbel.fit$estimate[2]),
-         weibull = qweibull(p, shape = weibull.fit$estimate[1], scale = weibull.fit$estimate[2])) %>% 
-  pivot_longer(cols = c('gamma', 'lnorm', 'gumbel', 'weibull'), names_to = 'dist')
-ggplot(df) + 
-  geom_point(aes(x = p, y = m)) + 
-  geom_line(aes(x = p, y = value, color = dist, group = dist))
-
-## lognormal is the best distribution fit, across several different R2 cutoff values
-m.fit <- lnorm.fit
-
-```
-
-```{r}
-## now, try to find a distribution for tp
-start.zero <- c()
-for (i in 1:nrow(hydrographs)) {
-  q.temp <- flow[[i]] %>% subset(t_adj <= 5) %>% .$q
-  if (q.temp[1] < 0.1 & q.temp[1] < q.temp[length(q.temp)]) {
-    start.zero <- c(start.zero, i)
-  }
-}
-fig <- plot_ly()
-for (i in 1:nrow(hydrographs)) {
-  if (i %in% start.zero) {
-      fig <- fig %>% 
-      add_trace(data = flow[[i]] %>% subset(t_adj <= 5), type = 'scatter',
-                x = ~t_adj, y = ~q, name = i, mode = 'lines', hoverinfo = 'name')
-  }
-}
-fig
-start.zero <- start.zero[!(start.zero %in% c(44, 4, 118, 30, 112, 59, 3))]
-
-tp <- c()
-for (i in start.zero) {
-  tp <- c(tp, flow[[i]]$t_diff[1])
-}
-ggplot(data = data.frame(tp)) + geom_histogram(aes(x = tp/3600), color = 'black', fill = 'white', bins = 7)
-
-## alternatively: try to fit a gamma distribution to all data
-hydrographs <- hydrographs %>% mutate(alpha = NA, beta = NA)
-means <- c()
-for (i in 1:nrow(hydrographs)) {
-  df <- flow[[i]] %>% filter(t_adj <= 5 & !is.na(q)) %>%
-    mutate(q_adj = (q-min(q))/(1-min(q))) %>%
-    mutate(t_pos = (t-min(t))/3600) %>%
-    filter(t_pos <= 1.7*t_pos[which.max(q)])
-  fit <- nls(q ~ t_pos^a * exp(-b*t_pos) * b^(a+1) / gamma(a), data = df,
-             start = list(a = df$t_pos[which.max(df$q)], b = 1), control = nls.control(maxiter = 1000))
-  hydrographs$alpha[i] <- coef(fit)[1]
-  hydrographs$beta[i] <- coef(fit)[2]
-  means <- c(means, mean(df$t_pos))
-  # g <- ggplot(df) +
-  #   geom_line(aes(x = t_pos, y = q_adj)) +
-  #   geom_line(aes(x = t_pos, y = predict(fit)), color = 'red') +
-  #   ggtitle(paste0('ID = ', i))
-  # print(g)
-}
-
-good.tp <- c(2:4, 7, 12, 17, 18, 21, 24, 30:32, 40:42, 46, 50, 
-             54, 56, 57, 60, 62, 65, 72, 73, 75, 79, 85, 86, 90:94, 96:99,
-             102, 105, 108, 111, 118, 123, 126:133, 135:138, 141, 143,
-             146:149, 151)
-hydrographs <- hydrographs %>% mutate(tp = NA)
-hydrographs[good.tp, 'tp'] <- hydrographs[good.tp, 'alpha'] / hydrographs[good.tp, 'beta']
-
-ggplot(hydrographs) + geom_histogram(aes(x = tp), color = 'black', fill = 'white', bins = 7)
-ggplot(data = data.frame(tp)) + geom_histogram(aes(x = tp/3600), color = 'black', fill = 'white', bins = 7)
-
-ggplot() + 
-  geom_density(data = hydrographs, aes(x = tp, y = ..density..), alpha = 0.5) + 
-  geom_density(data = data.frame(tp), aes(x = tp/3600, y = ..density..), alpha = 0.5)
-
-
-ggplot() + geom_point(aes(x = tp[(start.zero %in% good.tp)]/3600, 
-                          y = hydrographs$tp[good.tp[(good.tp %in% start.zero)]])) + 
-  geom_abline(slope = 1, intercept = 0, linetype = 'dashed')
-
-hydrographs[start.zero, 'tp'] <- hydrographs[start.zero, 'alpha'] / hydrographs[start.zero, 'beta']
-sum(!is.na(hydrographs$tp))
-
-```
-
-```{r}
-## fit some distributions to this curve
-ggplot(hydrographs) + 
-  geom_histogram(aes(x = tp), color = 'black', fill = 'white', bins = 9)
-tp <- hydrographs$tp[!is.na(hydrographs$tp)]
-
-norm.fit <- fitdist(data = tp, distr = 'norm')
-gamma.fit <- fitdist(data = tp, distr = 'gamma')
-lnorm.fit <- fitdist(data = tp, distr = 'lnorm')
-gumbel.fit <- fitdist(data = tp, distr = 'gumbel', start = list(loc = 0, scale = 1))
-weibull.fit <- fitdist(data = tp, distr = 'weibull')
-
-df <- data.frame(tp = sort(tp), i = 1:length(tp)) %>% 
-  mutate(p = i/(length(tp)+1)) %>% 
-  mutate(norm = qnorm(p, mean = norm.fit$estimate[1], sd = norm.fit$estimate[2]),
-         gamma = qgamma(p, shape = gamma.fit$estimate[1], rate = gamma.fit$estimate[2]), 
-         lnorm = qlnorm(p, meanlog = lnorm.fit$estimate[1], sdlog = lnorm.fit$estimate[2]),
-         gumbel = qgumbel(p, loc = gumbel.fit$estimate[1], scale = gumbel.fit$estimate[2]),
-         weibull = qweibull(p, shape = weibull.fit$estimate[1], scale = weibull.fit$estimate[2])) %>% 
-  pivot_longer(cols = c('norm', 'gamma', 'lnorm', 'gumbel', 'weibull'), names_to = 'dist')
-ggplot(df) + 
-  geom_point(aes(x = p, y = tp)) + 
-  geom_line(aes(x = p, y = value, color = dist, group = dist))
-
-## once again, lognormal seems to be the best
-tp.fit <- lnorm.fit
-
-```
-
-```{r}
-tp.fit
-m.fit
-
-save(tp.fit, m.fit, file = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/fitobjects.Rdata')
-load('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/fitobjects.Rdata')
-load('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/edges.Rdata')
-
-```
-
-```{r}
-## come back to examine hydrograph further
-
-## 1. can I calculate tp in a different way?
-hydrographs$tp_new <- flow %>% lapply(function(x) x$t_diff[1]/3600) %>% unlist
-
-lm(tp_new ~ tp+0, data = hydrographs) %>% summary
-ggplot(hydrographs) + 
-  geom_point(aes(x = tp, y = tp_new)) + 
-  scale_x_origin() + scale_y_origin() + geom_parity() + 
-  coord_fixed()
-
-ggplot(hydrographs %>% filter(!is.na(tp)) %>% arrange(tp) %>% mutate(p = (1:nrow(.))/(1+nrow(.)))) + 
-  geom_point(aes(x = plnorm(tp, meanlog = tp.fit$estimate['meanlog'], sdlog = tp.fit$estimate['sdlog']),
-                 y = p)) + 
-  scale_x_origin() + scale_y_origin() + geom_parity() + 
-  coord_fixed()
-
-ggplot(hydrographs %>% arrange(tp_new) %>% mutate(p = (1:nrow(.))/(1+nrow(.)))) + 
-  geom_point(aes(x = plnorm(tp_new/0.966173, 
-                            meanlog = tp.fit$estimate['meanlog'], 
-                            sdlog = tp.fit$estimate['sdlog']), y = p)) + 
-  scale_x_origin() + scale_y_origin() + geom_parity() + 
-  coord_fixed()
-
-```
-
-
-```{r}
-## need to match hydrographs to catalog
-hydrographs$Qp <- lapply(flow, function(x) max(x$flow)) %>% unlist
-hydrograph.dates <- 
-  map2(.x = mdy(hydrographs$start_date),
-       .y = mdy(hydrographs$end_date),
-       .f = ~ seq(.x, .y, 'days'))
-
-load('C:/Users/cbowers/Desktop/catalog.Rdata')
-combined <- 
-  foreach (ar = 1:nrow(catalog), .combine = 'rbind') %do% {
-    setTxtProgressBar(pb, ar)
-    index <- 
-      hydrograph.dates %>% 
-      lapply(function(x) any(x %in% seq(ymd(catalog$start_day[ar]), ymd(catalog$end_day[ar]), 'days'))) %>% 
-      unlist %>% which
-    if (length(index) >= 1) {
-      data.frame(AR = ar, hydrograph = index)
-    } else {
-      data.frame(AR = NA, hydrograph = NA)[-1,]
-    }
-  }
-
-combined <- combined %>% 
-  left_join(catalog %>% select(AR, runoff, duration), by = 'AR') %>% 
-  left_join(hydrographs %>% mutate(hydrograph = 1:nrow(.)) %>% select(hydrograph, Qp, tp = tp_new, m), 
-            by = 'hydrograph')
-ggplot(combined) + 
-  geom_point(aes(x = runoff, y =tp)) + 
-  scale_x_origin() + scale_y_origin() 
-
-ggplot(combined) + 
-  geom_point(aes(x = runoff, y = Qp, color = tp)) + 
-  scale_x_origin() + scale_y_origin() + 
-  scale_color_scico(palette = 'batlow')
-
-ggplot(combined) + 
-  geom_point(aes(x = runoff*inlet$DRNAREA^2/duration, y = Qp, color = tp)) + 
-  scale_x_origin() + scale_y_origin() + 
-  scale_color_scico(palette = 'batlow')
-ggplot(combined) + 
-  geom_point(aes(x = (runoff/25.4/12) * (inlet$DRNAREA*5280^2) / (duration*3600), 
-                 y = Qp, color = duration)) + 
-  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed() + 
-  scale_color_scico(palette = 'batlow')
-## why are these not the same? I think I calculated them the same way 
-
-ggplot(combined) + 
-  geom_point(aes(x = tp, y = duration)) + 
-  scale_x_origin() + scale_y_origin()
-
-temp <- readNWISdata(sites = 11464000, parameterCd = param,
-                       startDate = mdy(hydrographs$start_date[i]), 
-                       endDate = mdy(hydrographs$end_date[i]) + days(1),
-                       service = 'iv', tz = 'America/Los_Angeles')
-
-attributes(temp)
-
-## 2. is m a function of seasonality/soil moisture?
-## actually, don't go down this rabbit hole
-
-inlet
-
-inlet %>% st_transform(albers) %>% st_area
-
-(1730205265 - 1729631396)/1729631396
-
-
-
-```
-
-
-
-
-
-
-```{r}
-## generate latin hypercube samples
-require(lhs)
-
-samples <- optimumLHS(n = 50, k = 4, maxSweeps = 10, eps = 0.05) 
-samples <- samples %>% 
-  as.data.frame %>%
-  setNames(paste0('x', 1:4)) %>%
-  mutate(SGCn = qunif(x1, min = 0.035, max = 0.075),
-         SGCr = exp(qunif(x2, min = log(0.01), max = log(0.12))),
-         tp = qlnorm(x3, meanlog = tp.fit$estimate[1], sdlog = tp.fit$estimate[2]),
-         m = qlnorm(x4, meanlog = m.fit$estimate[1], sdlog = m.fit$estimate[2])) %>%
-  dplyr::select(SGCn, SGCr, tp, m)
-
-write.table(samples, file = 'C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/samples2.txt', 
-            col.names = TRUE, row.names = FALSE)
-
-```
 
 ####################################
 
 run LISFLOOD parameter testing in Sherlock
 
-* come back here to try wet start 
-* decide on values for m and SGCr
+constant parameters: 
 
-```{r}
-## load in LISFLOOD simulation results
-setwd('C:/Users/cbowers/OneDrive/classes/GEOLSCI240 data science for geoscience/geolsci240/')
-load('./hw3_simstacks.Rdata')   #raster files
-load('./hw3_dataframes.Rdata')  #parameter values
+  * n <- 1000  #number of simulations
+  * simlength <- 30*24*3600  #simulation length (s)
+  * spinup <- 15*24*3600  #simulation spin-up time (s)
+  * baseflow <- 3  #baseflow (m3/s)
+  * Qp <- 112000 / (mft^3)  #m3/s  
+  
+variable parameters:
 
-## use df.2 & simstack.2 (n = 51:100)
+  * SGCn = qunif(x1, min = 0.015, max = 0.075)  #channel roughness
+  * tp = qunif(x2, min = 0, max = 200)  #time to peak flow (hrs)
+  * m = qunif(x3, min = 0, max = 10)  #hydrograph shape parameter
+  * edge = qunif(x4, min = 10, max = 25)  #inflow channel width (m)
+  
+```{r obs}
+#### load observed floodplain #### 
 
-```
+## load dem
+load('C:/Users/cbowers/Desktop/dem_save.Rdata')
+# res(dem)
 
-```{r}
-df.2$hitrate <- df.2$TP/(df.2$TP + df.2$FN)
-df.2$falsealarm <- df.2$FP/(df.2$FP + df.2$TP)
+# ## load 100-year floodplain
+# NFHL <- st_read('D:/Research/_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp', quiet = TRUE) %>%
+#   st_transform(6417)
+# floodzone <- function(x) {
+#   if (x %in% c('A', 'A99', 'AE', 'AH', 'AO')) {
+#     return('YES')
+#   } else if (x %in% c('V', 'VE')) {
+#     return('WAVE')
+#   } else if (x %in% c('D', 'X')) {
+#     return('NO')
+#   } else if (x == 'OPEN WATER') {
+#     return('WATER')
+#   } else {
+#     return(NA)
+#   }
+# }
+# NFHL <- NFHL %>%
+#   mutate(FLOODPLAIN = factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))) %>%
+#   dplyr::select(FLOODPLAIN, geometry) %>%
+#   subset(FLOODPLAIN == 'YES') %>%
+#   mutate(NFHL = 1)
+# 
+# ## get rid of additional floodplain pixels
+# remove.pixels <-
+#   st_read('D:/Research/_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp',
+#           quiet = TRUE) %>% st_zm %>%
+#   st_transform(4269) %>%
+#   st_crop(sonoma) %>%
+#   filter(GNIS_Name %in% c('Dry Creek', 'Mark West Creek', 'Austin Creek')) %>%
+#   filter(!(OBJECTID %in% c(1294,1297,1298,42552,106984,1263,1264,
+#                            106986,20379,57388,1653,1652,116351))) %>%
+#   st_transform(6417) %>%
+#   st_union %>%
+#   st_buffer(dist = 250) %>%
+#   st_difference(russian %>% st_transform(6417) %>% st_buffer(500) %>% st_union) %>%
+#   as('Spatial') %>%
+#   rasterize(dem)
+# 
+# ## create raster of observed values
+# obs.full <- NFHL %>%
+#   dplyr::select(NFHL) %>%
+#   st_transform(6417) %>%
+#   st_cast('POLYGON') %>%
+#   st_crop(aoi) %>%
+#   as('Spatial') %>%
+#   rasterize(dem, getCover = TRUE)
+# obs.full <- obs.full > 0.5
+# obs <- obs.full %>% overlay(remove.pixels, fun = function(x, y) ifelse(is.na(y), x, 0))
 
-g1 <- ggplot(df.2) + geom_point(aes(x = tp, y = hitrate))
-g2 <- ggplot(df.2) + geom_point(aes(x = m, y = hitrate))
-g3 <- ggplot(df.2) + geom_point(aes(x = SGCn, y = hitrate))
-g4 <- ggplot(df.2) + geom_point(aes(x = SGCr, y = hitrate))
-grid.arrange(g1, g2, g3, g4)
-
-g1 <- ggplot(df.2) + geom_point(aes(x = tp, y = falsealarm))
-g2 <- ggplot(df.2) + geom_point(aes(x = m, y = falsealarm))
-g3 <- ggplot(df.2) + geom_point(aes(x = SGCn, y = falsealarm))
-g4 <- ggplot(df.2) + geom_point(aes(x = SGCr, y = falsealarm))
-grid.arrange(g1, g2, g3, g4)
-
-g1 <- ggplot(df.2) + geom_point(aes(x = tp, y = fstat))
-g2 <- ggplot(df.2) + geom_point(aes(x = m, y = fstat))
-g3 <- ggplot(df.2) + geom_point(aes(x = SGCn, y = fstat))
-g4 <- ggplot(df.2) + geom_point(aes(x = SGCr, y = fstat))
-grid.arrange(g1, g2, g3, g4)
-
-g1 <- ggplot(df.2) + geom_point(aes(x = tp, y = hitrate/falsealarm))
-g2 <- ggplot(df.2) + geom_point(aes(x = m, y = hitrate/falsealarm)) + 
-  geom_vline(xintercept = 4, color = 'red')
-g3 <- ggplot(df.2) + geom_point(aes(x = SGCn, y = hitrate/falsealarm))
-g4 <- ggplot(df.2) + geom_point(aes(x = SGCr, y = hitrate/falsealarm)) + 
-  geom_vline(xintercept = 0.03, color = 'red')
-grid.arrange(g1, g2, g3, g4)
-
-## choose m = 4 and SGCr = 0.03 (defaults)
-
-```
-
-```{r}
-## generate values for gridded simulation
-
-require(lhs)
-samples <- improvedLHS(n = 5000, k = 3)
-samples <- samples %>%
- as.data.frame %>%
- setNames(paste0('x', 1:3)) %>%
- mutate(SGCn = qunif(x1, min = 0.035, max = 0.075),
-        tp = (x2*2) %>% exp %>% punif(min = 1, max = exp(2)) %>% qunif(min = 0, max = 200),
-        Qp = (x3*2) %>% exp %>% punif(min = 1, max = exp(2)) %>% qunif(min = 0, max = 4000)) %>%
- select(SGCn, tp, r)
-
-
-
-ggplot(catalog) + 
-  geom_histogram(aes(x = Qp/mft^3))
-
-
-
-#write.table(samples, file = 'samples_grid.txt',
-#            row.names = FALSE, quote = FALSE, sep = '\t')
-
-samples <- read.table('samples_grid.txt', header = TRUE, sep = '\t')
-```
-
-```{r}
-## add gaugefiles
-
-temp <- whatNWISsites(stateCd = 'CA', countyCd = 'Sonoma') %>% 
-  filter(grepl('RUSSIAN', station_nm))
-temp <- temp %>% st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma))
-
-temp2 <- readNWISdv(siteNumbers = temp$site_no, parameterCd = param, statCd = statcode,
-           startDate = '2005-12-01', endDate = '2006-01-15') %>% 
-  renameNWISColumns()
-
-temp3 <- readNWISdata(sites = temp$site_no, parameterCd = param, 
-                      startDate = '2005-12-01', endDate = '2006-01-15',
-                      service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns()
-
-temp2 %>% filter(site_no %in% c(11463980, 11467002))
-
-unique(temp2$site_no)
-unique(temp3$site_no)
-
-
-gauges <- c(11464000, 11467000)
-stages <- 11467002
-
-temp %>% filter(site_no %in% gauges) %>% st_coordinates()
-        
+## save out values
+# save(NFHL, obs, obs.full, remove.pixels, file = 'C:/Users/cbowers/Desktop/NFHL.Rdata')
+load('C:/Users/cbowers/Desktop/NFHL.Rdata')
 
 ```
 
 ```{r}
+#### load simulated floodplain ####
+
+## find best-fit simulation
+sim.list <- 
+  list.files('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-27 rp100/results') %>% 
+  gsub('rpflow', '', .) %>% gsub('.max', '', .) %>% toNumber
+
+num_cores <- 5
+pb <- txtProgressBar(min = 0, max = length(sim.list), style = 3)
+cl <- parallel::makeCluster(num_cores)
+registerDoSNOW(cl)
+accuracy <-
+  foreach(i = sim.list, .combine = 'rbind',
+    .packages = c('raster', 'dplyr'),
+    .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
+# accuracy <- data.frame(id = NA, hitrate = NA, falsealarm = NA, fstat = NA, bias = NA)[-1,]
+# for (i in sort(sim.list)) {
+      sim <-
+        paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-27 rp100/results/rpflow',
+               i, '.max') %>% raster %>%
+        overlay(dem, fun = function(x,y) ifelse(y>1, x, NA))
+      temp <- obs %>% 
+        overlay(sim, fun = function(x,y) {
+          ifelse(x > 0 & y > 0, 0, ifelse(
+            x > 0 & y <= 0, -1, ifelse(
+              x <= 0 & y > 0, 1, NA)))})
+      
+      tb <- table(temp[])
+      # accuracy[i,] <- 
+        c(id = i, 
+        hitrate = unname(tb[2] / sum(tb[1:2])),
+        falsalarm = unname(tb[3] / sum(tb[2:3])),
+        fstat = unname(tb[2] / sum(tb)),
+        bias = unname(tb[3] / tb[1]))
+      # setTxtProgressBar(pb, i)
+    }
+stopCluster(cl)
+
+samples <-
+  read.table('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-27 rp100/samples_rp100.txt',
+             header = TRUE) %>%
+  mutate(id = 1:nrow(.)) %>% 
+  left_join(data.frame(accuracy), by = 'id')
+
+g <- samples %>% 
+  mutate(bias.odds = bias / (1 + bias)) %>% 
+  ggplot() + 
+  geom_point(aes(x = fstat, y = bias.odds, color = id)) + 
+  geom_hline(yintercept = 0.5, linetype = 'dashed') + 
+  geom_vline(xintercept = 1, linetype = 'dashed')
+plotly::ggplotly(g)
+
+samples <- samples %>% 
+  mutate(bias.odds = bias / (1 + bias)) %>% 
+  mutate(good = case_when(
+    fstat > 0.68 ~ TRUE,
+    bias.odds > 0.45 & bias.odds < 0.55 & fstat > 0.65 ~ TRUE))
+
+```
+
+```{r}
+#1D
+ggplot(samples) + geom_point(aes(x = SGCn, y = fstat, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = tp, y = fstat, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = m, y = fstat, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = edge, y = fstat, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+
+#2D
+ggplot(samples) + geom_point(aes(x = SGCn, y = tp, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = SGCn, y = m, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = SGCn, y = edge, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = tp, y = m, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = tp, y = edge, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+ggplot(samples) + geom_point(aes(x = m, y = edge, color = good)) + 
+  scale_color_manual(values = baker[5], na.value = 'grey80')
+
+## conclusions: SGCn and edgewidth matter more than tp and m
+## (which is weird, tp should definitely matter)
+# g <- ggplot(samples) + geom_point(aes(x = SGCn, y = edge, fill = id, color = good)) + 
+#   scale_color_manual(values = baker[5], na.value = 'grey80')
+# plotly::ggplotly(g)
+
 ggplot() + 
-  geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70', fill = 'grey90') + 
-  geom_sf(data = russian %>% st_crop(sonoma) %>% st_transform(crs(dem))) + 
-  geom_raster(data = raster.df(dem), aes(x = x, y = y), fill = 'red', alpha = 0.15) + 
-  geom_sf(data = temp) + 
-  geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), color = 'red')
+  geom_point(data = samples, aes(x = SGCn, y = edge, color = fstat)) + 
+  geom_label(data = samples %>% filter(good), 
+             aes(x = SGCn, y = edge, label = id, color = fstat)) + 
+  geom_hline(yintercept = mean(edge.in$layer), linetype = 'dashed') +  
+  scale_color_scico(palette = 'lajolla', limits = c(0.65, NA), na.value = NA) + 
+  coord_cartesian(xlim = c(0.02, 0.04), ylim = c(22,25))
+ggplot(samples %>% filter(good)) + 
+  geom_point(data = samples, aes(x = SGCn, y = edge, color = bias)) + 
+  geom_label(aes(x = SGCn, y = edge, label = id, color = bias)) + 
+  geom_hline(yintercept = mean(edge.in$layer), linetype = 'dashed') +  
+  scale_color_scico(palette = 'berlin', limits = c(0, 2), na.value = NA) + 
+  coord_cartesian(xlim = c(0.02, 0.04), ylim = c(22,25))
 
-rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
-  st_zm(st_transform(albers)) 
-creeks <- st_read('./_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp', quiet = TRUE) %>% 
-  st_zm(st_transform(albers)) 
-russian <- rivers %>% 
-  subset(grepl('Russian', GNIS_Name))
+g <- ggplot(samples) +
+  geom_point(aes(x = SGCn, y = edge, color = id)) +
+  geom_hline(yintercept = mean(edge.in$layer), linetype = 'dashed') +
+  coord_cartesian(xlim = c(0.02, 0.04), ylim = c(22,25))
+plotly::ggplotly(g)
 
-rivers <- rivers %>% st_transform(st_crs(sonoma)) %>% st_crop(sonoma)
-creeks <- creeks %>% st_transform(st_crs(sonoma)) %>% st_crop(sonoma)
+samples %>% filter(id %in% c(602,47,897))
 
-ggplot() + 
-  geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70', fill = 'grey90') + 
-  geom_sf(data = russian %>% st_crop(sonoma), color = ggcolor(4)[4]) + 
-  geom_sf(data = rivers %>% 
-            filter(grepl('Russian', GNIS_Name)) %>% 
-            st_transform(crs(dem)) %>% st_crop(dem), 
-          aes(color = GNIS_Name), size = 1) + 
-  geom_sf(data = creeks %>% 
-            filter(grepl('Dry', GNIS_Name) | grepl('Mill', GNIS_Name) | grepl('Mark', GNIS_Name)) %>% 
-            st_transform(crs(dem)) %>% st_crop(dem),
-          aes(color = GNIS_Name), size = 1) + 
-  geom_raster(data = raster.df(dem), aes(x = x, y = y), fill = 'grey50', alpha = 0.15) + 
-  geom_sf(data = temp, size = 1.5, color = 'black') + 
-  geom_sf(data = temp, size = 1, color = 'grey80') + 
-  geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), size = 1.5, color = 'red') + 
-  geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), size = 1, color = 'black') + 
-  theme_void()
-ggsave('C:/Users/cbowers/Desktop/test.jpg', height = 6)
+## final decision: use the "true" edgewidth & SGCn = 0.0275
+
+## note: all rp100 simulations were run with a truncated russian.n.asc (min=0.035),
+## but since 0.0275 < the true min (0.031) things should end up the same
+
+## go wtih id = 678 as the winner
+
+```
+
+
+```{r}
+# ggplot() + 
+#   geom_sf(data = sonoma %>% st_transform(6417), color = 'grey70', fill = 'grey90') + 
+#   geom_sf(data = russian %>% st_crop(sonoma) %>% st_transform(6417)) + 
+#   geom_raster(data = raster.df(dem), aes(x = x, y = y), fill = 'red', alpha = 0.15) + 
+#   geom_sf(data = temp) + 
+#   geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), color = 'red')
+# 
+# rivers <- st_read('./_gis/California/_hydrology/nhd_majorrivers/MajorRivers.shp', quiet = TRUE) %>% 
+#   st_zm(st_transform(albers)) 
+# creeks <- st_read('./_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp', quiet = TRUE) %>% 
+#   st_zm(st_transform(albers)) 
+# russian <- rivers %>% 
+#   subset(grepl('Russian', GNIS_Name))
+# 
+# rivers <- rivers %>% st_transform(st_crs(sonoma)) %>% st_crop(sonoma)
+# creeks <- creeks %>% st_transform(st_crs(sonoma)) %>% st_crop(sonoma)
+# 
+# ggplot() + 
+#   geom_sf(data = sonoma %>% st_transform(crs(dem)), color = 'grey70', fill = 'grey90') + 
+#   geom_sf(data = russian %>% st_crop(sonoma), color = ggcolor(4)[4]) + 
+#   geom_sf(data = rivers %>% 
+#             filter(grepl('Russian', GNIS_Name)) %>% 
+#             st_transform(crs(dem)) %>% st_crop(dem), 
+#           aes(color = GNIS_Name), size = 1) + 
+#   geom_sf(data = creeks %>% 
+#             filter(grepl('Dry', GNIS_Name) | grepl('Mill', GNIS_Name) | grepl('Mark', GNIS_Name)) %>% 
+#             st_transform(crs(dem)) %>% st_crop(dem),
+#           aes(color = GNIS_Name), size = 1) + 
+#   geom_raster(data = raster.df(dem), aes(x = x, y = y), fill = 'grey50', alpha = 0.15) + 
+#   geom_sf(data = temp, size = 1.5, color = 'black') + 
+#   geom_sf(data = temp, size = 1, color = 'grey80') + 
+#   geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), size = 1.5, color = 'red') + 
+#   geom_sf(data = temp %>% filter(site_no %in% c(gauges, stages)), size = 1, color = 'black') + 
+#   theme_void()
+# ggsave('C:/Users/cbowers/Desktop/test.jpg', height = 6)
   
 
 ```

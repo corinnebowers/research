@@ -58,9 +58,6 @@ generate_runoff <- function(precip, catalog, probabilistic = FALSE, n.runoff = 1
     wateryear.df[wy, 'duration'] <- index$duration
   }
   
-  ggplot(wateryear.df) + 
-    geom_point(aes(x = precip, y = runoff))
-  
   ## fit the curve number function based on annual max storms
   if (probabilistic) {
     ## bootstrap confidence intervals for CN parameters

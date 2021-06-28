@@ -36,32 +36,111 @@ load('C:/Users/cbowers/Desktop/catalog.Rdata')
 ## compute full loss histogram
 ```{r}
 ## look at losses for different storm years
+# year <- 1995; year.id <- 89; loss.est <- 50*(91.6/155) * 1.68e6
+# year <- 2006; year.id <- 249; loss.est <- 104*(91.6/155) * 1.28e6
+# year <- 2017; year.id <- 421; loss.est <- 15.2*(91.6/155) * 1.04e6
+year <- 2019; year.id <- 459; loss.est <- 91.6e6
 
-year <- 1995
-year.id = 74
-# catalog[74,] 'event'] <- 1995
-# catalog[220,] 'event'] <- 2006
-# catalog[411,] 'event'] <- 2019
-loss.est <- 30.5 * 1.74e6
-# real losses = 33.8 (or 30.5) in 1995, 71.6 (or 64.7) in 2006, 91.6 in 2019
-# inflation = 1.68 in 1995, 1.28 in 2006 (compared to 2020)
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/AR.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/PRCP.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/Q.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/INUN.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/DM.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/DV.Rdata'))
 
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/AR.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/PRCP.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/Q.Rdata'))
-# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/INUN.Rdata'))
-# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/DM.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/DV.Rdata'))
-
-ggplot(loss.sim) + 
-  geom_histogram(aes(x = loss, y = ..density..), color = 'black', fill = 'grey90', bins = 100) + 
+ggplot(loss.sim %>% filter(n.AR == 1)) + 
+  geom_histogram(aes(x = loss, y = ..density..), color = 'black', fill = 'grey90', 
+                 bins = sqrt(nrow(loss.sim)), boundary = 0) + 
   geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
   scale_x_origin('Estimated Loss', 
     labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M', accuracy = 1)) + 
   scale_y_origin('Frequency of Occurrence') + 
+  # coord_cartesian(xlim = c(0, 305e6)) +
   ggtitle(paste0(year, ' Event'))
-ggsave('hist1995.jpg', width = 5, height = 4)
-nrow(loss.sim)/25^5
+ggsave(paste0('C:/Users/cbowers/Desktop/hist', year, '.jpg'), width = 5, height = 4)
+
+nrow(loss.sim)/1e4
+1 - (sum(loss.sim$loss > loss.est) / 1e4)
+
+```
+
+```{r}
+## spatial distribution of loss
+sonoma_cbgs <- block_groups(state = 'CA', county = 'Sonoma')
+sonoma_blocks <- blocks(state = 'CA', county = 'Sonoma')
+wbd12 <- st_read('D:/Research/_gis/California/_floodhazard/WBD_18_HU2_Shape/Shape/WBDHU12.shp',
+                 quiet = TRUE) %>% st_transform(4269)
+
+# buildings <- buildings %>%
+#   st_as_sf(coords = c('X', 'Y'), crs = 4269) %>%
+#   st_intersection(sonoma %>% transmute(tract = toNumber(GEOID))) %>%
+#   st_intersection(sonoma_cbgs %>% transmute(blockgroup = toNumber(GEOID))) %>%
+#   st_intersection(sonoma_blocks %>% transmute(block = toNumber(GEOID10))) %>% 
+#   st_intersection(wbd12 %>% transmute(huc12 = HUC12)) 
+# buildings <- buildings %>% 
+#   st_drop_geometry %>% 
+#   cbind(st_coordinates(buildings))
+# save(buildings, file = 'C:/Users/cbowers/Desktop/buildings.Rdata')
+
+## census tracts
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/DV_tract.Rdata'))
+sonoma %>% 
+  mutate(group = toNumber(GEOID)) %>% 
+  left_join(loss.group, by = 'group') %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss)) %>% 
+  st_transform(6417) %>% st_crop(aoi) %>% 
+  ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = 'grey90', color = 'grey60') +
+  geom_sf(aes(fill = log10(loss+1)), color = NA) + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = NA, color = 'grey60') +
+  geom_sf(data = aoi, fill = NA, color = 'grey40') + 
+  geom_sf(data = russian %>% st_crop(sonoma), size = 1) + 
+  scale_fill_scico(palette = 'oslo', direction = -1)
+
+## census block groups
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/DV_blockgroup.Rdata'))
+sonoma_cbgs %>% 
+  mutate(group = toNumber(GEOID)) %>% 
+  left_join(loss.group, by = 'group') %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss)) %>% 
+  st_transform(6417) %>% st_crop(aoi) %>% 
+  ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = 'grey90', color = 'grey60') +
+  geom_sf(aes(fill = log10(loss+1)), color = NA) + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = NA, color = 'grey60') +
+  geom_sf(data = aoi, fill = NA, color = 'grey40') + 
+  geom_sf(data = russian %>% st_crop(sonoma), size = 1) + 
+  scale_fill_scico(palette = 'oslo', direction = -1)
+
+## census blocks
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/DV_block.Rdata'))
+sonoma_blocks %>% 
+  mutate(group = toNumber(GEOID10)) %>% 
+  left_join(loss.group, by = 'group') %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss)) %>% 
+  st_transform(6417) %>% st_crop(aoi) %>% 
+  ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = 'grey90', color = 'grey60') +
+  geom_sf(aes(fill = log10(loss+1)), color = NA) + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = NA, color = 'grey60') +
+  geom_sf(data = aoi, fill = NA, color = 'grey40') + 
+  geom_sf(data = russian %>% st_crop(sonoma), size = 1) + 
+  scale_fill_scico(palette = 'oslo', direction = -1)
+
+## HUC-12 watersheds
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/mc_beta/prcp4/DV_huc12.Rdata'))
+wbd12 %>% 
+  mutate(group = toNumber(HUC12)) %>% 
+  left_join(loss.group %>% mutate(group = toNumber(group)), by = 'group') %>% 
+  mutate(loss = ifelse(is.na(loss), 0, loss)) %>% 
+  st_transform(6417) %>% st_crop(aoi) %>% 
+  ggplot() + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = 'grey90', color = 'grey60') +
+  geom_sf(aes(fill = log10(loss+1)), color = NA) + 
+  geom_sf(data = sonoma %>% st_transform(6417), fill = NA, color = 'grey60') +
+  geom_sf(data = aoi, fill = NA, color = 'grey40') + 
+  geom_sf(data = russian %>% st_crop(sonoma), size = 1) + 
+  scale_fill_scico(palette = 'oslo', direction = -1)
 
 ```
 
@@ -74,7 +153,7 @@ loss.merged <- loss.sim %>%
             by = c('n.precip', 'n.runoff', 'n.hydro')) %>% 
   mutate(loss = ifelse(is.na(loss), 0, loss))
 
-loss.merged %>% 
+g1 <- loss.merged %>% 
   group_by(n.precip) %>% 
   summarize(
     precip_mm = precip_mm[1], loss.mean = mean(loss), 
@@ -82,18 +161,18 @@ loss.merged %>%
   ggplot() + 
   geom_segment(aes(x = precip_mm, xend = precip_mm, 
                    y = loss.lower, yend = loss.upper), color = 'grey70') + 
-  geom_point(aes(x = precip_mm, y = loss.mean)) + 
+  geom_point(aes(x = precip_mm, y = loss.mean), alpha = 0.25) + 
   geom_hline(yintercept = loss.est, size = 1, linetype = 'dashed') + 
   geom_vline(xintercept = toNumber(catalog[year.id, 'precip']), color = 'red') + 
   scale_x_origin('Precipitation (in)', labels = comma_format(scale = 1/25.4, accuracy = 1), 
                  breaks = seq(0, 20*25.4, 25.4)) + 
   scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
-  ggtitle(paste(year, 'Event')) + 
-  theme_classic()
-ggsave('precip1995.jpg', width = 5, height = 4)
+  # coord_cartesian(ylim = c(0,300e6)) +
+  ggtitle(paste(year, 'Event'))
+# ggsave('precip1995.jpg', width = 5, height = 4)
 
 mft <- 3.28084
-loss.merged %>% 
+g2 <- loss.merged %>% 
   group_by(n.precip, n.runoff, n.hydro) %>% 
   summarize(
     Qp_m3s = Qp_m3s[1], loss.mean = mean(loss), 
@@ -102,62 +181,265 @@ loss.merged %>%
   ggplot() + 
   geom_segment(aes(x = Qp_m3s, xend = Qp_m3s, 
                    y = loss.lower, yend = loss.upper), color = 'grey70') + 
-  geom_point(aes(x = Qp_m3s, y = loss.mean)) + 
+  geom_point(aes(x = Qp_m3s, y = loss.mean), alpha = 0.25) + 
   geom_hline(yintercept = loss.est, size = 1, linetype = 'dashed') + 
   geom_vline(xintercept = toNumber(catalog[year.id, 'Qp'])/mft^3, color = 'red') + 
   scale_x_origin('Streamflow (m3/s)', labels = comma) + 
   scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
-  ggtitle(paste(year, 'Event')) + 
-  theme_classic()
-ggsave('flow1995.jpg', width = 5, height = 4)
+  # coord_cartesian(ylim = c(0,300e6)) +
+  ggtitle(paste(year, 'Event'))
+# ggsave('flow1995.jpg', width = 5, height = 4)
+
+ggarrange(g1, g2, ncol = 2)
+# ggsave(paste0(year, '.jpg'), width = 9, height = 5)
+
+catalog[year.id,]
+
+```
+
+plot results from running PARRA for the entire catalog
+```{r}
+## load full simulation
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/AR.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/PRCP.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/Q.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/INUN.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/DM.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/DV.Rdata'))
+
+loss.merged <- loss.sim %>% 
+  full_join(precip %>% 
+              select(n.AR, n.precip, precip = precip_mm), 
+            by = c('n.AR', 'n.precip')) %>% 
+  full_join(hydrograph %>% 
+              select(n.AR, n.precip, runoff = runoff_mm, Qp = Qp_m3s), 
+            by = c('n.AR', 'n.precip')) %>% 
+  mutate(runoff = ifelse(is.na(runoff), 0, runoff),
+         Qp = ifelse(is.na(Qp), 0, Qp),
+         loss = ifelse(is.na(loss), 0, loss))
+
+g1 <- ggplot() + 
+  geom_point(data = loss.merged, aes(x = precip, y = loss), color = 'grey70') + 
+  geom_point(data = loss.merged %>% filter(n.AR == 89), 
+             aes(x = precip, y = loss, color = '1995')) + 
+  geom_point(data = loss.merged %>% filter(n.AR == 249), 
+             aes(x = precip, y = loss, color = '2006')) + 
+  geom_point(data = loss.merged %>% filter(n.AR == 459), 
+             aes(x = precip, y = loss, color = '2019')) + 
+  scale_color_manual('Year', values = baker[-3],
+                     guide = guide_legend(override.aes = list(size = 2))) +
+  scale_x_origin('Precipitation (in)', labels = comma_format(scale = 1/25.4, accuracy = 1), 
+                 breaks = seq(0, 30*25.4, 5*25.4)) + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  coord_cartesian(xlim = c(0, 30*25.4), ylim = c(0, 750e6), clip = 'off')
+g2 <- ggplot() + 
+  geom_point(data = loss.merged, aes(x = Qp, y = loss), color = 'grey70') + 
+  geom_point(data = loss.merged %>% filter(n.AR == 89), 
+             aes(x = Qp, y = loss, color = '1995')) + 
+  geom_point(data = loss.merged %>% filter(n.AR == 249), 
+             aes(x = Qp, y = loss, color = '2006')) + 
+  geom_point(data = loss.merged %>% filter(n.AR == 459), 
+             aes(x = Qp, y = loss, color = '2019')) + 
+  scale_color_manual('Year', values = baker[-3],
+                     guide = guide_legend(override.aes = list(size = 2))) +
+  scale_x_origin('Streamflow (m3/s)', labels = comma) + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  coord_cartesian(xlim = c(0, 2500), ylim = c(0, 750e6), clip = 'off')
+
+# ggplot() + geom_point(data = loss.merged, aes(x = precip, y = Qp))
+
+ggarrange(g1, g2, ncol = 2, common.legend = TRUE, legend = 'bottom')
+
+```
+
+
+## estimate return period for losses 
+```{r}
+temp <- read_csv('C:/Users/cbowers/Downloads/data.csv', skip = 22, n_max = 8) %>% 
+  mutate(AEP = (str_locate(temp$Statistic, '-')[,'start'] - 1) %>% 
+           str_sub(Statistic, end = .) %>% toNumber) %>% 
+  mutate(RP = 1/(AEP/100)) %>% 
+  mutate(flow_m3s = Value / mft^3)
+
+lm(log(RP) ~ flow_m3s, data = temp) %>% summary
+ggplot() + 
+  geom_point(data = temp, aes(x = flow_m3s, y = RP)) + 
+  geom_line(data = data.frame(dx = seq(100, 5000, 10)),
+            aes(x = dx, y = exp(1.683e-03*dx-7.154e-01))) + 
+  scale_x_origin() #+ scale_y_log10()
+  
+g1 <- loss.merged %>% 
+  mutate(RP = exp(1.683e-03*Qp - 7.154e-01)) %>% 
+  # arrange(desc(RP)) %>% View
+  ggplot() + geom_point(aes(x = RP, y = loss)) + 
+  scale_x_origin('Return Period (years)') + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank())
+g2 <- loss.merged %>% 
+  ggplot() + geom_point(aes(x = Qp/mft^3, y = loss)) +
+  scale_x_origin('Streamflow @ USGS 11463500 (m3/s)') + 
+  scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6))
+cowplot::plot_grid(g2, g1, ncol = 2, align = 'hv')
+ggsave('C:/Users/cbowers/Desktop/temp.jpg', width = 10, height = 5)
+
+loss.merged %>% 
+  mutate(RP = exp(1.683e-03*Qp - 7.154e-01)) %>% 
+  summarize(annual_loss = Mean(loss/RP)/1e6)
+  summarize(annual_loss = Sum(loss/RP)/1e6/100/33)
+## based on this, the AAL is $118M
+
+118/386
+## does Sonoma represent ~30% of CA's flood losses?
+
+claims %>% 
+  mutate(sonoma = (toNumber(censustract) %in% toNumber(sonoma$GEOID))) %>% 
+  group_by(sonoma) %>% 
+  summarize(total_loss = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim)) %>% 
+  mutate(pct_loss = total_loss/sum(total_loss))
+## according to claims, it's only 18%
+
+## what would the AAL be according to claims?
+claims %>% 
+  filter(toNumber(censustract) %in% toNumber(sonoma$GEOID)) %>% 
+  summarize(total_loss = Sum(amountpaidonbuildingclaim) + Sum(amountpaidoncontentsclaim)) %>% 
+  mutate(AAL = total_loss/diff(range(year(claims$dateofloss)))/1e6*30)
+## about $53M, or ~14% of the CA total
+
+loss.merged %>% 
+  arrange(loss) %>% 
+  mutate(RP = (1:nrow(.))*33/nrow(.)) %>%
+  # mutate(RP2 = exp(1.683e-03*Qp - 7.154e-01)) %>% 
+  # ggplot() + 
+  # geom_point(aes(x = loss, y = RP1, color = 'RP1')) + 
+  # geom_point(aes(x = loss, y = RP2, color = 'RP2')) + 
+  # scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  # scale_y_origin()
+  summarize(annual_loss = Sum(loss/RP)/1e6/100/33)
+
+g1 <- ggplot() + 
+  geom_point(data = temp, aes(x = flow_m3s, y = RP)) + 
+  geom_line(data = data.frame(dx = seq(100, 5000, 10)),
+            aes(x = dx, y = exp(1.683e-03*dx-7.154e-01))) + 
+  scale_x_origin() + scale_y_origin('Return Period (years)') + 
+  coord_cartesian(xlim = c(0,5000), clip = 'off') + 
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank())
+g2 <- ggplot() + 
+  geom_histogram(data = catalog, aes(x = Qp/mft^3), boundary = 0,
+                 color = 'black', fill = 'grey90', bins = 20) +
+  scale_x_origin('Streamflow @ USGS 11463500 (m3/s)') + scale_y_origin() + 
+  coord_cartesian(xlim = c(0,5000), clip = 'off') +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank())
+cowplot::plot_grid(g1, g2, nrow = 2, align = 'v', rel_heights = c(2,1)) 
 
 ```
 
 ```{r}
-for (i in 1:30) {
-  precip <- 
-    generate_precip(
-      AR = catalog[year.id,] %>% transmute(n.AR = 1, IVT_max, duration), 
-      catalog = catalog, 
-      probabilistic = TRUE, 
-      n.precip = 25)
-  g <- ggplot() + 
-    geom_histogram(data = precip, aes(x = precip_mm), color = 'black', fill = 'grey90', bins = 10) + 
-    geom_vline(xintercept = toNumber(catalog[year.id, 'precip']), color = 'red') + 
-    scale_x_origin('Precipitation (in)', labels = comma_format(scale = 1/25.4, accuracy = 1), 
-                   breaks = seq(0, 20*25.4, 25.4)) + 
-    scale_y_origin('Expected Loss ($M)', labels = comma_format(scale = 1e-6)) + 
-    ggtitle(paste(year, 'Event')) + 
-    theme_classic()
-  print(g)
-}
+## alternative return period method
+ggplot() + 
+  geom_point(data = loss.merged %>% arrange(desc(loss)) %>% 
+               mutate(exceed = (1:nrow(.))/3200) %>% mutate(RP = 1/exceed),
+             aes(x = RP, y = loss)) + 
+  geom_point(data = loss.merged %>% group_by(n.AR) %>% 
+               summarize(loss.mean = mean(loss)) %>% arrange(desc(loss.mean)) %>% 
+               mutate(exceed = (1:nrow(.))/32) %>% 
+               mutate(RP = 1/exceed),
+             aes(x = RP, y = loss.mean), color = 'red') + 
+  # scale_x_origin('Return Period (years)') + 
+  scale_x_log10() +
+  scale_y_origin('Loss ($M)', labels = comma_format(scale = 1e-6))
+## it seems like the larger catalog is in fact hazard-consistent
 
+loss.merged %>% 
+  arrange(desc(loss)) %>% 
+  mutate(exceed = (1:nrow(.))/3200) %>% 
+  ggplot() + 
+  geom_point(aes(x = loss, y = exceed)) + 
+  scale_x_origin('Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  scale_y_log10('Probability of Exceedance')
+
+sum(loss.merged$loss/3200) / 1e6
+## this is right in line with my other two estimates --> good! 
+
+```
+
+```{r}
+## check the mitigated case
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/AR.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/PRCP.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/Q.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/INUN.Rdata'))
+
+load('C:/Users/cbowers/Desktop/buildings.Rdata')
+buildings <- buildings %>% 
+  st_as_sf(coords = c('X', 'Y'), crs = 4269) %>% 
+  st_transform(6417)
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/mitigated/DM.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/full/mitigated/DV.Rdata'))
+
+ggplot() + 
+  geom_point(data = loss.merged %>% arrange(desc(loss)) %>%  mutate(exceed = (1:nrow(.))/3200),
+             aes(x = loss, y = exceed)) +
+  geom_point(data = loss.sim %>% arrange(desc(loss)) %>%  mutate(exceed = (1:nrow(.))/3200),
+             aes(x = loss, y = exceed, color = 'mitigated')) + 
+  scale_x_origin('Loss ($M)', labels = comma_format(scale = 1e-6)) + 
+  scale_y_log10('Probability of Exceedance')
+
+## why is the mitigated higher than the normal?
+
+found_ht <- map_dfc(.x = 1:100, ~assign_foundations(buildings, nsi1.found))
+temp <- data.frame(bldg = 1:nrow(buildings)) %>% 
+  mutate(ht.05 = apply(found_ht, 1, function(x) quantile(x, 0.05)),
+         ht.25 = apply(found_ht, 1, function(x) quantile(x, 0.25)),
+         ht.median = apply(found_ht, 1, median),
+         ht.mean = apply(found_ht, 1, mean),
+         ht.75 = apply(found_ht, 1, function(x) quantile(x, 0.75)),
+         ht.95 = apply(found_ht, 1, function(x) quantile(x, 0.95))) %>% 
+  cbind(raised = buildings$raised_m)
+ggplot(temp) + 
+  geom_segment(aes(x = raised, xend = raised, y = ht.05, yend = ht.95), color = 'grey70') + 
+  geom_point(aes(x = raised, y = ht.mean)) + 
+  geom_parity()
 
 ```
 
 
 ## compare deterministic losses
 ```{r}
-year <- 2019
-model <- 'DV'
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
-            '/deterministic/', model, '_AR.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
-            '/deterministic/', model, '_PRCP.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
-            '/deterministic/', model, '_Q.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
-            '/deterministic/', model, '_INUN.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
-            '/deterministic/', model, '_DM.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
-            '/deterministic/', model, '_DV.Rdata'))
-
+# model <- 'PRCP'
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year,
+#             '/deterministic/', model, '_AR.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year,
+#             '/deterministic/', model, '_PRCP.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year,
+#             '/deterministic/', model, '_Q.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year,
+#             '/deterministic/', model, '_INUN.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year,
+#             '/deterministic/', model, '_DM.Rdata'))
+# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year,
+#             '/deterministic/', model, '_DV.Rdata'))
 # loss.prcp <- loss.sim
 # loss.q <- loss.sim
 # loss.inun <- loss.sim
 # loss.dm <- loss.sim
 # loss.dv <- loss.sim
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/deterministic/PRCP_DV.Rdata')); loss.prcp <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/deterministic/Q_DV.Rdata')); loss.q <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/deterministic/INUN_DV.Rdata')); loss.inun <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/deterministic/DM_DV.Rdata')); loss.dm <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/deterministic/DV_DV.Rdata')); loss.dv <- loss.sim
+
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/deterministic/zero/DV.Rdata'))
+loss.det <- loss.sim$loss
 
 apply(loss.prcp %>% select(-loss), 2, max)
 apply(loss.q %>% select(-loss), 2, max)
@@ -165,8 +447,6 @@ apply(loss.inun %>% select(-loss), 2, max)
 apply(loss.dm %>% select(-loss), 2, max)
 apply(loss.dv %>% select(-loss), 2, max)
 
-# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/deterministic/zero/DV.Rdata'))
-# loss.det <- loss.sim$loss
 
 # ggplot() +
 #   geom_density(aes(x = loss.prcp$loss, color = 'PRCP', fill = 'PRCP', y = ..scaled..),
@@ -191,8 +471,9 @@ xmax <- 90e6
 g1 <- ggplot(loss.prcp) + 
   geom_density(aes(x = loss, y = ..scaled..), fill = 'grey90') +
   geom_text(data = data.frame(lab = 'G(PRCP)'), 
-            aes(x = 10e6, y = 0.8, label = lab), fontface = 'bold') + 
-  geom_vline(xintercept = loss.det, linetype = 'dashed') + 
+            aes(x = 60e6, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.det, color = 'grey50') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
   scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
   scale_y_origin() + 
   coord_cartesian(xlim = c(0, xmax)) + 
@@ -202,8 +483,9 @@ g1 <- ggplot(loss.prcp) +
 g2 <- ggplot(loss.q) + 
   geom_density(aes(x = loss, y = ..scaled..), fill = 'grey90') +
   geom_text(data = data.frame(lab = 'G(Q)'), 
-            aes(x = 10e6, y = 0.8, label = lab), fontface = 'bold') + 
-  geom_vline(xintercept = loss.det, linetype = 'dashed') + 
+            aes(x = 60e6, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.det, color = 'grey50') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
   scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
   scale_y_origin() + 
   coord_cartesian(xlim = c(0, xmax)) + 
@@ -213,8 +495,9 @@ g2 <- ggplot(loss.q) +
 g3 <- ggplot(loss.inun) + 
   geom_density(aes(x = loss, y = ..scaled..), fill = 'grey90') +
   geom_text(data = data.frame(lab = 'G(INUN)'), 
-            aes(x = 10e6, y = 0.8, label = lab), fontface = 'bold') + 
-  geom_vline(xintercept = loss.det, linetype = 'dashed') + 
+            aes(x = 60e6, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.det, color = 'grey50') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
   scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
   scale_y_origin() + 
   coord_cartesian(xlim = c(0, xmax)) + 
@@ -224,8 +507,9 @@ g3 <- ggplot(loss.inun) +
 g4 <- ggplot(loss.dm) + 
   geom_density(aes(x = loss, y = ..scaled..), fill = 'grey90') +
   geom_text(data = data.frame(lab = 'G(DM)'), 
-            aes(x = 10e6, y = 0.8, label = lab), fontface = 'bold') + 
-  geom_vline(xintercept = loss.det, linetype = 'dashed') + 
+            aes(x = 60e6, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.det, color = 'grey50') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
   scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
   scale_y_origin() + 
   coord_cartesian(xlim = c(0, xmax)) + 
@@ -235,8 +519,9 @@ g4 <- ggplot(loss.dm) +
 g5 <- ggplot(loss.dv) + 
   geom_density(aes(x = loss, y = ..scaled..), fill = 'grey90') +
   geom_text(data = data.frame(lab = 'G(DV)'), 
-            aes(x = 10e6, y = 0.8, label = lab), fontface = 'bold') + 
-  geom_vline(xintercept = loss.det, linetype = 'dashed') + 
+            aes(x = 60e6, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.det, color = 'grey50') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
   scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
   scale_y_origin() + 
   coord_cartesian(xlim = c(0, xmax)) + 
@@ -251,1475 +536,114 @@ ggarrange(g1, g4, g2, g5, g3, ncol = 2, nrow = 3) %>%
 ```
 
 ```{r}
-## retry with a different distribution of samples
+## look at it from the other direction
 
-year <- 2019
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/prcp1e4/AR.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/prcp1e4/PRCP.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/prcp1e4/Q.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/prcp1e4/INUN.Rdata'))
-# load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/n25/DM.Rdata'))
-load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, '/prcp1e4/DV.Rdata'))
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/reverse/PRCP_DV.Rdata')); loss.prcp <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/reverse/Q_DV.Rdata')); loss.q <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/reverse/INUN_DV.Rdata')); loss.inun <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/reverse/DM_DV.Rdata')); loss.dm <- loss.sim
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/reverse/DV_DV.Rdata')); loss.dv <- loss.sim
 
-
-```
-
-
-###################################################################################################
-
-4/27/21: try to fix underprediction in G(PRCP) and G(Q)
-
-## fix G(PRCP) underprediction
-```{r}
-catalog <- catalog %>% mutate(event = 0)
-catalog[74, 'event'] <- 1995
-catalog[220, 'event'] <- 2006
-catalog[411, 'event'] <- 2019
-catalog <- catalog %>% mutate(event = ifelse(event == 0, NA, event))
-
-AR <- catalog %>% select(-AR) %>% mutate(n.AR = 1:nrow(.))
-temp <-
-  foreach (t = seq(0, 1, 0.01), .combine = 'rbind') %do% {
-    model <- rq(precip ~ IVT_max*duration, data = catalog, tau = t)
-    prediction <- predict(model)
-    prediction <- ifelse(prediction < 0, 0, prediction)
-    c(tau = t, RMSE = RMSE(sort(prediction), sort(catalog$precip)))
-  }
-tau.best <- temp %>% as.data.frame %>% .[which.min(.$RMSE), 'tau']
-model <- rq(precip ~ IVT_max*duration, data = catalog, tau = tau.best)
-AR <- AR %>%
-  mutate(precip.mean = predict.rq(model, AR),
-         precip.sd = predict.se(model, catalog, AR))
-
-
-# ggplot(AR) +
-#   geom_segment(aes(x = IVT_max, xend = IVT_max, y = precip.mean, yend = precip),
-#                color = 'grey50') +
-#   geom_point(aes(x = IVT_max, y = precip.mean), color = 'grey30') +
-#   geom_point(aes(x = IVT_max, y = precip), color = 'grey70') +
-#   geom_point(data = AR %>% filter(!is.na(event)),
-#              aes(x = IVT_max, y = precip, color = factor(event)), size = 2) +
-#   scale_color_manual(values = c('red', 'darkorange3', 'darkgreen')) +
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-# AR %>% mutate(norm = rnorm(nrow(.), mean = 0, sd = 2)) %>%
-#   ggplot() +
-#   geom_segment(aes(x = duration+norm, xend = duration+norm,
-#                    y = precip.mean, yend = precip),
-#                color = 'grey50') +
-#   geom_point(aes(x = duration+norm, y = precip.mean), color = 'grey30') +
-#   geom_point(aes(x = duration+norm, y = precip), color = 'grey70') +
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = duration+norm, y = precip, color = factor(event)), size = 2) +
-#   scale_color_manual(values = c('red', 'darkorange3', 'darkgreen')) +
-#   scale_x_origin() + scale_y_origin() + theme_classic()
+load(paste0('D:/Research/_sherlock/1. PARRA/_results/event_', year, 
+            '/reverse/all/DV.Rdata')); loss.all <- loss.sim
 
 # ggplot() +
-#   geom_segment(data = AR %>% filter(precip.mean > precip), color = 'red',
-#                aes(x = IVT_max, xend = IVT_max, y = precip.mean, yend = precip)) +
-#   geom_segment(data = AR %>% filter(precip.mean < precip), color = 'darkgreen',
-#                aes(x = IVT_max, xend = IVT_max, y = precip.mean, yend = precip)) +
-#   geom_point(data = AR %>% filter(!is.na(event)), aes(x = IVT_max, y = precip), size = 2) +
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-# AR %>% mutate(norm = rnorm(nrow(.), mean = 0, sd = 2)) %>%
-#   ggplot() +
-#   geom_segment(data = . %>% filter(precip.mean > precip), color = 'red',
-#                aes(x = duration+norm, xend = duration+norm,
-#                    y = precip.mean, yend = precip)) +
-#   geom_segment(data = . %>% filter(precip.mean < precip), color = 'darkgreen',
-#                aes(x = duration+norm, xend = duration+norm,
-#                    y = precip.mean, yend = precip)) +
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = duration+norm, y = precip), size = 2) +
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-
-```
-
-
-```{r}
-AR %>% arrange(precip) %>% mutate(precip.mean = sort(precip.mean)) %>% 
-  ggplot() + 
-  geom_point(aes(x = precip, y = precip.mean)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = precip, y = precip.mean, color = factor(event)), size = 2) + 
-  scale_color_manual(values = c('red', 'darkorange3', 'darkgreen')) + 
-  scale_x_origin() + scale_y_origin() + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-require(scico)
-AR %>% mutate(error = precip.mean - precip) %>% 
-  arrange(precip) %>% mutate(precip.mean = sort(precip.mean)) %>% 
-  arrange(abs(error)) %>% 
-  ggplot() + 
-  geom_point(aes(x = precip, y = precip.mean, color = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = precip, y = precip.mean, fill = error), size = 3, shape = 23) + 
-  scale_color_scico('Prediction \nError', palette = 'vik', 
-                    limits = c(-150, 150), direction = -1) + 
-  scale_fill_scico('Prediction \nError', palette = 'vik', 
-                   limits = c(-150, 150), direction = -1) + 
-  scale_x_continuous('Recorded Quantiles', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated Quantiles', expand = expansion(mult = c(0, 0.05))) + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-ggplot(AR) + 
-  geom_point(aes(x = precip, y = precip.mean)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = precip, y = precip.mean, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Recorded Precip') + scale_y_origin('Estimated Precip') + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-```
-
-
-```{r}
-# ggplot(AR) +
-#   geom_point(aes(x = precip, y = precip.mean, color = IVT_max)) +
-#   scale_x_origin() + scale_y_origin() +
-#   scale_color_scico(palette = 'bamako', direction = -1) +
-#   geom_parity() + coord_fixed() + theme_classic()
-# ggplot(AR) +
-#   geom_point(aes(x = precip, y = precip.mean, color = duration)) +
-#   scale_x_origin() + scale_y_origin() +
-#   scale_color_scico(palette = 'bamako', direction = -1) +
-#   geom_parity() + coord_fixed() + theme_classic()
-
-## find lognormal parameters for duration
-sdlog <- sqrt(log((sd(catalog$duration)/mean(catalog$duration))^2 + 1))
-meanlog <- log(mean(catalog$duration)) - sdlog^2/2
-param_duration <- c('meanlog' = meanlog, 'sdlog' = sdlog)
-
-## find Gumbel parameters for IVT
-rate <- pi/(sd(catalog$IVT_max)*sqrt(6))
-alpha <- mean(catalog$IVT_max) - 0.5772/rate
-param_IVT <- c('alpha' = alpha, 'scale' = 1/rate)
-
-AR %>%
-  mutate(norm = rnorm(nrow(.), mean = 0, sd = 2)) %>%
-  mutate(IVT_std = pgumbel(IVT_max, loc = param_IVT[1], scale = param_IVT[2]) %>% qnorm,
-         dur_std = plnorm(duration+norm, meanlog = param_duration[1],
-                          sdlog = param_duration[2]) %>% qnorm) %>%
-  ggplot() +
-  geom_point(aes(x = IVT_std, y = dur_std, color = precip)) +
-  scale_color_scico(palette = 'bamako', direction = -1) +
-  geom_point(data = . %>% filter(!is.na(event)), aes(x = IVT_std, y = dur_std), size = 2) +
-  theme_classic()
-
-AR %>% 
-  mutate(norm = rnorm(nrow(.), mean = 0, sd = 2)) %>%
-  mutate(IVT_std = pgumbel(IVT_max, loc = param_IVT[1], scale = param_IVT[2]) %>% qnorm,
-         dur_std = plnorm(duration+norm, meanlog = param_duration[1], 
-                          sdlog = param_duration[2]) %>% qnorm) %>% 
-  mutate(error = precip.mean - precip) %>% 
-  arrange(abs(error)) %>% 
-  ggplot() + 
-  geom_point(aes(x = IVT_std, y = dur_std, color = error)) + 
-  scale_color_scico('Prediction \nError', palette = 'vik', 
-                    limits = c(-150, 150), direction = -1) + 
-  scale_fill_scico('Prediction \nError', palette = 'vik', 
-                   limits = c(-150, 150), direction = -1) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = IVT_std, y = dur_std, fill = error), 
-             size = 3, shape = 23) + 
-  theme_classic()  
-
-AR %>% 
-  mutate(error = precip.mean - precip) %>% 
-  arrange(abs(error)) %>% 
-  ggplot() + 
-  geom_point(aes(x = IVT_max, y = duration, color = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = IVT_max, y = duration, fill = error), 
-             size = 3, shape = 23) + 
-  scale_color_scico('Prediction \nError', palette = 'vik', 
-                    limits = c(-150, 150), direction = -1) + 
-  scale_fill_scico('Prediction \nError', palette = 'vik', 
-                   limits = c(-150, 150), direction = -1) + 
-  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
-  theme_classic()  
-
-ggplot(AR) + 
-  geom_histogram(aes(x = precip.mean-precip), 
-                 color = 'black', fill = 'white', bins = sqrt(nrow(AR)), center = 0) + 
-  geom_vline(data = AR %>% filter(!is.na(event)), 
-             aes(xintercept = precip.mean-precip, color = factor(event)), 
-             size = 1, linetype = 'dashed') + 
-  scale_color_manual(values = baker) + 
-  scale_x_continuous('Prediction Error (in)', 
-                     labels = comma_format(scale = 1/25.4, accuracy = 1), breaks = (-7:7)*25.4) + 
-  scale_y_origin() + theme_classic()
-  
-```
-
-```{r}
-AR %>% mutate(error = precip.mean-precip) %>% 
-  ggplot() + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = IVT_max, y = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = IVT_max, y = error, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Maximum AR IVT') + theme_classic()
-
-AR %>% mutate(error = precip.mean-precip) %>% 
-  ggplot() + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = duration, y = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = duration, y = error, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('AR Duration') + theme_classic()
-
-AR %>% 
-  mutate(wy = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>% 
-  group_by(wy) %>% 
-  mutate(season.precip = cumsum(precip)) %>% 
-  ungroup() %>% 
-  mutate(error = precip.mean - precip) %>% 
-  ggplot() + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = season.precip, y = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = season.precip, y = error, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Cumulative WY Precipitation') + theme_classic()
-
-AR %>% 
-  mutate(wy = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>% 
-  group_by(wy) %>% 
-  mutate(season.days = toNumber(ymd(start_day) - ymd(paste(wy-1, 10, 1, sep = '-')))) %>% 
-  ungroup() %>% 
-  mutate(error = precip.mean - precip) %>% 
-  ggplot() + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = season.days, y = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = season.days, y = error, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Days since WY Start') + theme_classic()
-
-AR %>% 
-  mutate(wy = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>% 
-  group_by(wy) %>% 
-  mutate(season.precip = cumsum(precip)) %>% 
-  ungroup() %>% 
-  mutate(error = precip.mean - precip) %>% 
-  mutate(dat = ymd(paste(year(start_day)-wy + 2020, month(start_day), mday(start_day), sep = '-'))) %>% 
-  ggplot() + 
-  geom_step(aes(x = dat, y = season.precip, group = wy), color = 'grey70') +
-  geom_step(data = . %>% filter(wy %in% c(1995,2006,2019)),
-            aes(x = dat, y = season.precip, group = wy, color = factor(wy)), size = 1) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = dat, y = season.precip, fill = factor(event)),
-             size = 3, shape = 23) + 
-  scale_color_manual('Year', values = baker) + 
-  scale_fill_manual('Year', values = baker) + 
-  scale_y_origin('Cumulative WY Precipitation') + theme_classic()
-
-```
-```{r}
-ggplot(AR) + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = IVT_max, y = precip)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = IVT_max, y = precip, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Maximum AR IVT') + 
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
-  theme_classic()  
-
-ggplot(AR) + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = duration, y = precip)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = duration, y = precip, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('AR Duration') + 
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
-  theme_classic()  
-
-AR %>% 
-  mutate(wy = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>% 
-  group_by(wy) %>% 
-  mutate(season.precip = cumsum(precip)) %>% 
-  ggplot() + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = season.precip, y = precip)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = season.precip, y = precip, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Cumulative WY Precipitation') + 
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
-  theme_classic()  
-
-AR %>% 
-  mutate(wy = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>% 
-  group_by(wy) %>% 
-  mutate(season.days = toNumber(ymd(start_day) - ymd(paste(wy-1, 10, 1, sep = '-')))) %>% 
-  ggplot() + 
-  geom_hline(yintercept = 0, color = 'grey70') + 
-  geom_point(aes(x = season.days, y = precip)) + 
-  geom_point(data = . %>% filter(!is.na(event)), 
-             aes(x = season.days, y = precip, fill = factor(event)), 
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_origin('Days since WY Start') + 
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + 
-  theme_classic()  
-
-```
-
-
-```{r}
-# ## check for any interaction effects between the four variables above
-# AR %>% mutate(error = precip.mean-precip) %>% arrange(abs(error)) %>% 
-#   ggplot() + 
-#   geom_point(aes(x = precip.season, y = precip.days, color = error)) + 
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = precip.season, y = precip.days, fill = error),
-#              size = 3, shape = 23) +
-#   scale_fill_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_color_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-# 
-# AR %>% mutate(error = precip.mean-precip) %>% arrange(abs(error)) %>% 
-#   ggplot() + 
-#   geom_point(aes(x = precip.season, y = IVT_max, color = error)) + 
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = precip.season, y = IVT_max, fill = error),
-#              size = 3, shape = 23) +
-#   scale_fill_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_color_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-# AR %>% mutate(error = precip.mean-precip) %>% arrange(abs(error)) %>% 
-#   ggplot() + 
-#   geom_point(aes(x = precip.season, y = duration, color = error)) + 
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = precip.season, y = duration, fill = error),
-#              size = 3, shape = 23) +
-#   scale_fill_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_color_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-# 
-# AR %>% mutate(error = precip.mean-precip) %>% arrange(abs(error)) %>% 
-#   ggplot() + 
-#   geom_point(aes(x = precip.days, y = IVT_max, color = error)) + 
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = precip.days, y = IVT_max, fill = error),
-#              size = 3, shape = 23) +
-#   scale_fill_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_color_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-# AR %>% mutate(error = precip.mean-precip) %>% arrange(abs(error)) %>% 
-#   ggplot() + 
-#   geom_point(aes(x = precip.days, y = duration, color = error)) + 
-#   geom_point(data = . %>% filter(!is.na(event)),
-#              aes(x = precip.days, y = duration, fill = error),
-#              size = 3, shape = 23) +
-#   scale_fill_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_color_scico('Prediction \nError', palette = 'vik', limits = c(-150,150), direction = -1) + 
-#   scale_x_origin() + scale_y_origin() + theme_classic()
-
-```
-
-```{r}
-# ## refit model with extra variables
-catalog <- catalog %>%
-  mutate(wy = year(start_day) + ifelse(month(start_day) %in% 10:12, 1, 0)) %>%
-  group_by(wy) %>%
-  mutate(precip.season = cumsum(precip)) %>%
-  ungroup %>%
-  mutate(precip.days = toNumber(ymd(start_day) - ymd(paste(wy-1, 10, 1, sep = '-'))))
-# 
-# lm(precip ~ IVT_max + IVT_max:duration + precip.season + precip.days, data = catalog) %>% summary
-# 
-# temp <-
-#   foreach (t = seq(0, 1, 0.01), .combine = 'rbind') %do% {
-#     model <- rq(precip ~ IVT_max + IVT_max:duration + precip.season + precip.days, 
-#                 data = catalog, tau = t)
-#     prediction <- predict(model)
-#     prediction <- ifelse(prediction < 0, 0, prediction)
-#     c(tau = t, RMSE = RMSE(sort(prediction), sort(catalog$precip)))
-#   }
-# tau.best <- temp %>% as.data.frame %>% .[which.min(.$RMSE), 'tau']
-# model <- rq(precip ~ IVT_max + IVT_max:duration + precip.season + precip.days, 
-#             data = catalog, tau = tau.best)
-# 
-# AR <- catalog %>% select(-AR) %>% mutate(n.AR = 1:nrow(.))
-# AR <- AR %>%
-#   mutate(precip.mean = predict.rq(model, AR),
-#          precip.sd = predict.se(model, catalog, AR))
-# 
-# ggplot(AR) + 
-#   geom_point(aes(x = precip, y = precip.mean)) + 
-#   geom_point(data = . %>% filter(!is.na(event)), 
-#              aes(x = precip, y = precip.mean, fill = factor(event)), 
-#              size = 3, shape = 23) + 
-#   scale_fill_manual(values = baker) + 
-#   scale_x_origin('Recorded Precip') + scale_y_origin('Estimated Precip') + 
-#   geom_parity() + coord_fixed() + theme_classic()
-# ggplot(AR) + 
-#   geom_histogram(aes(x = precip.mean-precip), 
-#                  color = 'black', fill = 'white', bins = sqrt(nrow(AR)), center = 0) + 
-#   geom_vline(data = AR %>% filter(!is.na(event)), 
-#              aes(xintercept = precip.mean-precip, color = factor(event)), 
-#              size = 1, linetype = 'dashed') + 
-#   scale_color_manual(values = baker) + 
-#   scale_x_continuous('Prediction Error (in)', 
-#                      labels = comma_format(scale = 1/25.4, accuracy = 1), breaks = (-7:7)*25.4) + 
-#   scale_y_origin() + theme_classic()
-
-```
-
-## fix G(Q) underprediction
-```{r}
-AR <- catalog %>% transmute(n.AR = 1:nrow(.), IVT_max, duration, precip_mm = precip)
-precip <- generate_precip(AR, catalog)
-runoff <- generate_runoff(
-  precip = precip %>% mutate(precip_mm = catalog$precip),
-  catalog %>% select(-wy))
-hydro <- generate_hydrograph(
-  precip = precip %>% mutate(precip_mm = catalog$precip),
-  runoff = runoff %>% mutate(runoff_mm = catalog$runoff), 
-  catalog)
-
-hydro <- hydro %>%
-  transmute(n.AR, precip.sim = precip$precip_mm,
-            runoff.sim = runoff$runoff_mm, Qp.sim = Qp_m3s) %>%
-  left_join(catalog %>%
-      transmute(n.AR = 1:nrow(.), IVT_max, duration, wy, event,
-                precip.season, precip.days, precip, runoff, Qp = Qp/mft^3), by = 'n.AR')
-
-```
-
-
-```{r}
-g1 <- ggplot(hydro) + 
-  geom_point(aes(x = precip, y = precip.sim)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = precip, y = precip.sim, fill = factor(event)),
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Precip (mm)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-g2 <- ggplot(hydro %>% mutate(bias = cbind(50, runoff.sim) %>% apply(1, min))) + 
-  geom_point(aes(x = runoff, y = runoff.sim+bias)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = runoff, y = runoff.sim+bias, fill = factor(event)),
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Runoff (mm)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-g3 <- ggplot(hydro) + 
-  geom_point(aes(x = Qp, y = Qp.sim)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = Qp, y = Qp.sim, fill = factor(event)),
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Streamflow (m3/s)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-ggarrange(g1, g2, g3, ncol = 3, common.legend = TRUE, legend = 'bottom', align = 'h')
-ggsave('C:/Users/cbowers/Desktop/plot.jpg', width = 8)
-
-```
-
-```{r}
-hydro <- generate_hydrograph(
-  precip = runoff, 
-  runoff = runoff %>% mutate(bias = cbind(50, runoff_mm) %>% apply(1, min)) %>% 
-    mutate(runoff_mm = runoff_mm + bias), 
-  catalog)
-hydro <- hydro %>%
-  transmute(n.AR, precip.sim = precip$precip_mm,
-            runoff.sim = runoff$runoff_mm, Qp.sim = Qp_m3s) %>%
-  left_join(catalog %>%
-      transmute(n.AR = 1:nrow(.), IVT_max, duration, wy, event,
-                precip.season, precip.days, precip, runoff, Qp = Qp/mft^3), by = 'n.AR')
-ggplot(hydro) + 
-  geom_point(aes(x = Qp, y = Qp.sim)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = Qp, y = Qp.sim, fill = factor(event)),
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Streamflow (m3/s)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-```
-
-
-```{r}
-AR <- catalog %>% transmute(n.AR = 1:nrow(.), IVT_max, duration, precip_mm = precip)
-precip <- generate_precip(AR, catalog, probabilistic = TRUE, n.precip = 1e3)
-runoff <- generate_runoff(
-  precip = catalog %>% transmute(n.AR = 1:nrow(.), n.precip = NA, IVT_max, duration, precip_mm = precip),
-  catalog %>% select(-wy), probabilistic = TRUE, n.runoff = 1e3)
-hydro <- generate_hydrograph(
-  precip = catalog %>% transmute(n.AR = 1:nrow(.), n.precip = NA, IVT_max, duration, precip_mm = precip),
-  runoff = catalog %>% transmute(IVT_max, duration, precip_mm = precip, runoff_mm = runoff) %>% 
-    mutate(n.AR = 1:nrow(.), n.precip = NA, n.runoff = NA), 
-  catalog, probabilistic = TRUE, n.hydro = 1e3)
-
-precip %>% group_by(n.AR) %>% 
-  summarize(precip.mean = mean(precip_mm), 
-            precip.upr = quantile(precip_mm, 0.95), 
-            precip.lwr = quantile(precip_mm, 0.05)) %>%
-  left_join(catalog %>% select(precip, event) %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR') %>% 
-  ggplot() + 
-  geom_segment(aes(x = precip, xend = precip, y = precip.lwr, yend = precip.upr), color = 'grey70') + 
-  geom_point(aes(x = precip, y = precip.mean)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = precip, y = precip.mean, fill = factor(event)),
-             size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Precip (mm)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-runoff %>% group_by(n.AR) %>% 
-  summarize(runoff.mean = mean(runoff_mm),
-            runoff.upr = quantile(runoff_mm, 0.95),
-            runoff.lwr = quantile(runoff_mm, 0.05)) %>% 
-  left_join(catalog %>% select(runoff, event) %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR') %>% 
-  ggplot() + 
-  geom_segment(aes(x = runoff, xend = runoff, y = runoff.lwr, yend = runoff.upr), color = 'grey70') + 
-  geom_point(aes(x = runoff, y = runoff.mean)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = runoff, y = runoff.mean, fill = factor(event)), size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) +
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Runoff (mm)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-  
-hydro %>% group_by(n.AR) %>% 
-  summarize(flow.mean = mean(Qp_m3s),
-            flow.upr = quantile(Qp_m3s, 0.95),
-            flow.lwr = quantile(Qp_m3s, 0.05)) %>% 
-  left_join(catalog %>% transmute(flow = Qp/mft^3, event) %>% mutate(n.AR = 1:nrow(.)), by = 'n.AR') %>% 
-  ggplot() + 
-  geom_segment(aes(x = flow, xend = flow, y = flow.lwr, yend = flow.upr), color = 'grey70') + 
-  geom_point(aes(x = flow, y = flow.mean)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = flow, y = flow.mean, fill = factor(event)), size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) +
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  ggtitle(waiver(), subtitle = 'Streamflow (m3/s)') + 
-  geom_parity() + coord_fixed() + theme_classic()
-
-```
-
-mess around with G(PRCP) again
-```{r}
-# AR <- catalog %>% select(-AR) %>% mutate(n.AR = 1:nrow(.))
-# temp <-
-#   foreach (t = seq(0, 1, 0.01), .combine = 'rbind') %do% {
-#     model <- rq(precip ~ IVT_max*duration, data = catalog, tau = t)
-#     prediction <- predict(model)
-#     prediction <- ifelse(prediction < 0, 0, prediction)
-#     c(tau = t, RMSE = RMSE(sort(prediction), sort(catalog$precip)))
-#   }
-# tau.best <- temp %>% as.data.frame %>% .[which.min(.$RMSE), 'tau']
-# model <- rq(precip ~ IVT_max*duration, data = catalog, tau = tau.best)
-# AR <- AR %>%
-#   mutate(precip.mean = predict.rq(model, AR),
-#          precip.sd = predict.se(model, catalog, AR))
-
-AR <- AR %>% 
-  arrange(precip.mean) %>% 
-  # mutate(bias = seq(1/4, 1.25, length.out = nrow(.)))
-  mutate(bias = 1)
-ggplot(AR) + 
-  geom_point(aes(x = precip, y = precip.mean*bias)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = precip, y = precip.mean*bias, fill = factor(event)), size = 3, shape = 23) + 
-  scale_fill_manual(values = baker) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  geom_parity() + coord_fixed()
-
-AR %>% 
-  mutate(error = precip.mean*bias - precip) %>% 
-  arrange(precip) %>% 
-  mutate(precip.mean = sort(precip.mean*bias)/bias) %>% 
-  arrange(abs(error)) %>% 
-  ggplot() + 
-  geom_point(aes(x = precip, y = precip.mean*bias, color = error)) + 
-  geom_point(data = . %>% filter(!is.na(event)),
-             aes(x = precip, y = precip.mean*bias, fill = error), size = 3, shape = 23) +
-  scale_color_scico('Prediction \nError', palette = 'vik', limits = 200*c(-1,1), direction = -1) + 
-  scale_fill_scico('Prediction \nError', palette = 'vik', limits = 200*c(-1,1), direction = -1) + 
-  scale_x_continuous('Recorded', expand = expansion(mult = c(0, 0.05))) + 
-  scale_y_continuous('Estimated', expand = expansion(mult = c(0, 0.05))) + 
-  geom_parity() + coord_fixed()
-
-ggplot(AR) + 
-  geom_histogram(aes(x = precip.mean*bias - precip), 
-                 color = 'black', fill = 'white', bins = sqrt(nrow(AR)), center = 0) + 
-  geom_vline(data = . %>% filter(!is.na(event)),
-             aes(xintercept = precip.mean*bias - precip, color = factor(event)), 
-             size = 1, linetype = 'dashed') + 
-  scale_color_manual(values = baker) + 
-  scale_x_continuous(labels = comma_format(scale = 1/25.4, accuracy = 1), breaks = (-10:10)*25.4) +
-  scale_y_origin()
-
-```
-
-###################################################################################################
-try a model-by-model comparison for the 2019 storm
-
-## validate G(PRCP)
-```{r}
-year.id = 411  #74, 220, 411
-load('C:/Users/cbowers/Desktop/catalog.Rdata')
-AR <- catalog[year.id,] %>% 
-  transmute(n.AR = 1, IVT_max, duration)
-
-precip <- 
-  generate_precip(
-    AR = AR, 
-    catalog = catalog,
-    probabilistic = TRUE,
-    n.precip = 1e3)
-precip <- precip %>% filter(precip_mm > 0)
-
-ggplot(precip) + 
-  geom_histogram(aes(x = precip_mm/25.4), color = 'black', fill = 'white', bins = sqrt(nrow(precip))) + 
-  geom_vline(xintercept = catalog[year.id, 'precip']/25.4, size = 1, linetype = 'dashed') + 
-  scale_y_origin()
-
-```
-
-## validate G(Q)
-```{r}
-precip <- catalog[year.id,] %>% 
-  transmute(n.AR = 1, n.precip = 1, IVT_max, duration, precip_mm = precip)
-runoff <- 
-  generate_runoff(
-    precip = precip, 
-    catalog = catalog, 
-    probabilistic = TRUE,
-    n.runoff = 1000)
-hydrograph <- 
-  generate_hydrograph(
-    precip = precip,
-    runoff = runoff, 
-    catalog = catalog, 
-    probabilistic = TRUE,
-    n.hydro = 1)
-
-#### validating runoff values
-ggplot(runoff) + 
-  geom_histogram(aes(x = runoff_mm/25.4), color = 'black', fill = 'white', bins = sqrt(nrow(hydrograph))) + 
-  geom_vline(xintercept = catalog[year.id, 'runoff']/25.4, size = 1, linetype = 'dashed') + 
-  scale_x_continuous(labels = comma) + scale_y_origin()
-
-#### validating Qp, peak streamflow values
-mft <- 3.28084
-ggplot(hydrograph) + 
-  geom_histogram(aes(x = Qp_m3s), color = 'black', fill = 'white', bins = sqrt(nrow(hydrograph))) + 
-  geom_vline(xintercept = catalog[year.id, 'Qp']/mft^3, size = 1, linetype = 'dashed') + 
-  scale_x_continuous(labels = comma) + scale_y_origin()
-
-```
-
-```{r}
-#### validating Q, streamflow hydrograph
-
-## download real gauge info
-param <- c('00060', '00065'); names(param) <- c('discharge_cfs', 'gageht_ft')
-statcode <- c('00001', '00002', '00003', '00008'); names(statcode) <- c('max', 'min', 'mean', 'median')
-gauge <- c(11463500, 11463682)
-sites <- readNWISsite(gauge)
-flow <- readNWISdata(
-  sites = gauge, parameterCd = param, 
-  startDate = ymd(catalog$start_day[year.id]) - days(1), 
-  endDate = ymd(catalog$end_day[year.id]) + days(1), 
-  service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns
-flow <- flow %>% 
-  group_by(dateTime) %>% 
-  summarize(Flow_Inst = mean(Flow_Inst))
-flow <- as.data.frame(flow)
-
-## create synthetic gauge info
-simlength <- 60^2*24*10
-baseflow <- 4
-t <- seq(0, simlength, 360)
-m <- 4
-
-## plot comparison
-g <- ggplot() + 
-  geom_line(data = flow, aes(x = ymd_hms(dateTime), y = Flow_Inst/mft^3))
-pb <- txtProgressBar(min = 0, max = nrow(hydrograph), style = 3)
-for (i in 1:nrow(hydrograph)) {
-  Qp <- hydrograph$Qp_m3s[i]
-  tp <- hydrograph$tp_hrs[i]*60^2
-  q <- apply(cbind(exp(m*(1-t/tp)) * (t/tp)^m * Qp, rep(baseflow, length(t))), 1, max)
-  flow.sim <- data.frame(t = lubridate::now() + seconds(t), q = q)
-  dt <- flow.sim[which.max(flow.sim$q), 't'] - flow[which.max(flow$Flow_Inst), 'dateTime']
-  flow.sim$t <- flow.sim$t - dt
-  
-  g <- g + geom_line(data = flow.sim, aes(x = ymd_hms(t), y = q), alpha = 0.1)
-  setTxtProgressBar(pb, i)
-}
-
-g + geom_line(data = flow, aes(x = ymd_hms(dateTime), y = Flow_Inst/mft^3), color = baker[5], size = 1) + 
-  scale_y_origin('Flow (m3/s)', labels = comma) + 
-  scale_x_datetime(limits = c(NA, ymd_hms('2019-03-02 12:00:00AM')))
-
-```
-
-## validate G(INUN): channel
-```{r}
-#### validating that hydrographs align at specified gage points
-
-## get real discharge & gage height data
-gauges <- whatNWISsites(stateCd = '06', countyCd = '097') 
-gauges <- gauges %>% 
-  filter(grepl('RUSSIAN', station_nm)) %>% 
-  filter(str_length(site_no) == 8)
-flow <- readNWISdata(
-  sites = gauges$site_no, parameterCd = param, 
-  startDate = catalog$start_day[year.id], 
-  endDate = ymd(catalog$end_day[year.id]) + days(1), 
-  service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns %>% 
-  filter(!is.na(Flow_Inst) | !is.na(GH_Inst))
-gauges <- gauges %>% filter(site_no %in% unique(flow$site_no))
-
-## plot gages of interest
-gauges %>% 
-  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma)) %>% 
-  ggplot() + 
-  geom_sf(data = sonoma, color = 'grey70', fill = 'grey95') + 
-  geom_sf(data = st_union(sonoma), color = 'grey50', fill = NA) + 
-  geom_sf(data = aoi, fill = NA, color = 'black') + 
-  geom_sf(data = russian %>% st_crop(sonoma), color = 'grey30', size = 1) + 
-  geom_sf(aes(color = site_no), size = 3) + 
-  scale_color_manual(values = c('black', baker)) + 
-  theme_void()
-
-## plot real discharge & gage height data alone
-ggplot(flow) + 
-  geom_line(aes(x = dateTime, y = Flow_Inst, group = site_no, color = site_no), size = 1) + 
-  scale_color_manual(values = c('black', baker)) + 
-  scale_y_origin('Flow (cfs)', labels = comma)
-ggplot(flow) + 
-  geom_line(aes(x = dateTime, y = GH_Inst, group = site_no, color = site_no), size = 1) + 
-  scale_color_manual(values = c('black', baker)) + 
-  scale_y_origin('Gage Height (ft)', labels = comma)
-
-```
-
-```{r}
-gauges <- whatNWISsites(stateCd = '06', countyCd = '097') 
-gauges <- gauges %>% 
-  filter(grepl('RUSSIAN', station_nm)) %>% 
-  filter(str_length(site_no) == 8)
-gauges <- gauges %>% 
-  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma)) %>% 
-  st_intersection(aoi)
-
-gauges <- gauges %>% arrange(site_no) %>% select(site_no) 
-gauges <- gauges %>% 
-  st_transform(crs(dem)) %>% 
-  st_coordinates %>% 
-  terra::extract(rast(dem/mft), .) %>% 
-  rename(elev = value) %>% 
-  cbind(site_no = gauges$site_no) %>% 
-  cbind(st_coordinates(gauges))
-write.csv(gauges, file = 'C:/Users/cbowers/Desktop/gauges.csv')
-
-ggplot() + 
-  geom_sf(data = sonoma) + 
-  geom_sf(data = russian %>% st_crop(sonoma), size = 1) + 
-  geom_sf(data = aoi, fill = NA) + 
-  geom_sf(data = gauges %>% st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma)), 
-          color = 'red')
-
-```
-
-
-```{r}
-#### save out real hydrograph information for LISFLOOD
-
-## gauge locations
-gauges <- gauges %>% 
-  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma)) %>% 
-  st_intersection(aoi) %>% 
-  st_transform(crs(dem)) 
-width <- raster('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.width.asc')
-crs(width) <- crs(dem)
-gaugefile <- gauges %>% 
-  st_coordinates %>% 
-  cbind(dir = c('E', 'S', 'W', 'S', 'W'),
-        width = raster::extract(width, temp)) %>% 
-  rbind(c(nrow(.), NA, NA, NA), .)
-write.table(gaugefile, file = 'C:/Users/cbowers/Desktop/gauges.gauge',
-            row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t', na = '')
-
-## flow timeseries
-gauge <- c(11463500, 11463682)
-flow <- readNWISdata(
-  sites = gauge, parameterCd = param, 
-  startDate = ymd(catalog$start_day[year.id]) - days(30), 
-  endDate = ymd(catalog$end_day[year.id]) + days(7), 
-  service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns
-flow <- flow %>% 
-  group_by(dateTime) %>% 
-  summarize(Flow_Inst = mean(Flow_Inst))
-
-## bci & bdy files
-load('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/edges.Rdata')
-flow <- flow %>% 
-  # mutate(q = Flow_Inst/mft^3 / mean(edge.in$layer),
-  mutate(q = Flow_Inst/mft^3 / 12.02,
-         t = toNumber(dateTime - dateTime[1]))
-bdy <- matrix(c('LISFLOOD', NA, 'flow2019', NA, length(flow$t), 'seconds'), 
-              byrow = TRUE, ncol = 2) %>% rbind(cbind(flow$q, flow$t))
-write.table(bdy, file = 'C:/Users/cbowers/Desktop/flow2019.bdy', 
-            row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t', na = '')
-
-bci <- data.frame(matrix(
-  c('N', round(min(edge.in$x)), round(max(edge.in$x)), 'QVAR', 'flow2019',
-    'W', round(min(edge.out$y)), round(max(edge.out$y)), 'FREE', NA),
-  nrow = 2, byrow = TRUE))
-write.table(bci, file = 'C:/Users/cbowers/Desktop/flow2019.bci', 
-            row.names = FALSE, col.names = FALSE, quote = FALSE, sep = '\t', na = '')
-
-```
-
-```{r}
-## mess with the width at the entrance to the domain
-edge.in %>% st_as_sf(coords = c('x','y')) %>% 
-  st_set_crs(crs(dem)) %>% 
-  st_transform(st_crs(sonoma)) %>% st_coordinates
-
-# -122.8574 38.68280
-## look it up on Google maps --> 17.57m, 15.74m, or 12.02m (slightly downstream) 
-
-```
-
-```{r}
-#### compare recorded vs. LISFLOOD data
-
-## plot simulated discharge & gage height data alone
-flow <- readNWISdata(
-  sites = gauge, parameterCd = param, 
-  startDate = ymd(catalog$start_day[year.id]) - days(30), 
-  endDate = ymd(catalog$end_day[year.id]) + days(7), 
-  service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns
-stage <- 
-  # read.table('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/results/gauges.stage', skip = 11) %>% 
-  read.table(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-05-15 edgewidth/width1757_n035.stage'), skip = 11) %>% 
-  setNames(c('t', gauges$site_no)) %>% 
-  pivot_longer(cols = -t, names_to = 'site_no', values_to = 'h') %>% 
-  mutate(dateTime = flow$dateTime[1] + seconds(t))
-sggplot(stage) + 
-  geom_line(aes(x = dateTime, y = h, group = site_no, color = site_no), size = 1) + 
-  scale_color_manual(values = baker) + 
-  scale_y_origin('Gage Height (ft)', labels = comma) + 
-  scale_x_datetime(limits = c(ymd_hms('2019-02-25 12:00:00AM'), ymd_hms('2019-03-02 12:00:00AM')))
-
-discharge <- 
-  # read.table('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/results/gauges.discharge', skip = 3) %>% 
-  read.table(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-05-15 edgewidth/width1574_n035.discharge'), skip = 3) %>% 
-  setNames(c('t', gauges$site_no)) %>% 
-  pivot_longer(cols = -t, names_to = 'site_no', values_to = 'q') %>% 
-  mutate(dateTime = flow$dateTime[1] + seconds(t)) %>% 
-  mutate(q = abs(q * mft^3))
-ggplot(discharge) + 
-  geom_line(aes(x = dateTime, y = q, group = site_no, color = site_no), size = 1) + 
-  scale_color_manual(values = baker) + 
-  scale_y_origin('Flow (cfs)', labels = comma) +
-  scale_x_datetime(limits = c(ymd_hms('2019-02-25 12:00:00AM'), ymd_hms('2019-03-02 12:00:00AM')))
-
-```
-
-```{r}
-## plot real vs. simulated discharge & gage height data 
-flow <- readNWISdata(
-  sites = gauges$site_no, parameterCd = param, 
-  startDate = catalog$start_day[year.id], 
-  endDate = ymd(catalog$end_day[year.id]) + days(1), 
-  service = 'iv', tz = 'America/Los_Angeles') %>% 
-  renameNWISColumns %>% 
-  filter(!is.na(Flow_Inst) | !is.na(GH_Inst))
-stage <- stage %>% 
-  right_join(flow %>% select(dateTime, site_no, GH_Inst), by = c('dateTime', 'site_no')) %>% 
-  rename(h.obs = GH_Inst, h.sim = h)
-discharge <- discharge %>% 
-  right_join(flow %>% select(dateTime, site_no, Flow_Inst), by = c('dateTime', 'site_no')) %>% 
-  rename(q.obs = Flow_Inst, q.sim = q) %>% 
-  filter(!is.na(q.sim))
-
-ggplot(stage) + 
-  geom_line(aes(x = dateTime, y = h.obs, color = site_no, linetype = 'Recorded'), size = 1) +
-  geom_line(aes(x = dateTime, y = h.sim*mft, color = site_no, linetype = 'Simulated'), size = 1) + 
-  facet_grid(cols = vars(site_no)) + 
-  scale_color_manual(values = baker) + 
-  scale_linetype_manual(values = c(1,2)) + 
-  scale_x_datetime(labels = function(z) gsub("^0", "", strftime(z, "%m/%d")), 
-                   date_breaks = 'day', minor_breaks = 'day') + 
-  scale_y_origin('Gage Height (ft)') + 
-  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
-ggplot(discharge) +
-  geom_line(aes(x = dateTime, y = q.obs, color = site_no, linetype = 'Recorded'), size = 1) +
-  geom_line(aes(x = dateTime, y = q.sim, color = site_no, linetype = 'Simulated'), size = 1) +
-  facet_grid(cols = vars(site_no)) +
-  scale_color_manual(values = baker) +
-  scale_linetype_manual(values = c(1,2)) + 
-  scale_x_datetime(labels = function(z) gsub("^0", "", strftime(z, "%m/%d")),
-                   date_breaks = 'day', minor_breaks = 'day') +
-  scale_y_origin('Streamflow (cfs)', labels = comma) +
-  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
-
-```
-
-```{r}
-## try to correct the linear offset in stage timeseries
-
-gauges.lisflood <- 
-  read.table(paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/',
-                    '21-05-15 edgewidth/width1202_n035.stage'), skip = 3, nrows = 5) %>% 
-  setNames(c('id', 'x', 'y', 'elev.lisflood'))
-gauges.elev <- readNWISsite(c(11463682, 11463980, 11464000, 11467000, 11467002)) %>% 
-  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma)) %>% 
-  transmute(site_no, station_nm, datum = alt_va/mft) %>% 
-  st_transform(st_crs(dem)) %>% 
-  st_buffer(10) %>% 
-  st_intersection(gauges.lisflood %>% st_as_sf(coords = c('x','y'), crs = crs(dem))) %>% 
-  elevatr::get_elev_point(.)
-target <- stage %>% 
-  group_by(site_no) %>% 
-  summarize(h.sim = max(h.sim*mft), h.obs = max(h.obs)) %>% 
-  transmute(site_no, delta = h.sim-h.obs)
-
-# ggplot(gauges.elev) + 
-#   geom_point(aes(x = elevation, y = elev.lisflood/mft)) + 
-#   scale_x_origin() + scale_y_origin() + 
-#   geom_parity() + coord_fixed()
-# 
-# cbind(
-#   target$delta,
-#   (gauges.elev$elev.lisflood/mft - gauges.elev$elevation),
-#   gauges.elev$elevation - gauges.elev$datum,
-#   gauges.elev$elev.lisflood/mft - 2*gauges.elev$elevation + gauges.elev$datum
-# )
-  
-stage %>% group_by(site_no) %>% 
-  summarize(h.sim = max(h.sim*mft), h.obs = max(h.obs)) %>% 
-  transmute(site_no, delta = h.sim-h.obs) %>% 
-  right_join(stage, by = 'site_no') %>% 
-  mutate(h.sim = ifelse(h.sim < 0.01, NA, h.sim)) %>% 
-  ggplot() + 
-  geom_line(aes(x = dateTime, y = h.obs, color = site_no, linetype = 'Recorded'), size = 1) + 
-  geom_line(aes(x = dateTime, y = (h.sim*mft)-delta, color = site_no, linetype = 'Simulated'), size = 1) + 
-  facet_grid(cols = vars(site_no)) + 
-  scale_color_manual(values = baker) + 
-  scale_linetype_manual(values = c(1,2)) + 
-  scale_x_datetime(labels = function(z) gsub("^0", "", strftime(z, "%m/%d")), 
-                   date_breaks = 'day', minor_breaks = 'day') + 
-  scale_y_origin('Gage Height (ft)') + 
-  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
-
-```
-
-
-## validate G(INUN): floodplain
-```{r}
-#### compare LISFLOOD vs. AER flood heights
-aer.mask <- raster('D:/Research/_data/FloodScan/storm2019/aer_sfed_max_3s_20190226-20190301_v04r00.tif')
-aer.mask <- aer.mask %>% projectRaster(dem)
-aer.depth <- raster('D:/Research/_data/FloodScan/storm2019/aer_sfed_max_depth_3s_20190226-20190301_v04r00.tif')
-aer.depth <- aer.depth %>% projectRaster(dem)
-  
-lisflood <- raster('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/results_save/gauges.max')
-crs(lisflood) <- crs(dem)
-
-## wet/dry comparison
-## (come back here & calculate hit rate metrics)
-raster.df <- function(x) x %>% as.data.frame(xy = TRUE) %>% setNames(c('x', 'y', 'value'))
-ggplot() + 
-  geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(dem)),
-          color = 'grey70', fill = 'grey95') + 
-  geom_sf(data = aoi %>% st_transform(crs(dem)), color = 'black', fill = NA) + 
-  geom_raster(data = raster.df(aer.mask) %>% filter(value > 0),
-              aes(x=x, y=y), fill = 'red', alpha = 0.5) + 
-  geom_raster(data = lisflood %>% 
-                overlay(dem, fun = function(x,y) ifelse(y < 1, NA, x)) %>% 
-                raster.df %>% filter(value > 0),
-              aes(x=x, y=y), fill = 'blue', alpha = 0.5) + 
-  geom_sf(data = russian %>% st_crop(aoi) %>% st_transform(crs(dem))) + 
-  theme_void()
-
-## numeric comparison
-lisflood %>% 
-  overlay(dem, fun = function(x,y) ifelse(y < 1, NA, x)) %>% 
-  raster.df %>% filter(value > 0) %>% 
-  rename(lisflood = value) %>% 
-  mutate(x.round = round(x), y.round = round(y)) %>%
-  inner_join(raster.df(aer.depth) %>% filter(value > 0) %>% 
-               mutate(x.round = round(x), y.round = round(y)), 
-             by = c('x.round', 'y.round')) %>% 
-  rename(aer = value) %>% 
-  ggplot() + 
-  geom_point(aes(x = aer, y = lisflood), alpha = 0.1) + 
-  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
-
-```
-
-https://sonomacounty.maps.arcgis.com/home/item.html?id=9d8d63558c6b4124b000e6476a0a020d
-https://data.sonomaopenspace.org/arcgis/rest/services/Projects
-```{r}
-#### compare LISFLOOD vs. Sonoma County HEC-RAS flood heights
-
-## find max flood crest at gage 11467002
-# gage <- readNWISdata(
-#   sites = 11467002, parameterCd = param, 
-#   startDate = ymd(catalog$start_day[year.id]) - days(1), 
-#   endDate = ymd(catalog$end_day[year.id]) + days(1), 
-#   service = 'iv', tz = 'America/Los_Angeles') %>% 
-#   renameNWISColumns
-# max(gage$GH_Inst)
-
-## load Sonoma data
-url <- paste0(
-  'https://data.sonomaopenspace.org/arcgis/rest/services/Projects/',
-  'Guerneville_Gauge_at_44_ft_Flood_Stage/ImageServer/exportImage?',
-  # 'bbox=6236126.396389392,1919959.543629255,6341516.396389392,2075767.543629255&',
-  'bbox=6217115,1919960,6364424,2011721&',
-  'adjustAspectRatio=false&',
-  'size=3000,3000&',
-  'imageSR=',
-    'PROJCS["NAD_1983_StatePlane_California_II_FIPS_0402_Feet",',
-      'GEOGCS["GCS_North_American_1983",',
-        'DATUM["D_North_American_1983",SPHEROID["GRS_1980",6378137,298.257222101]],',
-        'PRIMEM["Greenwich",0],',
-        'UNIT["Degree",0.017453292519943295]],',
-      'PROJECTION["Lambert_Conformal_Conic"],',
-      'PARAMETER["False_Easting",6561666.666666666],',
-      'PARAMETER["False_Northing",1640416.666666667],',
-      'PARAMETER["Central_Meridian",-122],',
-      'PARAMETER["Standard_Parallel_1",38.33333333333334],',
-      'PARAMETER["Standard_Parallel_2",39.83333333333334],',
-      'PARAMETER["Latitude_Of_Origin",37.66666666666666],','
-      UNIT["Foot_US",0.30480060960121924]]&',
-  'format=tiff&',
-  'f=image')
-
-temp <- tempfile()
-download.file(url, destfile = temp, mode = "wb")
-flood <- raster(temp)
-crs_ca <- proj4string(flood)
-flood.repair <- flood %>% 
-  raster.df %>%
-  # filter(value > 0) %>% 
-  rename(lat = y, long = x) %>% 
-  rasterFromXYZ(crs = crs_ca)
-unlink(temp)
-
-## use this to narrow down the bounding box request
-# prmd.extent <- extent(flood) %>% 
-#   as('SpatialPolygons') %>% 
-#   as('sf') %>% 
-#   st_set_crs(crs_ca)
-# ext <- aoi %>% 
-#   st_transform(crs_ca) %>% 
-#   st_intersection(prmd.extent)
-# st_bbox(ext)
-
-flood44 <- flood.repair
-# save(flood41, flood42, flood43, flood44, flood45, flood46,
-#      file = 'C:/Users/cbowers/Desktop/flood_sonoma.Rdata')
-
-```
-
-```{r}
-## match rasters
-# flood.sonoma <- flood45*0.64 + flood46*0.36
-flood.sonoma <- flood45
-flood.df <- flood.sonoma %>% 
-  projectRaster(lisflood) %>% 
-  raster.df %>% filter(value > 0)
-lisflood.df <- lisflood %>% 
-  overlay(dem, fun = function(x,y) ifelse(y < 1, NA, x)) %>% 
-  raster.df %>% filter(value > 0)
-
-## wet/dry comparison
-ggplot() + 
-  geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(dem)),
-          color = 'grey70', fill = 'grey95') + 
-  geom_sf(data = aoi %>% st_transform(crs(dem)), color = 'black', fill = NA) + 
-  geom_raster(data = flood.df, aes(x=x, y=y), fill = 'red', alpha = 0.5) + 
-  geom_raster(data = lisflood.df, aes(x=x, y=y), fill = 'blue', alpha = 0.5) + 
-  geom_sf(data = russian %>% st_crop(aoi) %>% st_transform(crs(dem))) + 
-  theme_void()
-
-## numeric comparison
-lisflood.df %>% 
-  rename(lisflood = value) %>% 
-  mutate(x.round = round(x), y.round = round(y)) %>%
-  inner_join(flood.df %>% mutate(x.round = round(x), y.round = round(y)), 
-             by = c('x.round', 'y.round')) %>% 
-  rename(sonoma = value) %>% 
-  ggplot() + 
-  geom_point(aes(x = sonoma, y = lisflood), alpha = 0.1) + 
-  scale_x_origin() + scale_y_origin() + geom_parity() + coord_fixed()
-
-```
-
-```{r}
-## calculate accuracy metrics
-lisflood <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-15 edgewidth/width1757_n075.max')
-crs(lisflood) <- crs(dem)
-
-temp <- 
-  flood.sonoma %>% 
-  projectRaster(lisflood) %>% 
-  overlay(
-    lisflood, fun = function(x,y) {
-      ifelse(x > 0 & y > 0, 0, 
-             ifelse (x > 0 & y <= 0, -1, 
-                     ifelse(x <= 0 & y > 0, 1, NA))) 
-    }) %>% 
-  overlay(dem, fun = function(x,y) ifelse(y>1, x, NA))
-temp.df <- temp %>% raster.df %>% 
-  filter(!is.na(value)) %>% 
-  filter(!(x > 1925000 & y < 594000))
-
-# ggplot(temp.df) + 
-#   geom_sf(data = sonoma %>% st_crop(aoi) %>% st_transform(crs(dem)),
-#           fill = 'grey95', color = 'grey70') +
-#   geom_raster(aes(x=x, y=y, fill=factor(value))) + 
-#   scale_fill_manual(values = scico(7, palette = 'lisbon')[c(2,4,6)],
-#                     labels = c('FN', 'Correct', 'FP')) + 
-#   theme_bw()
-
-# require(leaflet)
-# require(mapboxapi)
-# pal <- colorFactor(scico(7, palette = 'lisbon')[c(2,4,6)], domain = -1:1, na.color = "transparent")
-# leaflet() %>% 
-#   addMapboxTiles(style_id = "light-v9", username = "mapbox") %>% 
-#   addRasterImage(temp, colors = pal, method = 'ngb') %>% 
-#   addLegend(values = c(-1,0,1), colors = scico(7, palette = 'lisbon')[c(2,4,6)], 
-#             labels = c('False Negative', 'Correct', 'False Positive'), 
-#             opacity = 1, title = 'LISFLOOD Performance')
-
-tb <- table(temp[])
-hitrate = tb[2] / sum(tb[1:2])
-falsealarm = tb[3] / sum(tb[2:3])
-fstat = tb[2] / sum(tb)
-c('hitrate' = unname(hitrate), 
-  'falsealarm' = unname(falsealarm), 
-  'fstat' = unname(fstat)) %>% percent(accuracy = 0.01)
-
-## get rid of Laguna de Santa Rosa & calculate again
-tb <- table(temp.df$value)
-hitrate = tb[2] / sum(tb[1:2])
-falsealarm = tb[3] / sum(tb[2:3])
-fstat = tb[2] / sum(tb)
-c('hitrate' = unname(hitrate), 
-  'falsealarm' = unname(falsealarm), 
-  'fstat' = unname(fstat)) %>% percent(accuracy = 0.01)
-
-```
-
-## validate(DM)
-
-ArcGIS vignette: 
-RESA data from here:
-https://sonomacounty.maps.arcgis.com/apps/webappviewer/index.html?id=1cab5991f10643b1bc7c16e7769887c2
-https://sonomacounty.maps.arcgis.com/home/item.html?id=9e5d8762b5554765912f591b7540fed4
-Open in ArcGIS Pro, then copy-paste Attributes table into Excel
-
-```{r}
-## holy shit I got damage information!!
-resa <- read.csv('C:/Users/cbowers/Desktop/resa.csv')
-resa[resa == '<Null>'] <- NA
-
-## load parcels (takes a while)
-# parcels <- 
-#   st_read('https://opendata.arcgis.com/datasets/2202c1cd6708441f987ca5552f2d9659_0.geojson', quiet = TRUE) %>% 
-#   st_transform(st_crs(sonoma)) %>% 
-#   st_intersection(aoi)
-  
-## load buildings (takes a while)
-# bldg_sonoma <- st_read('https://socogis.sonomacounty.ca.gov/map/rest/services/BASEPublic/Buildings/FeatureServer/0/query?outFields=*&where=1%3D1&f=geojson', quiet = TRUE) %>% 
-#   st_transform(st_crs(sonoma)) %>% 
-#   st_intersection(aoi)
-
-## crop buildings & parcels to only nonzero cells
-load('C:/Users/cbowers/OneDrive/classes/old/GEOLSCI240 data science for geoscience/geolsci240/hw5_checkpoint.Rdata')
-nonzero.buffer <- nonzero.buffer %>% 
-  rasterToPolygons %>% st_as_sf %>% st_union %>% st_transform(st_crs(sonoma))
-crs_ca <- '+proj=lcc +lat_1=38.33333333333334 +lat_2=39.83333333333334 +lat_0=37.66666666666666 +lon_0=-122 +x_0=2000000 +y_0=500000.0000000002 +datum=NAD83 +units=us-ft +no_defs' 
-bldg_buffer <- bldg_sonoma[nonzero.buffer,] %>% 
-  st_transform(crs_ca) %>% mutate(bldg_sqft = st_area(.)) %>% 
-  st_transform(st_crs(sonoma)) %>% st_centroid
-buildings <- st_intersection(bldg_buffer, parcels)
-
-## identify residential buildings
-residential <- c(
-  "ATTACHED UNIT",
-  "CONDOMINIUM UNIT",
-  "DETACHED UNIT IN A PUD",
-  "DUET",
-  "ENFORCEABLY RESTRICTED DWELLING",
-  "MANUFACTURED HOME CONDOMINIUM LOT",
-  "MANUFACTURED HOME ON URBAN LOT",
-  "ONE DUPLEX (ONE STRUCTURE)",
-  "RURAL RES SFD W/GRANNY UNIT",
-  "RURAL RES W/MISC RES IMP",
-  "RURAL RES/2 OR MORE RES",
-  "RURAL RES/MANUFACTURED HOME",
-  "RURAL RES/SECONDARY USE",
-  "RURAL RES/SINGLE RES",
-  "SFD SECONDARY USE",
-  "SFD W/GRANNY UNIT",
-  "SINGLE FAMILY DWELLING",
-  "SINGLE LIVE/WORK UNIT",
-  "TAXABLE MANUFACTURED HOME/CONDO LOT",
-  "TAXABLE MANUFACTURED HOME/RENTED SITE",
-  "TWO SFD ON SINGLE PARCEL",
-  "WILDCAT SUBDIVISION LOT"
-  )
-
-## keep relevant columns & valuation codes
-res.buildings <- buildings %>%
-  filter(UseCType == 'Residential') %>%
-  filter(UseCDesc %in% residential) %>% 
-  select("APN", "TxbltyDesc", "UseCDesc", "UseCType", "LndSzSF", "V601RollYr",
-         "V601Land", "V601Stru", "V601Fix", "V601FixRP", "V601Grow", "V601TotalL",
-         "bldg_sqft") %>% 
-  mutate(bldg_sqft = as.numeric(bldg_sqft))
-
-## filter out cases when a parcel has multiple structures
-res.buildings <- res.buildings %>% 
-  cbind(st_coordinates(.)) %>% 
-  st_drop_geometry %>% 
-  group_by(APN) %>% 
-  summarize(across(everything(), ~.x[which.max(toNumber(bldg_sqft))])) %>% 
-  st_as_sf(coords = c('X', 'Y'), crs = NAD)
-
-```
-
-```{r}
-## match buildings to damage tags
-# res.buildings <- res.buildings %>% left_join(resa, by = 'APN') 
-
-ggplot() + 
-  geom_sf(data = sonoma %>% st_crop(aoi), color = 'grey70', fill = 'grey95') + 
-  geom_sf(data = aoi, color = 'black', fill = NA) + 
-  geom_sf(data = res.buildings %>% filter(!is.na(OBJECTID)), color = 'grey60') + 
-  geom_sf(data = russian %>% st_crop(aoi)) + 
-  geom_sf(data = res.buildings %>% filter(!is.na(RESA_Status_GIS)), 
-          aes(color = RESA_Status_GIS)) + 
-  scale_color_manual(values = c('darkgreen', baker[2], baker[5], baker[4])) + 
-  theme_void()
-
-resa$RESA_Status_GIS %>% unique
-
-```
-
-```{r}
-## pull inundation heights at specific buildings
-xy <- res.buildings %>% st_transform(crs_ca) %>% st_coordinates
-res.buildings <- res.buildings %>% 
-  mutate(inun = flood.sonoma %>% rast %>% terra::extract(xy) %>% 
-           mutate(layer = case_when(is.na(layer) ~ 0, TRUE ~ layer)) %>% unlist)
-
-ggplot(res.buildings %>% filter(inun>0)) + 
-  geom_density(aes(x = inun, group = RESA_Status_GIS, color = RESA_Status_GIS), size = 1) + 
-  scale_color_manual(values = c('darkgreen', baker[2], baker[5], baker[4])) + 
-  scale_x_origin('Inundation (ft)') + 
-  scale_y_origin('Probability Density')
-
-```
-
-```{r}
-## calculate damage due to the Sonoma inundation map
-wet.bldg <- which(res.buildings$inun > 0 | !is.na(res.buildings$RESA_Status_GIS))
-inundation <- list(matrix(res.buildings$inun[wet.bldg]))
-attributes(inundation)$n.inun <- NA
-attributes(inundation)$buildings <- 
-  st_coordinates(res.buildings) %>% 
-  cbind(id = 1:nrow(.), .) %>% 
-  .[wet.bldg,]
-
-damage <- generate_damage(
-  inundation, 
-  curve = 'average', 
-  probabilistic = TRUE,
-  n.damage = 1e3)
-
-```
-
-```{r}
-## make lots of plots
-damage[[1]] %>% 
-  group_by(bldg) %>% 
-  summarize(damage.min = min(dm), damage.max = max(dm), 
-            damage.mean = mean(dm), damage.med = median(dm),
-            damage.05 = quantile(dm, 0.05), damage.95 = quantile(dm, 0.95)) %>% 
-  left_join(res.buildings %>% mutate(bldg = 1:nrow(.)), by = 'bldg') %>% 
-  mutate(status = case_when(RESA_Status_GIS != 'Orange' ~ RESA_Status_GIS)) %>%
-  mutate(status = factor(status, levels = c('Red', 'Yellow', 'Green'))) %>% 
-  ggplot() + 
-  geom_boxplot(aes(x = damage.mean, y = status, fill = status), 
-               alpha = 0.65) + 
-  # scale_color_manual(values = c(baker[c(5,4)], 'darkgreen'), na.value = 'grey50') + 
-  scale_fill_manual(values = c(baker[c(5,4)], 'darkgreen'), na.value = 'grey50') + 
-  scale_x_origin('Mean Building Damage Ratio', labels = percent_format(accuracy = 1)) 
-
-damage[[1]] %>% 
-  group_by(bldg) %>% 
-  summarize(damage.min = min(dm), damage.max = max(dm), 
-            damage.mean = mean(dm), damage.med = median(dm),
-            damage.05 = quantile(dm, 0.05), damage.95 = quantile(dm, 0.95)) %>% 
-  left_join(res.buildings %>% mutate(bldg = 1:nrow(.)), by = 'bldg') %>% 
-  # mutate(status = case_when(RESA_Status_GIS != 'Orange' ~ RESA_Status_GIS)) %>%
-  mutate(status = factor(RESA_Status_GIS, levels = c('Red', 'Orange', 'Yellow', 'Green'))) %>% 
-  ggplot() + 
-  geom_boxplot(aes(x = damage.mean, y = status, fill = status), 
-               alpha = 0.65) + 
-  # scale_color_manual(values = c(baker[c(5,4)], 'darkgreen'), na.value = 'grey50') + 
-  scale_fill_manual(values = c(baker[c(5,2,4)], 'darkgreen'), na.value = 'grey50') + 
-  scale_x_origin('Mean Building Damage Ratio', labels = percent_format(accuracy = 1)) 
-  
-damage[[1]] %>% 
-  group_by(bldg) %>% 
-  summarize(damage.min = min(dm), damage.max = max(dm), 
-            damage.mean = mean(dm), damage.med = median(dm),
-            damage.05 = quantile(dm, 0.05), damage.95 = quantile(dm, 0.95)) %>% 
-  left_join(res.buildings %>% mutate(bldg = 1:nrow(.)), by = 'bldg') %>% 
-  mutate(status = factor(RESA_Status_GIS, levels = c('Red', 'Orange', 'Yellow', 'Green'))) %>% 
-  arrange(damage.med) %>% 
-  mutate(bldg = 1:nrow(.)) %>% 
-  ggplot() + 
-  geom_point(aes(x = inun, y = damage.med)) + 
-  geom_segment(aes(x = inun, xend = inun, y = damage.05, yend = damage.95), alpha = 0.1) + 
-  scale_color_manual(values = c(baker[c(5,2,4)], 'darkgreen'), na.value = 'grey50') +
-  scale_x_origin('Building Inundation (ft)') + 
-  scale_y_origin('Building Damage Ratio', labels = percent_format(accuracy = 1)) 
-  
-damage[[1]] %>% 
-  group_by(bldg) %>% 
-  summarize(damage.min = min(dm), damage.max = max(dm), 
-            damage.mean = mean(dm), damage.med = median(dm),
-            damage.05 = quantile(dm, 0.05), damage.95 = quantile(dm, 0.95)) %>% 
-  left_join(res.buildings %>% mutate(bldg = 1:nrow(.)), by = 'bldg') %>% 
-  mutate(status = factor(RESA_Status_GIS, levels = c('Green', 'Yellow', 'Orange', 'Red'))) %>% 
-  arrange(status, damage.med) %>% 
-  ungroup %>% 
-  mutate(bldg = 1:nrow(.)) %>% 
-  ggplot() + 
-  geom_segment(aes(x = bldg, xend = bldg, y = damage.05, yend = damage.95, 
-                   color = status), alpha = 0.25, show.legend = FALSE) + 
-  geom_point(aes(x = bldg, y = damage.med, color = status)) + 
-  geom_point(aes(x = bldg, y = damage.med)) + 
-  scale_color_manual(values = c('darkgreen', baker[c(4,2,5)]), na.value = 'grey50') +
-  scale_x_origin() + 
-  scale_y_origin('Building Damage Ratio', labels = percent_format(accuracy = 1)) +
-  theme(axis.title.x = element_blank(), 
-        axis.text.x = element_blank(), 
-        axis.ticks.x = element_blank())
-
-damage[[1]] %>% 
-  group_by(bldg) %>% 
-  summarize(damage.min = min(dm), damage.max = max(dm), 
-            damage.mean = mean(dm), damage.med = median(dm),
-            damage.05 = quantile(dm, 0.05), damage.95 = quantile(dm, 0.95)) %>% 
-  left_join(res.buildings %>% mutate(bldg = 1:nrow(.)), by = 'bldg') %>% 
-  mutate(status = factor(RESA_Status_GIS, levels = c('Green', 'Yellow', 'Orange', 'Red'))) %>% 
-  group_by(status) %>% 
-  arrange(damage.mean) %>% 
-  mutate(p = (1:length(status))/(length(status)+1)) %>% 
-  ggplot() + 
-  geom_step(aes(x = damage.mean, y = 1-p, group = status, color = status), size = 1) + 
-  scale_color_manual(values = c('darkgreen', baker[c(4,2,5)]), na.value = NA) +
-  scale_x_origin('Mean Building Damage Ratio', labels = percent_format(accuracy = 1)) + 
-  scale_y_origin('Probability of Exceedance', labels = percent_format(accuracy = 1))  
-
-res.buildings %>% 
-  
-  
-
-```
-
-```{r}
-## investigate red-tagged buildings with zero inundation
-require(leaflet)
-require(mapboxapi)
-
-pal <- colorFactor(c('darkgreen', baker[4], baker[2], baker[5]), 
-                   domain = c('Green', 'Yellow', 'Orange', 'Red'))
-flood_pal <- colorNumeric(palette = "Blues", domain = values(flood.sonoma), na.color = "transparent")
-
-flood.nonzero <- flood.sonoma %>% 
-  overlay(flood.sonoma>0, fun = function(x,y) ifelse(y, x, NA))
-
-leaflet() %>% 
-  addMapboxTiles(style_id = "light-v9", username = "mapbox") %>% 
-  addRasterImage(flood.nonzero, colors = flood_pal, opacity = 0.5) %>%
-  # addCircleMarkers(data = res.buildings, radius = ~2, 
-  #                  color = ~pal(RESA_Status_GIS), opacity = 1)
-  addCircleMarkers(data = res.buildings %>% 
-                     filter(inun==0 & !is.na(RESA_Status_GIS)),
-                   radius = ~2, color = ~pal(RESA_Status_GIS), opacity = 1) %>% 
-  addLegend(pal = flood_pal, values = values(flood.sonoma), title = "Flood Depth (ft)")
+#   geom_density(aes(x = loss.prcp$loss, color = 'PRCP', fill = 'PRCP', y = ..scaled..),
+#                size = 1, alpha = 0.25) +
+#   geom_density(aes(x = loss.q$loss, color = 'Q', fill = 'Q', y = ..scaled..),
+#                size = 1, alpha = 0.25) +
+#   geom_density(aes(x = loss.inun$loss, color = 'INUN', fill = 'INUN', y = ..scaled..),
+#                size = 1, alpha = 0.25) +
+#   geom_density(aes(x = loss.dm$loss, color = 'DM', fill = 'DM', y = ..scaled..),
+#                size = 1, alpha = 0.25) +
+#   geom_density(aes(x = loss.dv$loss, color = 'DV', fill = 'DV', y = ..scaled..),
+#                size = 1, alpha = 0.25) +
+#   geom_vline(xintercept = loss.all, color = 'grey50') + 
+#   labs(color = 'Model', fill = 'Model') +
+#   scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) +
+#   scale_y_origin()
+
+
+xmax <- 100e6
+xlabel <- 70e6
+g1 <- ggplot(loss.prcp) + 
+  geom_density(aes(x = loss, y = ..scaled..), fill = 'grey70') +
+  geom_density(data = loss.all, aes(x = loss, y = ..scaled..), 
+               color = 'grey50', fill = 'grey90', alpha = 0.25) + 
+  geom_text(data = data.frame(lab = 'G(PRCP)'), 
+            aes(x = xlabel, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin() + 
+  coord_cartesian(xlim = c(0, xmax)) + 
+  theme(axis.title = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = margin(1,1,1,10))
+g2 <- ggplot(loss.q) + 
+  geom_density(aes(x = loss, y = ..scaled..), fill = 'grey70') +
+  geom_density(data = loss.all, aes(x = loss, y = ..scaled..), 
+               color = 'grey50', fill = 'grey90', alpha = 0.25) + 
+  geom_text(data = data.frame(lab = 'G(Q)'), 
+            aes(x = xlabel, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin() + 
+  coord_cartesian(xlim = c(0, xmax)) + 
+  theme(axis.title = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = margin(1,1,1,10))
+g3 <- ggplot(loss.inun) + 
+  geom_density(aes(x = loss, y = ..scaled..), fill = 'grey70') +
+  geom_density(data = loss.all, aes(x = loss, y = ..scaled..), 
+               color = 'grey50', fill = 'grey90', alpha = 0.25) + 
+  geom_text(data = data.frame(lab = 'G(INUN)'), 
+            aes(x = xlabel, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin() + 
+  coord_cartesian(xlim = c(0, xmax)) + 
+  theme(axis.title = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = margin(1,1,1,10))
+g4 <- ggplot(loss.dm) + 
+  geom_density(aes(x = loss, y = ..scaled..), fill = 'grey70') +
+  geom_density(data = loss.all, aes(x = loss, y = ..scaled..), 
+               color = 'grey50', fill = 'grey90', alpha = 0.25) + 
+  geom_text(data = data.frame(lab = 'G(DM)'), 
+            aes(x = xlabel, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin() + 
+  coord_cartesian(xlim = c(0, xmax)) + 
+  theme(axis.title = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = margin(1,1,1,10))
+g5 <- ggplot(loss.dv) + 
+  geom_density(aes(x = loss, y = ..scaled..), fill = 'grey70') +
+  geom_density(data = loss.all, aes(x = loss, y = ..scaled..), 
+               color = 'grey50', fill = 'grey90', alpha = 0.25) + 
+  geom_text(data = data.frame(lab = 'G(DV)'), 
+            aes(x = xlabel, y = 0.8, label = lab), fontface = 'bold') + 
+  geom_vline(xintercept = loss.est, size = 1, linetype = 'dashed') + 
+  scale_x_origin(labels = comma_format(scale = 1e-6, prefix = '$', suffix = 'M')) + 
+  scale_y_origin() + 
+  coord_cartesian(xlim = c(0, xmax)) + 
+  theme(axis.title = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        plot.margin = margin(1,1,1,10))
+
+ggarrange(g1, g4, g2, g5, g3, ncol = 2, nrow = 3) %>% 
+  grid.arrange(top = textGrob(paste('Single-Model Elimination:', year, 'Event'), 
+                              gp = gpar(size = 24)))
 
 
 ```
 
-
-
-```{r}
-ggplot(res.buildings %>% filter(inun > 0)) + 
-  geom_histogram(aes(x = inun, group = RESA_Status_GIS, fill = RESA_Status_GIS), 
-                 bins = sqrt(600)) +
-  scale_fill_manual(values = c('darkgreen', baker[2], baker[5], baker[4]), na.value = 'grey') + 
-  scale_x_origin() + scale_y_origin()
-
-res.buildings %>% 
-  st_drop_geometry %>% 
-  mutate(status = factor(RESA_Status_GIS, levels = c('Green', 'Yellow', 'Orange', 'Red'))) %>% 
-  group_by(status) %>% 
-  summarize(pct_inun = sum(inun>0)/length(inun)) %>% 
-  ggplot() + geom_col(aes(x = status, y = pct_inun, fill = status)) + 
-  scale_fill_manual(values = c('darkgreen', baker[4], baker[2], baker[5]), na.value = 'grey') + 
-  scale_y_origin('Percent of Structures Inundated', labels = percent_format(accuracy = 1))
-  
-tb <- table(!is.na(res.buildings$RESA_Status_GIS), res.buildings$inun>0)
-hitrate = tb[2,2] / sum(tb[1:2,2])
-falsealarm = tb[2,1] / sum(tb[2,1:2])
-fstat = tb[2,2] / (sum(tb)-tb[1,1])
-
-```
 
 
 

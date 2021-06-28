@@ -41,19 +41,27 @@ generate_damage <- function(inundation, buildings, foundations, curve,
       .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
         if (probabilistic) {
           found_ht <- assign_foundations(buildings[wet.bldg,], foundations)
+          # found_ht <- unname(unlist(st_drop_geometry(buildings[wet.bldg, 'raised_m'])))
         } else {
           found_ht <- rep(0, length(wet.bldg))
         }
-        found_ht %>% sweep(inundation[[i]], 1, ., FUN = '-') %>% 
+        temp <- found_ht %>% sweep(inundation[[i]], 1, ., FUN = '-') %>% 
           apply(2, function(x) ifelse(x<0, 0, x)) %>% as.matrix
+        temp[] <- ifelse(temp[]>0 & inundation[[n.inun]][]==0, 0, temp[])
+        temp
       }
   cat('\n')
+  
+  # ggplot(buildings[wet.bldg,] %>% cbind(depth = unlist(depth)) %>% arrange(desc(status))) + 
+  #   geom_point(aes(x = inun, y = depth, color = status)) + 
+  #   scale_color_manual(values = c(baker[c(5,4)], 'darkgreen', 'grey50')) + 
+  #   scale_x_origin()
   
   print('converting flood depths to damage ratios...')
 
   ## load depth-damage curve information  
-  load('./_data/depthdamage.Rdata')
-  # load('C:/Users/cbowers/Desktop/depthdamage.Rdata')
+  # load('./_data/depthdamage.Rdata')
+  load('C:/Users/cbowers/Desktop/depthdamage.Rdata')
   hazus <- hazus %>% 
     as.data.frame %>% 
     select(-ft) %>% 
@@ -103,6 +111,8 @@ generate_damage <- function(inundation, buildings, foundations, curve,
 ## randomly assign foundation info to buildings
 assign_foundations <- function(buildings, foundations) {
   found <- names(foundations)[-1]
+  buildings <- buildings %>% 
+    mutate(found_type = as.character(NA), found_ht = as.numeric(NA))
   for (geoid in unique(buildings$GEOID)) {
     n <- buildings %>% filter(GEOID == geoid) %>% nrow
     buildings[buildings$GEOID == geoid, c('found_type', 'found_ht')] <- 
@@ -133,16 +143,17 @@ assign_foundations <- function(buildings, foundations) {
 
 generate_damage_deterministic <- function(inun, curve, hazus, flemo, beta.dist) {
   dm <- matrix(0, nrow = nrow(inun), ncol = ncol(inun))
-  inunval <- unname(unlist(inun))
+  inunval <- c(unname(unlist(inun)))
+  inunval <- ifelse(inunval > 50, 50, inunval)
   inunval_clean <- inunval[!is.na(inunval) & round(inunval) > 0]
-  inunval_clean <- ifelse(inunval_clean > 50, 50, inunval_clean)
   
   if (curve == 'hazus') {
     dm[inunval > 0] <- interp1(hazus$ft, hazus$x1, inunval[inunval>0])/100
   } else if (curve == 'flemo') {
     dm[inunval > 0] <- interp1(flemo$ft, flemo$PQ_SFH, inunval[inunval>0])/100
   } else if (curve == 'beta') {
-    dm[inunval>0] <- interp1(beta.dist$water_ft, beta.dist$mu, inunval[inunval>0])
+    dm[!is.na(inunval) & round(inunval) > 0] <- 
+      interp1(beta.dist$water_ft, beta.dist$mu, inunval_clean)
   } else if (curve == 'average') {
     dm[!is.na(inunval) & round(inunval) > 0] <- 
       cbind(interp1(hazus$ft, hazus$x1, inunval_clean)/100, 
@@ -172,9 +183,9 @@ generate_damage_deterministic <- function(inun, curve, hazus, flemo, beta.dist) 
 
 generate_damage_probabilistic <- function(inun, curve, hazus, flemo, beta.dist) {
   dm <- matrix(0, nrow = nrow(inun), ncol = ncol(inun))
-  inunval <- unname(unlist(inun))
+  inunval <- c(unname(unlist(inun)))
+  inunval <- ifelse(inunval > 50, 50, inunval)
   inunval_clean <- inunval[!is.na(inunval) & round(inunval) > 0]
-  inunval_clean <- ifelse(inunval_clean > 50, 50, inunval_clean)
   
   if (curve == 'hazus') {
     dm[inunval > 0] <- 

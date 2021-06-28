@@ -473,6 +473,21 @@ ggplot(precip) +
   theme(plot.title = element_text(family = 'Segoe UI Semibold'))
 ggsave('C:/Users/cbowers/Desktop/PRCP_2019.png', height = 4, width = 3.5*4/2.5)
 
+## what percentile is the recorded precip in this simulated distribution?
+q.prcp <- c()
+pb <- txtProgressBar(min = 0, max = 100, style = 3)
+for (i in 1:100) {
+  precip <- generate_precip(
+    AR = catalog[411,] %>% 
+      transmute(n.AR = 1:nrow(.), IVT_max, duration),
+    catalog = catalog, 
+    probabilistic = TRUE,
+    n.precip = 1000)
+  q.prcp[i] <- sum(precip$precip_mm < catalog[411, 'precip'])/nrow(precip)
+  setTxtProgressBar(pb, i)
+}
+mean(q.prcp)
+
 ```
 
 
@@ -807,41 +822,47 @@ load('C:/Users/cbowers/Desktop/catalog.Rdata')
 catalog <- catalog %>%
   left_join(combined %>% transmute(AR, tp = tp3), by = 'AR')
 
-tp <- map_dfc(.x = 1:100, .f = function(x) {
-  generate_hydrograph(
-    precip = catalog %>%
-      filter(!is.na(tp)) %>%
-      transmute(n.AR = 1:nrow(.), n.precip = 1,
-                IVT_max, duration, precip_mm = precip),
-    runoff = catalog %>%
-      filter(!is.na(tp)) %>%
-      transmute(n.AR = AR, n.precip = 1, n.runoff = 1,
-                IVT_max, duration,
-                precip_mm = precip, runoff_mm = runoff),
-    catalog = catalog,
-    probabilistic = TRUE,
-    n.hydro = 1
-    ) %>% 
-    arrange(tp_hrs) %>% 
-    select(tp_hrs)
-  })
+# tp <- map_dfc(.x = 1:100, .f = function(x) {
+#   generate_hydrograph(
+#     precip = catalog %>%
+#       filter(!is.na(tp)) %>%
+#       transmute(n.AR = 1:nrow(.), n.precip = 1,
+#                 IVT_max, duration, precip_mm = precip),
+#     runoff = catalog %>%
+#       filter(!is.na(tp)) %>%
+#       transmute(n.AR = AR, n.precip = 1, n.runoff = 1,
+#                 IVT_max, duration,
+#                 precip_mm = precip, runoff_mm = runoff),
+#     catalog = catalog,
+#     probabilistic = TRUE,
+#     n.hydro = 1
+#     ) %>% 
+#     arrange(tp_hrs) %>% 
+#     select(tp_hrs)
+#   })
+# tp.plot <- tp %>%
+#   apply(1, median) %>% 
+#   data.frame(tp.median = .) %>% 
+#   cbind(tp.obs = sort(catalog$tp))
 
-tp.plot <- tp %>%
-  apply(1, median) %>% 
-  data.frame(tp.median = .) %>% 
-  cbind(tp.obs = sort(catalog$tp))
+fit <- fitdist(catalog$tp[!is.na(catalog$tp)], 'lnorm')$estimate
+tp <- catalog %>% 
+  filter(!is.na(tp)) %>% 
+  arrange(tp) %>% 
+  select(tp.obs = tp) %>% 
+  mutate(p = (1:nrow(.))/(nrow(.)+1)) %>% 
+  mutate(tp.lnorm = qlnorm(p, fit[1], fit[2]))
 
-tp.max <- max(c(max(tp.plot$tp.obs), max(tp.plot$tp.median)))
-ggplot(tp.plot) +
-  geom_point(aes(x = sort(tp.obs), y = sort(tp.median))) +
+tp.max <- max(c(max(tp$tp.obs), max(tp$tp.lnorm)))
+ggplot(tp) +
+  geom_point(aes(x = sort(tp.obs), y = sort(tp.lnorm))) +
   scale_x_origin('Observed Time to Peak Flow (hrs)') +
-  scale_y_origin('Median Simulated Time to Peak Flow (hrs)') +
+  scale_y_origin('Theoretical Lognormal Quantile') +
   geom_parity() + theme_bw() + 
   coord_fixed(xlim = c(0, tp.max), ylim = c(0, tp.max)) + 
   theme(legend.position = 'bottom', text = element_text(family = 'Segoe UI'))
 ggsave('C:/Users/cbowers/Desktop/q_tp.png', height = 4)
 
-fitdist(catalog$tp[!is.na(catalog$tp)], 'lnorm')
 
 ```
 
@@ -849,16 +870,22 @@ fitdist(catalog$tp[!is.na(catalog$tp)], 'lnorm')
 ## soil moisture
 fit <- fitdist(catalog$sm, 'lnorm')$estimate
 
-sm <- map_dfc(.x = 1:100, .f = ~sort(rlnorm(nrow(catalog), fit[1], fit[2]))) %>% 
-  apply(1, median) %>% 
-  data.frame(sm.median = .) %>% 
-  cbind(sm.obs = sort(catalog$sm)) 
+sm <- catalog %>% 
+  arrange(sm) %>% 
+  select(sm.obs = sm) %>% 
+  mutate(p = (1:nrow(.))/(nrow(.)+1)) %>% 
+  mutate(sm.lnorm = qlnorm(p, fit[1], fit[2]))
 
-sm.max <- max(c(max(sm$sm.obs), max(sm$sm.median)))
+# sm <- map_dfc(.x = 1:100, .f = ~sort(rlnorm(nrow(catalog), fit[1], fit[2]))) %>% 
+#   apply(1, median) %>% 
+#   data.frame(sm.median = .) %>% 
+#   cbind(sm.obs = sort(catalog$sm)) 
+
+sm.max <- max(c(max(sm$sm.obs), max(sm$sm.lnorm)))
 ggplot(sm) + 
-  geom_point(aes(x = sm.obs, y = sm.median)) + 
+  geom_point(aes(x = sm.obs, y = sm.lnorm)) + 
   scale_x_origin('Observed Soil Moisture (mm)') + 
-  scale_y_origin('Simulated Soil Moisture (mm)') + geom_parity() + 
+  scale_y_origin('Theoretical Lognormal Quantile') + geom_parity() + 
   coord_fixed(xlim = c(0, sm.max), ylim = c(0, sm.max)) + 
   theme_bw()
 ggsave('C:/Users/cbowers/Desktop/q_sm.png', height = 4)
@@ -872,7 +899,7 @@ g1 <- ggplot(precip.plot) +
   scale_x_origin('Observed Value', 
                  labels = comma_format(scale = 1/25.4, accuracy = 1),
                  breaks = seq(0, 20, 4)*25.4) + 
-  scale_y_origin('Simulated Median', 
+  scale_y_origin('Model Fit', 
                  labels = comma_format(scale = 1/25.4, accuracy = 1),
                  breaks = seq(0, 20, 4)*25.4) + 
   ggtitle(waiver(), subtitle = 'Precipitation (in)') + 
@@ -882,9 +909,9 @@ g1 <- ggplot(precip.plot) +
         plot.subtitle = element_text(family = 'Segoe UI Semibold'))
 
 g2 <- ggplot(sm) + 
-  geom_point(aes(x = sm.obs, y = sm.median)) + 
+  geom_point(aes(x = sm.obs, y = sm.lnorm)) + 
   scale_x_origin('Observed Value') + 
-  scale_y_origin('Simulated Median') + 
+  scale_y_origin('Model Fit') + 
   ggtitle(waiver(), subtitle = 'Soil Moisture (mm)') + 
   coord_fixed(xlim = c(0, sm.max), ylim = c(0, sm.max)) + 
   geom_parity() + theme_bw() + 
@@ -894,17 +921,17 @@ g2 <- ggplot(sm) +
 g3 <- ggplot(hydrograph.plot) + 
   geom_point(aes(x = sort(Qp.obs)*mft^3, y = sort(Qp.median)*mft^3)) + 
   scale_x_origin('Observed Value', labels = comma_format(scale = 1e-3)) + 
-  scale_y_origin('Simulated Median', labels = comma_format(scale = 1e-3)) + 
+  scale_y_origin('Model Fit', labels = comma_format(scale = 1e-3)) + 
   ggtitle(waiver(), subtitle = 'Peak Streamflow (kcfs)') + 
   coord_fixed(xlim = c(0, hydro.max), ylim = c(0, hydro.max)) + 
   geom_parity() + theme_bw() + 
   theme(text = element_text(family = 'Segoe UI'), 
         plot.subtitle = element_text(family = 'Segoe UI Semibold'))
 
-g4 <- ggplot(tp.plot) +
-  geom_point(aes(x = sort(tp.obs), y = sort(tp.median))) +
+g4 <- ggplot(tp) +
+  geom_point(aes(x = sort(tp.obs), y = sort(tp.lnorm))) +
   scale_x_origin('Observed Value') +
-  scale_y_origin('Simulated Median') +
+  scale_y_origin('Model Fit') +
   ggtitle(waiver(), subtitle = 'Time to Peak Streamflow (hrs)') + 
   coord_fixed(xlim = c(0, tp.max), ylim = c(0, tp.max)) + 
   geom_parity() + theme_bw() + 
@@ -973,6 +1000,8 @@ ggsave('C:/Users/cbowers/Desktop/quantileplot.png', height = 5.5, width = 6)
 # ggsave('C:/Users/cbowers/Desktop/dists.png', width = 7, height = 4)
 
 ```
+
+#### Q 2019
 
 ```{r}
 ## download real gauge info
@@ -1078,166 +1107,82 @@ ggsave('C:/Users/cbowers/Desktop/Q_2019.png', height = 4, width = 3.25/2.5*4)
 ```
 
 ```{r}
-flow.cumsum <- flow.matrix
-flow.cumsum[is.na(flow.cumsum)] <- 0
-flow.cumsum <- apply(flow.cumsum, 2, cumsum)
-flow.cumsum[flow.cumsum == 0] <- NA
-flow.cdf <- data.frame(t = sequence) %>% 
-  mutate(min = apply(flow.cumsum, 1, Min), 
-         q05 = apply(flow.cumsum, 1, function(x) quantile(x, 0.05, na.rm = TRUE)),
-         q25 = apply(flow.cumsum, 1, function(x) quantile(x, 0.25, na.rm = TRUE)),
-         med = apply(flow.cumsum, 1, function(x) median(x, na.rm = TRUE)),
-         mean = apply(flow.cumsum, 1, Mean), 
-         q75 = apply(flow.cumsum, 1, function(x) quantile(x, 0.75, na.rm = TRUE)),
-         q95 = apply(flow.cumsum, 1, function(x) quantile(x, 0.95, na.rm = TRUE)), 
-         max = apply(flow.cumsum, 1, Max)) %>% 
-  mutate(min = ifelse(is.infinite(min), NA, min),
-         mean = ifelse(is.nan(mean), NA, mean), 
-         max = ifelse(is.infinite(max), NA, max))
-  
-ggplot(flow.cdf) + 
-  geom_line(aes(x = t, y = min*mft^3*6, color = 'q01')) + 
-  geom_line(aes(x = t, y = q05*mft^3*6, color = 'q05')) + 
-  geom_line(aes(x = t, y = q25*mft^3*6, color = 'q25')) + 
-  geom_line(aes(x = t, y = med*mft^3*6, color = 'q50')) + 
-  geom_line(aes(x = t, y = mean*mft^3*6, color = 'q51')) + 
-  geom_line(aes(x = t, y = q75*mft^3*6, color = 'q75')) + 
-  geom_line(aes(x = t, y = q95*mft^3*6, color = 'q95')) + 
-  geom_line(aes(x = t, y = max*mft^3*6, color = 'q99')) + 
-  scale_color_scico_d(palette = 'vik') + 
-  geom_line(data = flow, 
-            aes(x = ymd_hms(dateTime, tz = 'America/Los_Angeles'), y = cumsum(Flow_Inst)*15), size = 1) + 
-  scale_y_origin('Streamflow at USGS 11463500 (cfs)', labels = comma) + 
-  scale_x_datetime('', limits = c(ymd_hms('2019-02-24 12:00:00PM', tz = 'America/Los_Angeles'),
-                              ymd_hms('2019-03-02 12:00:00AM', tz = 'America/Los_Angeles')), 
-                   date_breaks = 'day', date_labels = '%b %d', 
-                   expand = c(0,0)) + 
-  theme(legend.position = c(0.9,0.65))
-
-ggplot(flow.cdf) + 
-  geom_ribbon(aes(x = t, ymin = q05*mft^3*6, ymax = q95*mft^3*6, fill = '90th p.')) + 
-  geom_ribbon(aes(x = t, ymin = q25*mft^3*6, ymax = q75*mft^3*6, fill = 'IQR')) +
-  geom_line(aes(x = t, y = med*mft^3*6, fill = 'Median'), color = 'grey25') + 
-  scale_fill_manual(values = c('grey90', 'grey70', 'grey25')) + 
-  geom_line(data = flow, 
-            aes(x = ymd_hms(dateTime, tz = 'America/Los_Angeles'), y = cumsum(Flow_Inst)*15), size = 1) + 
-  scale_y_origin('Streamflow at USGS 11463500 (cfs)', labels = comma) + 
-  scale_x_datetime('', limits = c(ymd_hms('2019-02-24 12:00:00PM', tz = 'America/Los_Angeles'),
-                              ymd_hms('2019-03-02 12:00:00AM', tz = 'America/Los_Angeles')), 
-                   date_breaks = 'day', date_labels = '%b %d', 
-                   expand = c(0,0)) + 
-  theme(legend.position = c(0.25,0.65))
+# flow.cumsum <- flow.matrix
+# flow.cumsum[is.na(flow.cumsum)] <- 0
+# flow.cumsum <- apply(flow.cumsum, 2, cumsum)
+# flow.cumsum[flow.cumsum == 0] <- NA
+# flow.cdf <- data.frame(t = sequence) %>% 
+#   mutate(min = apply(flow.cumsum, 1, Min), 
+#          q05 = apply(flow.cumsum, 1, function(x) quantile(x, 0.05, na.rm = TRUE)),
+#          q25 = apply(flow.cumsum, 1, function(x) quantile(x, 0.25, na.rm = TRUE)),
+#          med = apply(flow.cumsum, 1, function(x) median(x, na.rm = TRUE)),
+#          mean = apply(flow.cumsum, 1, Mean), 
+#          q75 = apply(flow.cumsum, 1, function(x) quantile(x, 0.75, na.rm = TRUE)),
+#          q95 = apply(flow.cumsum, 1, function(x) quantile(x, 0.95, na.rm = TRUE)), 
+#          max = apply(flow.cumsum, 1, Max)) %>% 
+#   mutate(min = ifelse(is.infinite(min), NA, min),
+#          mean = ifelse(is.nan(mean), NA, mean), 
+#          max = ifelse(is.infinite(max), NA, max))
+#   
+# ggplot(flow.cdf) + 
+#   geom_line(aes(x = t, y = min*mft^3*6, color = 'q01')) + 
+#   geom_line(aes(x = t, y = q05*mft^3*6, color = 'q05')) + 
+#   geom_line(aes(x = t, y = q25*mft^3*6, color = 'q25')) + 
+#   geom_line(aes(x = t, y = med*mft^3*6, color = 'q50')) + 
+#   geom_line(aes(x = t, y = mean*mft^3*6, color = 'q51')) + 
+#   geom_line(aes(x = t, y = q75*mft^3*6, color = 'q75')) + 
+#   geom_line(aes(x = t, y = q95*mft^3*6, color = 'q95')) + 
+#   geom_line(aes(x = t, y = max*mft^3*6, color = 'q99')) + 
+#   scale_color_scico_d(palette = 'vik') + 
+#   geom_line(data = flow, 
+#             aes(x = ymd_hms(dateTime, tz = 'America/Los_Angeles'), y = cumsum(Flow_Inst)*15), size = 1) + 
+#   scale_y_origin('Streamflow at USGS 11463500 (cfs)', labels = comma) + 
+#   scale_x_datetime('', limits = c(ymd_hms('2019-02-24 12:00:00PM', tz = 'America/Los_Angeles'),
+#                               ymd_hms('2019-03-02 12:00:00AM', tz = 'America/Los_Angeles')), 
+#                    date_breaks = 'day', date_labels = '%b %d', 
+#                    expand = c(0,0)) + 
+#   theme(legend.position = c(0.9,0.65))
+# 
+# ggplot(flow.cdf) + 
+#   geom_ribbon(aes(x = t, ymin = q05*mft^3*6, ymax = q95*mft^3*6, fill = '90th p.')) + 
+#   geom_ribbon(aes(x = t, ymin = q25*mft^3*6, ymax = q75*mft^3*6, fill = 'IQR')) +
+#   geom_line(aes(x = t, y = med*mft^3*6, fill = 'Median'), color = 'grey25') + 
+#   scale_fill_manual(values = c('grey90', 'grey70', 'grey25')) + 
+#   geom_line(data = flow, 
+#             aes(x = ymd_hms(dateTime, tz = 'America/Los_Angeles'), y = cumsum(Flow_Inst)*15), size = 1) + 
+#   scale_y_origin('Streamflow at USGS 11463500 (cfs)', labels = comma) + 
+#   scale_x_datetime('', limits = c(ymd_hms('2019-02-24 12:00:00PM', tz = 'America/Los_Angeles'),
+#                               ymd_hms('2019-03-02 12:00:00AM', tz = 'America/Los_Angeles')), 
+#                    date_breaks = 'day', date_labels = '%b %d', 
+#                    expand = c(0,0)) + 
+#   theme(legend.position = c(0.25,0.65))
 
 ```
 
 
 ## FIGURE 5: INUN 
-```{r obs}
-#### load observed floodplain #### 
 
-## load 100-year floodplain
-NFHL <- st_read('D:/Research/_gis/California/_floodhazard/NFHL_06_20190810/S_Fld_Haz_Ar.shp', quiet = TRUE) %>%
-  st_transform(crs_dem)
-floodzone <- function(x) {
-  if (x %in% c('A', 'A99', 'AE', 'AH', 'AO')) {
-    return('YES')
-  } else if (x %in% c('V', 'VE')) {
-    return('WAVE')
-  } else if (x %in% c('D', 'X')) {
-    return('NO')
-  } else if (x == 'OPEN WATER') {
-    return('WATER')
-  } else {
-    return(NA)
-  }
-}
-NFHL <- NFHL %>%
-  mutate(FLOODPLAIN = factor(apply(data.frame(NFHL$FLD_ZONE), 1, function(x) floodzone(x)))) %>%
-  dplyr::select(FLOODPLAIN, geometry) %>%
-  subset(FLOODPLAIN == 'YES') %>%
-  mutate(NFHL = 1)
-
-## get rid of additional floodplain pixels
-remove.pixels <-
-  st_read('D:/Research/_gis/California/_hydrology/nhd_majorriversandcreeks/MajorRiversAndCreeks.shp',
-          quiet = TRUE) %>%
-  st_zm %>%
-  st_transform(st_crs(sonoma)) %>%
-  st_crop(sonoma) %>%
-  filter(GNIS_Name %in% c('Dry Creek', 'Mark West Creek', 'Austin Creek')) %>%
-  filter(!(OBJECTID %in% c(1294,1297,1298,42552,106984,1263,1264,
-                           106986,20379,57388,1653,1652,116351))) %>%
-  st_transform(proj4string(dem)) %>%
-  st_union %>%
-  st_buffer(dist = 250) %>%
-  st_difference(russian %>% st_transform(proj4string(dem)) %>% st_buffer(500) %>% st_union) %>%
-  as('Spatial') %>%
-  rasterize(dem)
-
-## create raster of observed values
-obs.full <- NFHL %>%
-  dplyr::select(NFHL) %>%
-  st_transform(crs_dem) %>%
-  st_cast('POLYGON') %>%
-  st_crop(dem) %>%
-  as('Spatial') %>%
-  rasterize(dem, getCover = TRUE)
-obs.full <- obs.full > 0.5
-obs <- obs.full %>% overlay(remove.pixels, fun = function(x, y) ifelse(is.na(y), x, 0))
-# 
-# ## save out values
-# save(NFHL, obs, obs.full, remove.pixels, file = 'C:/Users/cbowers/Desktop/NFHL.Rdata')
-# load('C:/Users/cbowers/Desktop/NFHL.Rdata')
-
-```
 
 ```{r}
-#### load simulated floodplain ####
+ggplot(samples) + geom_point(aes(x = SGCn, y = fstat))
+ggplot(samples) + geom_point(aes(x = m, y = fstat))
+ggplot(samples) + geom_point(aes(x = edge, y = fstat))
 
-## find best-fit simulation
-# samples <- 
-#   read.table('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-17 rp100/samples_rp100.txt',
-#              header = TRUE) %>% 
-#   mutate(id = 1:nrow(.))
-# fstat <- 
-#   map_dfr(.x = 1:100, .f = function(i) {
-#     sim <- 
-#       paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-17 rp100/results/rpflow', 
-#              i, '.max') %>% raster %>% 
-#       overlay(dem, fun = function(x,y) ifelse(y>1, x, NA))
-#     temp <- obs.full %>% overlay(sim, fun = function(x,y) {
-#       ifelse(x > 0 & y > 0, 0, ifelse (x > 0 & y <= 0, -1, ifelse(x <= 0 & y > 0, 1, NA)))})
-#     tb <- table(temp[])
-#     hitrate = tb[2] / sum(tb[1:2])
-#     falsealarm = tb[3] / sum(tb[2:3])
-#     fstat = tb[2] / sum(tb)
-#     return(c(
-#       'id' = i,
-#       'hitrate' = unname(hitrate), 
-#       'falsealarm' = unname(falsealarm), 
-#       'fstat' = unname(fstat)))
-#   })
-# samples <- samples %>% left_join(fstat, by = 'id')
+## decisions: keep everything as is (SGCn = 0.035, m = 4, edgewidth = mean(edge.in))
 
 ```
 
 
 ```{r}
-# ## load old simulation
-# load('C:/Users/cbowers/Desktop/dem.Rdata')
-# sim <- 
-#   paste0('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-17 rp100/results/rpflow', 
-#          93, '.max') %>% raster %>% 
-#   overlay(dem, fun = function(x,y) ifelse(y>1, x, NA))
-
-## load new simulation
+## load best-fit simulation
 crs_dem <- st_crs(6417)
 ext <- extent(1895000, 1935000, 579500, 616500)
-aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(crs_dem)
+aoi <- ext %>% as('SpatialPolygons') %>% st_as_sf %>% st_set_crs(6417)
 blank <- raster(ext, resolution = c(40,40), crs = projection(aoi))
 dem <- raster('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.dem.asc', 
               crs = projection(aoi))
-sim <- raster('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/results/rp100.max', 
+
+sim <- raster('C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-27 rp100/results/rpflow78.max', 
               crs = projection(aoi)) %>% 
   overlay(dem.hydro, fun = function(x,y) ifelse(is.na(y), 0, x))
 
@@ -1259,8 +1204,6 @@ ggplot() +
   geom_sf(data = sonoma %>% st_transform(crs_dem) %>% st_crop(aoi),
           fill = 'grey95', color = 'grey70') + 
   geom_sf(data = aoi, fill = NA, color = 'black') + 
-  # geom_raster(data = raster.df(remove.pixels) %>% filter(!is.na(value)),
-  #             aes(x=x, y=y), fill = 'grey50') + 
   geom_raster(data = temp %>% raster.df %>% filter(!is.na(value)),
               aes(x=x, y=y, fill = factor(value))) +
   scale_fill_manual('Legend', values = scico(11, palette = 'lisbon')[c(3,6,10)],
@@ -1293,7 +1236,65 @@ ggsave('C:/Users/cbowers/Desktop/INUN_validation.png', height = 4)
 * plot gage height timeseries here
 
 ```{r}
-## plot the timeseries
+## get real discharge & gage height data
+gauges <- whatNWISsites(stateCd = '06', countyCd = '097') 
+gauges <- gauges %>% 
+  filter(grepl('RUSSIAN', station_nm)) %>% 
+  filter(str_length(site_no) == 8)
+flow <- readNWISdata(
+  sites = gauges$site_no, parameterCd = param, 
+  startDate = catalog$start_day[year.id], 
+  endDate = ymd(catalog$end_day[year.id]) + days(1), 
+  service = 'iv', tz = 'America/Los_Angeles') %>% 
+  renameNWISColumns %>% 
+  filter(!is.na(Flow_Inst) | !is.na(GH_Inst))
+gauges <- gauges %>% filter(site_no %in% unique(flow$site_no))
+
+## plot gages of interest
+gauges %>% 
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = st_crs(sonoma)) %>% 
+  ggplot() + 
+  geom_sf(data = sonoma, color = 'grey70', fill = 'grey95') + 
+  geom_sf(data = st_union(sonoma), color = 'grey50', fill = NA) + 
+  geom_sf(data = aoi, fill = NA, color = 'black') + 
+  geom_sf(data = russian %>% st_crop(sonoma), color = 'grey30', size = 1) + 
+  geom_sf(aes(color = site_no), size = 3) + 
+  scale_color_manual(values = c('black', baker)) + 
+  theme_void()
+
+## generate .gauge and .stage files
+width <- raster('C:/Users/cbowers/Desktop/LISFLOOD/new_rasters/russian.width.asc')
+crs(width) <- crs(dem)
+gauges.write <- gauges %>% 
+  filter(site_no != 11463500) %>% 
+  arrange(site_no) %>% 
+  st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = 4269) %>% 
+  st_transform(6417) %>% 
+  st_buffer(40) %>% 
+  exact_extract(width, ., progress = FALSE, include_xy = TRUE) %>%
+  lapply(function(x) x[complete.cases(x),]) %>% 
+  lapply(function(x) x[which.max(x$coverage_fraction),]) %>% 
+  do.call(rbind, .) %>% 
+  # mutate(direction = c('E', 'S', 'W', 'S', 'W')) %>% 
+  mutate(direction = c('E', 'W', 'W', 'W', 'W')) %>% 
+  select(x, y, direction, value) %>% 
+  as.matrix %>% 
+  rbind(c(nrow(.), NA, NA, NA), .)
+
+write.table(gauges.write,
+  file = 'C:/Users/cbowers/Desktop/russian.gauge', na = '', 
+  sep = '\t', row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(gauges.write[,1:2],
+  file = 'C:/Users/cbowers/Desktop/russian.stage', na = '', 
+  sep = '\t', row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# temp1 <- gauges %>% 
+#   st_as_sf(coords = c('dec_long_va', 'dec_lat_va'), crs = 4269)
+# temp2 <- gauges.write[-1,1:2] %>% 
+#   apply(2, as.numeric) %>% 
+#   data.frame %>%  
+#   st_as_sf(coords = c('x', 'y'), crs = 6417)
+# mapview(temp1) + mapview(temp2, col.regions = 'red')
 
 ```
 

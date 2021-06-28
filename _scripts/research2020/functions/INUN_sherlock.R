@@ -14,32 +14,29 @@
 ## @return
 ## inundation (data.frame): list of inundation heights (meters) by building & simulation
 
-generate_inundation <- function(hydrograph, buildings, foundations, 
+generate_inundation <- function(hydrograph, buildings,
                                 probabilistic = FALSE, n.inun = 1, 
-                                n = 5, p = 1, alpha = 0.89) {
+                                n = 5, p = 2, alpha = 0.70) {
 
   ## fix input parameters
   if (!probabilistic) n.inun <- 1
 
   ## separate building coordinates from building info
-  buildings.coord <- buildings %>% st_set_crs(NAD) %>% 
-    st_transform(crs(dem)) %>% st_coordinates
+  buildings.coord <- buildings %>% st_transform(6417) %>% st_coordinates
   
   ## load sample information
-  samples <- read.table('C:/Users/cbowers/Desktop/samples_grid.txt', header = TRUE)
+  # samples <- read.table('/scratch/users/cbowers/LISFLOOD/grid_new/samples_grid.txt', header = TRUE)
   # samples <- read.table('C:/Users/cbowers/Desktop/samples_grid.txt', header = TRUE)
+
+  load('_data/samples.Rdata')
   samples_scale <- samples %>% 
+    filter(!is.na(cv)) %>% 
     mutate(Qp.std = Qp %>% punif(min = 0, max = 8000) %>% 
              qunif(min = 1, max = exp(2)) %>% log,
            Qp.norm = qnorm(Qp.std/2)) %>% 
     mutate(tp.std = tp %>% punif(min = 0, max = 200) %>% 
              qunif(min = 1, max = exp(2)) %>% log,
-           tp.norm = qnorm(tp.std/2)) %>% 
-    mutate(sim = 1:nrow(.))
-  
-  samples_scale_new <- samples_scale
-  samples_new <- samples
-  load('C:/Users/cbowers/Desktop/samples.Rdata')
+           tp.norm = qnorm(tp.std/2))
 
   print('calculating inundation depths...')
   
@@ -52,15 +49,31 @@ generate_inundation <- function(hydrograph, buildings, foundations,
       .export = c('surrogate'),
       .combine = 'cbind',
       .options.snow = list(progress = function(n) setTxtProgressBar(pb, n))) %dopar% {
+        edgewidth <- ifelse(probabilistic, 
+          exp(runif(1e3)*2) %>% punif(min = 1, max = exp(2)) %>% 
+            #qunif(min = 12.5, max = 23.31279), 17.57)
+            qunif(min = 15, max = 18), 17.57)
         surrogate(
-          Qp = hydrograph$Qp_m3s[i], tp = hydrograph$tp_hrs[i],
+          Qp = hydrograph$Qp_m3s[i]*23.31279/edgewidth,
+          tp = hydrograph$tp_hrs[i],
           sample.table = samples_scale,
-          sample.loc = '/home/groups/bakerjw/cbowers/LISFLOOD/grid/maxfiles/',
-          # sample.loc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-02-21 gridded/results/',
+          sample.loc = '/scratch/users/cbowers/LISFLOOD/grid_new/results/max/',
+          # sample.loc = 'C:/Users/cbowers/Desktop/LISFLOOD/sonoma_sherlock/21-05-31 gridded/results/',
           n, p, alpha, probabilistic) %>% 
-          rast %>% terra::extract(buildings.coord)
+          rast %>% terra::extract(buildings.coord) %>% 
+          unlist %>% unname %>% 
+          c(random)  #for troubleshooting
         }
   cat('\n')
+
+  ## report + remove troubleshooting
+  random.sim <<- inundation.list %>% 
+    lapply(function(inun) as.matrix(inun)) %>% 
+    lapply(function(inun) inun[nrow(inun),]) %>% 
+    do.call(cbind, .)
+  inundation.list <- inundation.list %>% 
+    lapply(function(inun) as.matrix(inun)) %>% 
+    lapply(function(inun) inun[-nrow(inun),] %>% as.matrix)
   
   ## clean out buildings + simulations that never flood
   wet.bldg <- inundation.list %>% 
@@ -72,6 +85,11 @@ generate_inundation <- function(hydrograph, buildings, foundations,
   inundation <- inundation.list %>% 
     lapply(function(inun) inun[wet.bldg, wet.sim] %>% as.matrix)
   rm(inundation.list)
+
+  ## convert all inundation heights to feet
+  mft <- 3.28084
+  inundation <- inundation %>% 
+    lapply(function(inun) apply(inun, 2, function(x) x*mft))
 
   ## attach building + simulation information
   attr(inundation, 'wet.bldg') <- wet.bldg
@@ -102,7 +120,9 @@ surrogate <- function(sample.table, sample.loc, Qp, tp, n, p, alpha, probabilist
   ## perform normal score transformation on new point
   Qp.new <- interp1(sort(sample.table$Qp), sort(sample.table$Qp.norm), Qp)*alpha
   tp.new <- interp1(sort(sample.table$tp), sort(sample.table$tp.norm), tp)*(1-alpha)
-  
+  #Qp.new <- Qp %>% punif(min = 0, max = 8000) %>% qunif(min = 1, max = exp(2)) %>% log
+  #tp.new <- tp %>% punif(min = 0, max = 200) %>% qunif(min = 1, max = exp(2)) %>% log
+
   ## find distances to new point
   distances <- sample.table %>% 
     mutate(Qp.scale = Qp.norm*alpha, tp.scale = tp.norm*(1-alpha)) %>% 
@@ -112,6 +132,7 @@ surrogate <- function(sample.table, sample.loc, Qp, tp, n, p, alpha, probabilist
   if (distances[1,'dist']==0) {
     ## predict based on exact match
     prediction <- raster(paste0(sample.loc, 'gridded', distances[1,'sim'], '.max'))
+    random <<- NA
     
   } else {
     ## find the nearest maps
@@ -123,12 +144,14 @@ surrogate <- function(sample.table, sample.loc, Qp, tp, n, p, alpha, probabilist
     
     if (probabilistic) {
       ## choose a random map from weighted sampling
-      prediction <- sample(nearest, 1, prob = weights) %>% 
-        paste0(sample.loc, 'gridded', ., '.max') %>% raster
+      random <<- sample(nearest, 1, prob = weights)  #use this for troubleshooting
+      prediction <- raster(paste0(sample.loc, 'gridded', random, '.max'))      
+
     } else {
       ## calculate weighted average of all maps
       files <- paste0(sample.loc, 'gridded', nearest, '.max')
       prediction <- foreach (ii = 1:n, .combine = '+') %do% (raster(files[ii])*weights[ii])
+      random <<- NA
     }
   }
   return(prediction)
